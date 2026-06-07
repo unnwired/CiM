@@ -1,0 +1,4 @@
+{
+  "manifestUrl": "",
+  "comment": "Deprecated. FlowX uses config/github_updates.json and GitHub Releases (unnwired/flowx-updates)."
+}

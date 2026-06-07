@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "canonical_sectors": [
+    "Commodities",
+    "Consumer Discretionary",
+    "Energy",
+    "Fast Moving Consumer Goods (FMCG)",
+    "Financial Services",
+    "Healthcare",
+    "Industrials",
+    "Information Technology",
+    "Services",
+    "Telecommunication",
+    "Utilities",
+    "Diversified",
+    "Unclassified"
+  ],
+  "use_exchange_labels": true,
+  "macro_sector_schema_version": 2,
+  "rules": [],
+  "symbol_overrides": {
+    "NTPC": "Energy",
+    "AXISBANK": "Financial Services",
+    "KOTAKBANK": "Financial Services",
+    "ONGC": "Energy",
+    "SBIN": "Financial Services",
+    "BAJFINANCE": "Financial Services"
+  }
+}

@@ -1,0 +1,3 @@
+          <motionPanelLEFT_START />
+          <div style={{ borderBottom: '1px solid var(--border)', padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <motionPanelLEFT_END />

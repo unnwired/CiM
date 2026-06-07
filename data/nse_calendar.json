@@ -1,0 +1,9 @@
+{
+  "holidays": [],
+  "special_sessions": [],
+  "_notes": [
+    "holidays: YYYY-MM-DD when NSE cash equity is closed on a weekday (Monday–Friday). Example: Republic Day.",
+    "special_sessions: YYYY-MM-DD when NSE is open on Saturday or Sunday (rare). Add the date here so the updater treats it as a session day.",
+    "Session rule: On a session day, before 16:00 IST, today's daily bar may be refreshed (post-close corrections). From 16:00 IST onward, today's bar is no longer forced to refresh."
+  ]
+}

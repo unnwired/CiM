@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+pandas
+yfinance
+tradingview-screener
+requests
+cryptography

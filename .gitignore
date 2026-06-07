@@ -1,0 +1,65 @@
+# FlowX license / vendor secrets (never commit)
+config/.flowx_vendor_secret
+**/config/.flowx_vendor_secret
+config/.build_license_secret
+**/config/.build_license_secret
+config/build_license_secret
+config/build_license_secret.txt
+data/.flowx-license
+**/data/.flowx-license
+
+# Installer build artifacts with embedded secret
+installer/license_secret.iss
+installer/generated_license_secret.pas
+installer/output/
+
+# Local notes that may contain secrets or machine codes
+codes.txt
+
+# Env files (often hold FLOWX_LICENSE_SECRET)
+.env
+.env.*
+!.env.example
+
+# NSE market data (local only — restore from export/backup, not git)
+data/nse_data.db
+data/nse_dataset.csv
+**/data/nse_data.db
+**/data/nse_dataset.csv
+data/*.db
+
+# Optional: other generated/local data
+data/screener_profile/
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# Large local/runtime trees
+runtime/
+backups_full/
+backups/
+UPDATE/
+installer/
+FlowX-Update-*/
+\!OLD
+\!OLD/**
+
+# Node / build artifacts
+node_modules/
+frontend/node_modules/
+desktop/node_modules/
+frontend/build/
+
+# Python cache / encrypted build artifacts (dev tree uses .py sources)
+__pycache__/
+*.pyc
+*.pyo
+*.pyc.enc
+
+# Local scratch and editor tooling
+.cursor/
+export_run*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db

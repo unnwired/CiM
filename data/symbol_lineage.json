@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "symbols": {
+    "UNITDSPR": {
+      "isin": "INE854D01024",
+      "min_history_start": "2005-01-01",
+      "notes": "United Spirits Limited. NSE MCDOWELL-N -> UNITDSPR (2024-06-07). Yahoo delisted MCDOWELL-N.NS; use BSE series for deep history.",
+      "historical_yahoo": "UNITDSPR.BO",
+      "import_bse_volume": false,
+      "predecessors": [
+        {
+          "nse_symbol": "MCDOWELL-N",
+          "yahoo_symbol": "UNITDSPR.BO",
+          "effective_until": "2024-06-06"
+        }
+      ]
+    }
+  }
+}

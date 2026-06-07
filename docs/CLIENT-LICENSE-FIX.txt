@@ -1,0 +1,27 @@
+FlowX will not start without data\.flowx-license
+==============================================
+
+This is normal if FlowX was copied manually or the installer did not finish the license step.
+
+ON THE CLIENT PC (once per machine)
+------------------------------------
+1. Open PowerShell in the FlowX folder (e.g. D:\...\FlowX)
+2. Double-click Repair-FlowXLicense.bat
+   OR run:
+   powershell -ExecutionPolicy Bypass -File ".\scripts\Repair-FlowXLicense.ps1"
+3. Copy the MACHINE CODE shown and send it to FlowX support.
+4. Support sends back an INSTALL KEY for that machine only.
+5. Paste the install key when prompted.
+6. Run start_flowx.bat again.
+
+ON YOUR DEV PC (support / vendor)
+---------------------------------
+1. Client sends machine code (from step 3 above).
+2. Set the same secret you used when building the installer:
+   $env:FLOWX_LICENSE_SECRET = "your-secret"
+3. Run:
+   powershell -ExecutionPolicy Bypass -File ".\scripts\Generate-FlowXInstallKey.ps1" -MachineCode "XXXXXXXX..."
+4. Send the printed install key to the client (email/chat).
+
+Reinstalling the full app also creates the license IF the client completes the
+installer license screens. Repair is faster when the app files are already there.

@@ -1,0 +1,897 @@
+[
+  {
+    "name": "OPM%^",
+    "items": [
+      {
+        "symbol": "PHOENIXLTD",
+        "type": "stock"
+      },
+      {
+        "symbol": "LODHA",
+        "type": "stock"
+      },
+      {
+        "symbol": "SUPREMEIND",
+        "type": "stock"
+      },
+      {
+        "symbol": "OFSS",
+        "type": "stock"
+      },
+      {
+        "symbol": "TCS",
+        "type": "stock"
+      },
+      {
+        "symbol": "HINDZINC",
+        "type": "stock"
+      },
+      {
+        "symbol": "ETERNAL",
+        "type": "stock"
+      },
+      {
+        "symbol": "VBL",
+        "type": "stock"
+      },
+      {
+        "symbol": "TECHM",
+        "type": "stock"
+      },
+      {
+        "symbol": "UNIONBANK",
+        "type": "stock"
+      },
+      {
+        "symbol": "AUBANK",
+        "type": "stock"
+      },
+      {
+        "symbol": "PERSISTENT",
+        "type": "stock"
+      },
+      {
+        "symbol": "ANGELONE",
+        "type": "stock"
+      },
+      {
+        "symbol": "PNBHOUSING",
+        "type": "stock"
+      },
+      {
+        "symbol": "ATUL",
+        "type": "stock"
+      },
+      {
+        "symbol": "TRENT",
+        "type": "stock"
+      },
+      {
+        "symbol": "RRKABEL",
+        "type": "stock"
+      },
+      {
+        "symbol": "JINDALSTEL",
+        "type": "stock"
+      },
+      {
+        "symbol": "SIS",
+        "type": "stock"
+      },
+      {
+        "symbol": "KAJARIACER",
+        "type": "stock"
+      },
+      {
+        "symbol": "GRINDWELL",
+        "type": "stock"
+      },
+      {
+        "symbol": "COFORGE",
+        "type": "stock"
+      },
+      {
+        "symbol": "BAJAJ-AUTO",
+        "type": "stock"
+      },
+      {
+        "symbol": "HEROMOTOCO",
+        "type": "stock"
+      },
+      {
+        "symbol": "PFIZER",
+        "type": "stock"
+      },
+      {
+        "symbol": "UNITDSPR",
+        "type": "stock"
+      }
+    ]
+  },
+  {
+    "name": "Stocks I am Interested In",
+    "items": [
+      {
+        "symbol": "VBL",
+        "type": "stock"
+      },
+      {
+        "symbol": "SUZLON",
+        "type": "stock"
+      },
+      {
+        "symbol": "JWL",
+        "type": "stock"
+      },
+      {
+        "symbol": "JSWENERGY",
+        "type": "stock"
+      },
+      {
+        "symbol": "TATAPOWER",
+        "type": "stock"
+      },
+      {
+        "symbol": "NTPC",
+        "type": "stock"
+      },
+      {
+        "symbol": "ONGC",
+        "type": "stock"
+      },
+      {
+        "symbol": "POWERGRID",
+        "type": "stock"
+      },
+      {
+        "symbol": "ABB",
+        "type": "stock"
+      },
+      {
+        "symbol": "SIEMENS",
+        "type": "stock"
+      },
+      {
+        "symbol": "ENRIN",
+        "type": "stock"
+      },
+      {
+        "symbol": "CGPOWER",
+        "type": "stock"
+      },
+      {
+        "symbol": "NTPCGREEN",
+        "type": "stock"
+      },
+      {
+        "symbol": "NHPC",
+        "type": "stock"
+      },
+      {
+        "symbol": "TORNTPOWER",
+        "type": "stock"
+      },
+      {
+        "symbol": "DIXON",
+        "type": "stock"
+      },
+      {
+        "symbol": "LLOYDSME",
+        "type": "stock"
+      },
+      {
+        "symbol": "SUNPHARMA",
+        "type": "stock"
+      },
+      {
+        "symbol": "WAAREEENER",
+        "type": "stock"
+      },
+      {
+        "symbol": "GENUSPOWER",
+        "type": "stock"
+      },
+      {
+        "symbol": "TRENT",
+        "type": "stock"
+      },
+      {
+        "symbol": "CHAMBLFERT",
+        "type": "stock"
+      },
+      {
+        "symbol": "ANANTRAJ",
+        "type": "stock"
+      },
+      {
+        "symbol": "RRKABEL",
+        "type": "stock"
+      },
+      {
+        "symbol": "COCHINSHIP",
+        "type": "stock"
+      },
+      {
+        "symbol": "GRAVITA",
+        "type": "stock"
+      },
+      {
+        "symbol": "PRESTIGE",
+        "type": "stock"
+      },
+      {
+        "symbol": "LODHA",
+        "type": "stock"
+      },
+      {
+        "symbol": "PHOENIXLTD",
+        "type": "stock"
+      },
+      {
+        "symbol": "GODFRYPHLP",
+        "type": "stock"
+      },
+      {
+        "symbol": "MARUTI",
+        "type": "stock"
+      },
+      {
+        "symbol": "CRAFTSMAN",
+        "type": "stock"
+      },
+      {
+        "symbol": "ENDURANCE",
+        "type": "stock"
+      },
+      {
+        "symbol": "GRINDWELL",
+        "type": "stock"
+      },
+      {
+        "symbol": "GODREJIND",
+        "type": "stock"
+      },
+      {
+        "symbol": "LUPIN",
+        "type": "stock"
+      },
+      {
+        "symbol": "SUPREMEIND",
+        "type": "stock"
+      },
+      {
+        "symbol": "COLPAL",
+        "type": "stock"
+      },
+      {
+        "symbol": "PFIZER",
+        "type": "stock"
+      },
+      {
+        "symbol": "PERSISTENT",
+        "type": "stock"
+      },
+      {
+        "symbol": "HONAUT",
+        "type": "stock"
+      },
+      {
+        "symbol": "SANSERA",
+        "type": "stock"
+      },
+      {
+        "symbol": "IGIL",
+        "type": "stock"
+      },
+      {
+        "symbol": "PREMIERENE",
+        "type": "stock"
+      },
+      {
+        "symbol": "UNITDSPR",
+        "type": "stock"
+      },
+      {
+        "symbol": "MINDACORP",
+        "type": "stock"
+      },
+      {
+        "symbol": "SYNGENE",
+        "type": "stock"
+      },
+      {
+        "symbol": "THERMAX",
+        "type": "stock"
+      },
+      {
+        "symbol": "FINPIPE",
+        "type": "stock"
+      },
+      {
+        "symbol": "GODREJPROP",
+        "type": "stock"
+      },
+      {
+        "symbol": "ASTRAMICRO",
+        "type": "stock"
+      }
+    ]
+  },
+  {
+    "name": "Earnings+ (Apr-May)",
+    "items": [
+      {
+        "symbol": "BAJAJCON",
+        "type": "stock"
+      },
+      {
+        "symbol": "WAAREERTL",
+        "type": "stock"
+      },
+      {
+        "symbol": "PNBHOUSING",
+        "type": "stock"
+      },
+      {
+        "symbol": "MASTEK",
+        "type": "stock"
+      },
+      {
+        "symbol": "ANGELONE",
+        "type": "stock"
+      },
+      {
+        "symbol": "GMDCLTD",
+        "type": "stock"
+      },
+      {
+        "symbol": "PERSISTENT",
+        "type": "stock"
+      },
+      {
+        "symbol": "NESTLEIND",
+        "type": "stock"
+      },
+      {
+        "symbol": "TATAELXSI",
+        "type": "stock"
+      },
+      {
+        "symbol": "IREDA",
+        "type": "stock"
+      },
+      {
+        "symbol": "360ONE",
+        "type": "stock"
+      },
+      {
+        "symbol": "OFSS",
+        "type": "stock"
+      },
+      {
+        "symbol": "CANFINHOME",
+        "type": "stock"
+      },
+      {
+        "symbol": "SPLPETRO",
+        "type": "stock"
+      },
+      {
+        "symbol": "TRENT",
+        "type": "stock"
+      },
+      {
+        "symbol": "PARAS",
+        "type": "stock"
+      },
+      {
+        "symbol": "HONAUT",
+        "type": "stock"
+      },
+      {
+        "symbol": "SANSERA",
+        "type": "stock"
+      },
+      {
+        "symbol": "IGIL",
+        "type": "stock"
+      },
+      {
+        "symbol": "PREMIERENE",
+        "type": "stock"
+      },
+      {
+        "symbol": "UNITDSPR",
+        "type": "stock"
+      },
+      {
+        "symbol": "MINDACORP",
+        "type": "stock"
+      },
+      {
+        "symbol": "COLPAL",
+        "type": "stock"
+      },
+      {
+        "symbol": "FINPIPE",
+        "type": "stock"
+      },
+      {
+        "symbol": "GODREJPROP",
+        "type": "stock"
+      }
+    ]
+  },
+  {
+    "name": "Swing",
+    "items": [
+      {
+        "symbol": "POWERGRID",
+        "type": "stock"
+      },
+      {
+        "symbol": "RRKABEL",
+        "type": "stock"
+      },
+      {
+        "symbol": "TCS",
+        "type": "stock"
+      },
+      {
+        "symbol": "THERMAX",
+        "type": "stock"
+      },
+      {
+        "symbol": "GALLANTT",
+        "type": "stock"
+      },
+      {
+        "symbol": "ATHERENERG",
+        "type": "stock"
+      },
+      {
+        "symbol": "PGEL",
+        "type": "stock"
+      },
+      {
+        "symbol": "DIXON",
+        "type": "stock"
+      },
+      {
+        "symbol": "ENRIN",
+        "type": "stock"
+      },
+      {
+        "symbol": "SIEMENS",
+        "type": "stock"
+      },
+      {
+        "symbol": "ABB",
+        "type": "stock"
+      },
+      {
+        "symbol": "ANANTRAJ",
+        "type": "stock"
+      },
+      {
+        "symbol": "LODHA",
+        "type": "stock"
+      },
+      {
+        "symbol": "ASTRAMICRO",
+        "type": "stock"
+      },
+      {
+        "symbol": "TRENT",
+        "type": "stock"
+      },
+      {
+        "symbol": "ZYDUSLIFE",
+        "type": "stock"
+      },
+      {
+        "symbol": "OFSS",
+        "type": "stock"
+      },
+      {
+        "symbol": "HAVELLS",
+        "type": "stock"
+      },
+      {
+        "symbol": "NESTLEIND",
+        "type": "stock"
+      },
+      {
+        "symbol": "FACT",
+        "type": "stock"
+      },
+      {
+        "symbol": "CANFINHOME",
+        "type": "stock"
+      },
+      {
+        "symbol": "VBL",
+        "type": "stock"
+      }
+    ]
+  },
+  {
+    "name": "Stocks coming out of downtrend",
+    "items": [
+      {
+        "symbol": "BAJFINANCE",
+        "type": "stock"
+      },
+      {
+        "symbol": "ITC",
+        "type": "stock"
+      },
+      {
+        "symbol": "IOC",
+        "type": "stock"
+      },
+      {
+        "symbol": "GRASIM",
+        "type": "stock"
+      },
+      {
+        "symbol": "JIOFIN",
+        "type": "stock"
+      },
+      {
+        "symbol": "BRITANNIA",
+        "type": "stock"
+      },
+      {
+        "symbol": "BPCL",
+        "type": "stock"
+      },
+      {
+        "symbol": "PIDILITIND",
+        "type": "stock"
+      },
+      {
+        "symbol": "CIPLA",
+        "type": "stock"
+      },
+      {
+        "symbol": "MAXHEALTH",
+        "type": "stock"
+      },
+      {
+        "symbol": "DABUR",
+        "type": "stock"
+      },
+      {
+        "symbol": "HINDPETRO",
+        "type": "stock"
+      },
+      {
+        "symbol": "SRF",
+        "type": "stock"
+      },
+      {
+        "symbol": "BHARTIHEXA",
+        "type": "stock"
+      },
+      {
+        "symbol": "SWIGGY",
+        "type": "stock"
+      },
+      {
+        "symbol": "UNOMINDA",
+        "type": "stock"
+      },
+      {
+        "symbol": "PRESTIGE",
+        "type": "stock"
+      },
+      {
+        "symbol": "HDBFS",
+        "type": "stock"
+      },
+      {
+        "symbol": "PETRONET",
+        "type": "stock"
+      },
+      {
+        "symbol": "360ONE",
+        "type": "stock"
+      },
+      {
+        "symbol": "AIIL",
+        "type": "stock"
+      },
+      {
+        "symbol": "TATACOMM",
+        "type": "stock"
+      },
+      {
+        "symbol": "3MINDIA",
+        "type": "stock"
+      },
+      {
+        "symbol": "ESCORTS",
+        "type": "stock"
+      },
+      {
+        "symbol": "PGHH",
+        "type": "stock"
+      },
+      {
+        "symbol": "POONAWALLA",
+        "type": "stock"
+      },
+      {
+        "symbol": "CENTRALBK",
+        "type": "stock"
+      },
+      {
+        "symbol": "ITCHOTELS",
+        "type": "stock"
+      },
+      {
+        "symbol": "CRISIL",
+        "type": "stock"
+      },
+      {
+        "symbol": "JUBLFOOD",
+        "type": "stock"
+      },
+      {
+        "symbol": "MEDANTA",
+        "type": "stock"
+      },
+      {
+        "symbol": "GILLETTE",
+        "type": "stock"
+      },
+      {
+        "symbol": "MSUMI",
+        "type": "stock"
+      },
+      {
+        "symbol": "AWL",
+        "type": "stock"
+      },
+      {
+        "symbol": "ASAHIINDIA",
+        "type": "stock"
+      },
+      {
+        "symbol": "CASTROLIND",
+        "type": "stock"
+      },
+      {
+        "symbol": "EMAMILTD",
+        "type": "stock"
+      },
+      {
+        "symbol": "SUNDRMFAST",
+        "type": "stock"
+      },
+      {
+        "symbol": "SYNGENE",
+        "type": "stock"
+      },
+      {
+        "symbol": "CHALET",
+        "type": "stock"
+      },
+      {
+        "symbol": "VENTIVE",
+        "type": "stock"
+      },
+      {
+        "symbol": "KEC",
+        "type": "stock"
+      },
+      {
+        "symbol": "PGEL",
+        "type": "stock"
+      },
+      {
+        "symbol": "DEVYANI",
+        "type": "stock"
+      },
+      {
+        "symbol": "BLUEDART",
+        "type": "stock"
+      },
+      {
+        "symbol": "FINPIPE",
+        "type": "stock"
+      },
+      {
+        "symbol": "MINDACORP",
+        "type": "stock"
+      },
+      {
+        "symbol": "SIGNATURE",
+        "type": "stock"
+      },
+      {
+        "symbol": "BBTC",
+        "type": "stock"
+      },
+      {
+        "symbol": "PVRINOX",
+        "type": "stock"
+      },
+      {
+        "symbol": "INTELLECT",
+        "type": "stock"
+      },
+      {
+        "symbol": "JLHL",
+        "type": "stock"
+      },
+      {
+        "symbol": "HCG",
+        "type": "stock"
+      },
+      {
+        "symbol": "TTKPRESTIG",
+        "type": "stock"
+      },
+      {
+        "symbol": "WESTLIFE",
+        "type": "stock"
+      },
+      {
+        "symbol": "SUDARSCHEM",
+        "type": "stock"
+      },
+      {
+        "symbol": "GARFIBRES",
+        "type": "stock"
+      },
+      {
+        "symbol": "DODLA",
+        "type": "stock"
+      },
+      {
+        "symbol": "FDC",
+        "type": "stock"
+      },
+      {
+        "symbol": "BECTORFOOD",
+        "type": "stock"
+      },
+      {
+        "symbol": "SUPRAJIT",
+        "type": "stock"
+      },
+      {
+        "symbol": "GREENLAM",
+        "type": "stock"
+      },
+      {
+        "symbol": "SAPPHIRE",
+        "type": "stock"
+      },
+      {
+        "symbol": "MAPMYINDIA",
+        "type": "stock"
+      },
+      {
+        "symbol": "GULFOILLUB",
+        "type": "stock"
+      },
+      {
+        "symbol": "SUNTECK",
+        "type": "stock"
+      }
+    ]
+  },
+  {
+    "name": "+Earnings April2026",
+    "items": [
+      {
+        "symbol": "TANLA",
+        "type": "stock"
+      },
+      {
+        "symbol": "LODHA",
+        "type": "stock"
+      },
+      {
+        "symbol": "HINDZINC",
+        "type": "stock"
+      },
+      {
+        "symbol": "LTF",
+        "type": "stock"
+      },
+      {
+        "symbol": "CHENNPETRO",
+        "type": "stock"
+      },
+      {
+        "symbol": "M&MFIN",
+        "type": "stock"
+      },
+      {
+        "symbol": "CANFINHOME",
+        "type": "stock"
+      },
+      {
+        "symbol": "MRPL",
+        "type": "stock"
+      },
+      {
+        "symbol": "LTM",
+        "type": "stock"
+      },
+      {
+        "symbol": "INFY",
+        "type": "stock"
+      },
+      {
+        "symbol": "HSCL",
+        "type": "stock"
+      },
+      {
+        "symbol": "UNOMINDA",
+        "type": "stock"
+      },
+      {
+        "symbol": "HAVELLS",
+        "type": "stock"
+      },
+      {
+        "symbol": "OFSS",
+        "type": "stock"
+      },
+      {
+        "symbol": "TATAELXSI",
+        "type": "stock"
+      },
+      {
+        "symbol": "BAJAJCON",
+        "type": "stock"
+      },
+      {
+        "symbol": "WAAREERTL",
+        "type": "stock"
+      },
+      {
+        "symbol": "NESTLEIND",
+        "type": "stock"
+      },
+      {
+        "symbol": "TRENT",
+        "type": "stock"
+      }
+    ]
+  },
+  {
+    "name": "Jayraj",
+    "items": [
+      {
+        "symbol": "SBIN",
+        "type": "stock"
+      },
+      {
+        "symbol": "ONGC",
+        "type": "stock"
+      },
+      {
+        "symbol": "HYUNDAI",
+        "type": "stock"
+      },
+      {
+        "symbol": "JIOFIN",
+        "type": "stock"
+      },
+      {
+        "symbol": "MTARTECH",
+        "type": "stock"
+      },
+      {
+        "symbol": "IDEA",
+        "type": "stock"
+      }
+    ]
+  }
+]

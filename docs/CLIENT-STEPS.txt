@@ -1,0 +1,51 @@
+FLOWX UPDATE - CLIENT PC ONLY
+
+=============================
+
+
+
+1. Close FlowX completely.
+
+
+
+2. Extract the ZIP support sent you (folder like FlowX-Update-1.0.2).
+
+
+
+3. Put that folder inside your FlowX UPDATE folder (no typing paths):
+
+   D:\FlowX\UPDATE\FlowX-Update-1.0.2
+
+   (Replace D:\FlowX with your FlowX install folder.)
+
+
+
+4. Double-click Install-Client-Update.bat inside the extracted folder.
+   FlowX install is detected automatically from the UPDATE folder path.
+
+
+
+5. Wait until it says update complete.
+
+   Only if support told you to re-apply without re-running the bat:
+   run Apply-Update.bat from the FlowX install folder.
+
+
+
+6. If license is missing, double-click Repair-FlowXLicense.bat in the FlowX folder.
+
+
+
+7. Double-click start_flowx.bat in your FlowX folder.
+
+
+
+Support needs if it fails:
+
+- update-apply.log
+
+- backend-startup.err.log
+
+  (both in FlowX\runtime\logs\)
+
+

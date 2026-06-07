@@ -1,0 +1,66 @@
+  useEffect(() => {
+    axios.get(`${API}/api/layout`).then(r => {
+      if (r.data.moversPaneWidth) setPaneWidth(Number(r.data.moversPaneWidth) || 360);
+      if (r.data.moversChartLayout) setChartLayout(String(r.data.moversChartLayout));
+      if (r.data.moversTimeframe) setTimeframe(r.data.moversTimeframe);
+      if (r.data.moversTimeframe2) setTimeframe2(r.data.moversTimeframe2);
+      if (r.data.moversTimeframe3) setTimeframe3(normalizeSavedTimeframe3(r.data.moversTimeframe3));
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => { persistEmaSet(emas); }, [emas]);
+  useEffect(() => { persistVolumeVisible(volumeVisible); }, [volumeVisible]);
+
+  useEffect(() => {
+    function onEmaPrefs(e) {
+      if (!e?.detail) return;
+      setEmas(prev => (JSON.stringify(prev) === JSON.stringify(e.detail) ? prev : e.detail));
+    }
+    function onVolumePrefs(e) {
+      if (typeof e?.detail !== 'boolean') return;
+      setVolumeVisible(prev => (prev === e.detail ? prev : e.detail));
+    }
+    function onStorage(e) {
+      if (e.key === 'flowx.chart.ema') setEmas(getPersistedEmaSet());
+      if (e.key === 'flowx.chart.volumeVisible') setVolumeVisible(getPersistedVolumeVisible(true));
+    }
+    window.addEventListener(EMA_PREFS_UPDATED_EVENT, onEmaPrefs);
+    window.addEventListener(VOLUME_PREFS_UPDATED_EVENT, onVolumePrefs);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(EMA_PREFS_UPDATED_EVENT, onEmaPrefs);
+      window.removeEventListener(VOLUME_PREFS_UPDATED_EVENT, onVolumePrefs);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!viewOpen) { setViewMenuRect(null); return; }
+    const el = viewRef.current;
+    if (!el) return;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      const width = 230;
+      setViewMenuRect({ top: r.bottom + 4, left: Math.max(8, r.right - width), width });
+    };
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, [viewOpen]);
+
+  useEffect(() => {
+    function onDocDown(e) {
+      if (viewRef.current && !viewRef.current.contains(e.target)) setViewOpen(false);
+    }
+    document.addEventListener('mousedown', onDocDown);
+    return () => document.removeEventListener('mousedown', onDocDown);
+  }, []);
+
+  useEffect(() => { fetchMovers(); }, [fetchMovers]);
+  useEffect(() => {
+    const h = () => fetchMovers();
+    window.addEventListener(MOVERS_REFRESH_EVENT, h);
+    return () => window.removeEventListener(MOVERS_REFRESH_EVENT, h);
+  }, [fetchMovers]);
+  useEffect(() => { if (page !== safePage) setPage(safePage); }, [page, safePage]);
+

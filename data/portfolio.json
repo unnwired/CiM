@@ -1,0 +1,100 @@
+{
+  "items": [
+    {
+      "symbol": "CHAMBLFERT",
+      "type": "stock"
+    },
+    {
+      "symbol": "HINDUNILVR",
+      "type": "stock"
+    },
+    {
+      "symbol": "PFC",
+      "type": "stock"
+    },
+    {
+      "symbol": "NTPCGREEN",
+      "type": "stock"
+    },
+    {
+      "symbol": "IRCTC",
+      "type": "stock"
+    },
+    {
+      "symbol": "SUZLON",
+      "type": "stock"
+    },
+    {
+      "symbol": "GRSE",
+      "type": "stock"
+    },
+    {
+      "symbol": "HINDZINC",
+      "type": "stock"
+    },
+    {
+      "symbol": "ENGINERSIN",
+      "type": "stock"
+    },
+    {
+      "symbol": "IREDA",
+      "type": "stock"
+    },
+    {
+      "symbol": "KWIL",
+      "type": "stock"
+    },
+    {
+      "symbol": "RECLTD",
+      "type": "stock"
+    },
+    {
+      "symbol": "MAZDOCK",
+      "type": "stock"
+    },
+    {
+      "symbol": "NESTLEIND",
+      "type": "stock"
+    },
+    {
+      "symbol": "OFSS",
+      "type": "stock"
+    },
+    {
+      "symbol": "TRENT",
+      "type": "stock"
+    },
+    {
+      "symbol": "VGUARD",
+      "type": "stock"
+    },
+    {
+      "symbol": "RRKABEL",
+      "type": "stock"
+    },
+    {
+      "symbol": "GRINDWELL",
+      "type": "stock"
+    },
+    {
+      "symbol": "MARUTI",
+      "type": "stock"
+    },
+    {
+      "symbol": "LUPIN",
+      "type": "stock"
+    },
+    {
+      "symbol": "SUPREMEIND",
+      "type": "stock"
+    },
+    {
+      "symbol": "ENRIN",
+      "type": "stock"
+    },
+    {
+      "symbol": "PARAS",
+      "type": "stock"
+    }
+  ]
+}

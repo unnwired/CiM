@@ -1,0 +1,1 @@
+﻿Update complete (1.0.5). Start FlowX from start_flowx.bat or the desktop shortcut.

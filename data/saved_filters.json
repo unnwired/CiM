@@ -1,0 +1,347 @@
+[
+  {
+    "name": "3D MACD+ 2W MACD-",
+    "filters": [
+      {
+        "filter_type": "marketcap",
+        "from_value": 50000000000,
+        "to_value": null,
+        "from_raw": "50B",
+        "to_raw": "",
+        "label": "Mkt Cap ≥ 50B",
+        "enabled": true
+      },
+      {
+        "filter_type": "macd",
+        "source": "macd",
+        "timeframe": "3D",
+        "condition": "above",
+        "pct_value": 0,
+        "target": "signal",
+        "target_value": 0,
+        "label": "MACD Level (3D) > MACD Signal",
+        "enabled": true
+      },
+      {
+        "filter_type": "macd_hist_chain",
+        "timeframe": "2W",
+        "bars_to_compare": 6,
+        "allowed_stragglers": 2,
+        "histogram_side": "negative",
+        "chain_mode": "receding",
+        "allow_cross_zero": false,
+        "label": "MACD Hist (2W) receding 6 bars · stragglers 2 · neg · same-side",
+        "enabled": true
+      },
+      {
+        "filter_type": "macd",
+        "source": "signal",
+        "timeframe": "3D",
+        "condition": "below",
+        "pct_value": 0,
+        "target": "value",
+        "target_value": 0,
+        "label": "MACD Signal (3D) < 0",
+        "enabled": true
+      },
+      {
+        "filter_type": "ema",
+        "ema_period": 100,
+        "timeframe": "3D",
+        "condition": "above",
+        "pct_value": 0,
+        "target": "ema",
+        "target_ema_period": 200,
+        "label": "EMA 100 (3D) > EMA 200 (3D)",
+        "enabled": false
+      }
+    ]
+  },
+  {
+    "name": "2W Open Close to 21EMA",
+    "filters": [
+      {
+        "filter_type": "ema",
+        "ema_period": 21,
+        "timeframe": "2W",
+        "condition": "above",
+        "pct_value": 0,
+        "target": "ema",
+        "target_ema_period": 50,
+        "label": "EMA 21 (2W) > EMA 50 (2W)",
+        "enabled": true
+      },
+      {
+        "filter_type": "macd_hist_chain",
+        "timeframe": "1W",
+        "bars_to_compare": 6,
+        "allowed_stragglers": 3,
+        "histogram_side": "negative",
+        "chain_mode": "receding",
+        "allow_cross_zero": false,
+        "label": "MACD Hist (1W) receding 6 bars · stragglers 3 · neg · same-side",
+        "enabled": true
+      },
+      {
+        "filter_type": "ema",
+        "ema_period": 100,
+        "timeframe": "1D",
+        "condition": "above",
+        "pct_value": 0,
+        "target": "ema",
+        "target_ema_period": 200,
+        "label": "EMA 100 (1D) > EMA 200 (1D)",
+        "enabled": false
+      },
+      {
+        "filter_type": "ema",
+        "ema_period": 21,
+        "timeframe": "1D",
+        "condition": "below",
+        "pct_value": 0,
+        "target": "ema",
+        "target_ema_period": 50,
+        "label": "EMA 21 (1D) < EMA 50 (1D)",
+        "enabled": true
+      },
+      {
+        "filter_type": "price",
+        "timeframe": "1D",
+        "condition": "below",
+        "pct_value": 0,
+        "target": "ema",
+        "ema_period": 50,
+        "label": "Price < EMA 50 (1D)",
+        "enabled": true
+      },
+      {
+        "filter_type": "price",
+        "timeframe": "2W",
+        "condition": "above",
+        "pct_value": 0,
+        "target": "ema",
+        "ema_period": 21,
+        "label": "Price > EMA 21 (2W)",
+        "enabled": true
+      }
+    ]
+  },
+  {
+    "name": "Stocks Coming Out of Downtrend /Swing 04",
+    "filters": [
+      {
+        "filter_type": "marketcap",
+        "from_value": 50000000000,
+        "to_value": null,
+        "from_raw": "50B",
+        "to_raw": "",
+        "label": "Mkt Cap ≥ 50B",
+        "enabled": true
+      },
+      {
+        "filter_type": "macd",
+        "source": "macd",
+        "timeframe": "2W",
+        "condition": "above",
+        "pct_value": 0,
+        "target": "signal",
+        "target_value": 0,
+        "label": "MACD Level (2W) > MACD Signal",
+        "enabled": true
+      },
+      {
+        "filter_type": "macd",
+        "source": "signal",
+        "timeframe": "2W",
+        "condition": "below",
+        "pct_value": 0,
+        "target": "value",
+        "target_value": 0,
+        "label": "MACD Signal (2W) < 0",
+        "enabled": true
+      },
+      {
+        "filter_type": "ema",
+        "ema_period": 200,
+        "timeframe": "3D",
+        "condition": "above",
+        "pct_value": 0,
+        "target": "ema",
+        "target_ema_period": 21,
+        "label": "EMA 200 (3D) > EMA 21 (3D)",
+        "enabled": true
+      },
+      {
+        "filter_type": "price",
+        "timeframe": "3D",
+        "condition": "above",
+        "pct_value": 0,
+        "target": "ema",
+        "ema_period": 21,
+        "label": "Price > EMA 21 (3D)",
+        "enabled": true
+      },
+      {
+        "filter_type": "price",
+        "timeframe": "3D",
+        "condition": "below",
+        "pct_value": 0,
+        "target": "ema",
+        "ema_period": 200,
+        "label": "Price < EMA 200 (3D)",
+        "enabled": true
+      },
+      {
+        "filter_type": "macd_hist_chain",
+        "timeframe": "1D",
+        "bars_to_compare": 6,
+        "allowed_stragglers": 3,
+        "histogram_side": "negative",
+        "chain_mode": "receding",
+        "allow_cross_zero": false,
+        "label": "MACD Hist (1D) receding 6 bars · stragglers 3 · neg · same-side",
+        "enabled": false
+      }
+    ]
+  },
+  {
+    "name": "Stocks coming out of downtrend /Swing 05",
+    "filters": [
+      {
+        "filter_type": "marketcap",
+        "from_value": 50000000000,
+        "to_value": null,
+        "from_raw": "50B",
+        "to_raw": "",
+        "label": "Mkt Cap ≥ 50B",
+        "enabled": true
+      },
+      {
+        "filter_type": "macd_hist_chain",
+        "timeframe": "2W",
+        "bars_to_compare": 6,
+        "allowed_stragglers": 3,
+        "histogram_side": "negative",
+        "chain_mode": "receding",
+        "allow_cross_zero": false,
+        "label": "MACD Hist (2W) receding 6 bars · stragglers 3 · neg · same-side",
+        "enabled": true
+      },
+      {
+        "filter_type": "ema",
+        "ema_period": 21,
+        "timeframe": "2W",
+        "condition": "above",
+        "pct_value": 0,
+        "target": "ema",
+        "target_ema_period": 50,
+        "label": "EMA 21 (2W) > EMA 50 (2W)",
+        "enabled": true
+      },
+      {
+        "filter_type": "ema",
+        "ema_period": 100,
+        "timeframe": "2W",
+        "condition": "above",
+        "pct_value": 0,
+        "target": "ema",
+        "target_ema_period": 200,
+        "label": "EMA 100 (2W) > EMA 200 (2W)",
+        "enabled": true
+      },
+      {
+        "filter_type": "ema",
+        "ema_period": 100,
+        "timeframe": "4D",
+        "condition": "above",
+        "pct_value": 0,
+        "target": "ema",
+        "target_ema_period": 200,
+        "label": "EMA 100 (4D) > EMA 200 (4D)",
+        "enabled": true
+      },
+      {
+        "filter_type": "ema",
+        "ema_period": 100,
+        "timeframe": "2D",
+        "condition": "above",
+        "pct_value": 0,
+        "target": "ema",
+        "target_ema_period": 200,
+        "label": "EMA 100 (2D) > EMA 200 (2D)",
+        "enabled": false
+      },
+      {
+        "filter_type": "price",
+        "timeframe": "2D",
+        "condition": "below",
+        "pct_value": 0,
+        "target": "ema",
+        "ema_period": 100,
+        "label": "Price < EMA 100 (2D)",
+        "enabled": true
+      }
+    ]
+  },
+  {
+    "name": "Earnings Filter",
+    "filters": [
+      {
+        "filter_type": "marketcap",
+        "from_value": 50000000000,
+        "to_value": null,
+        "from_raw": "50B",
+        "to_raw": "",
+        "label": "Mkt Cap ≥ ₹50.00B",
+        "enabled": true
+      },
+      {
+        "filter_type": "earnings",
+        "report_window": "month_range",
+        "eps_surprise_min": 2,
+        "eps_surprise_max": null,
+        "revenue_surprise_min": 2,
+        "revenue_surprise_max": null,
+        "from_year": 2026,
+        "from_month": 4,
+        "to_year": 2026,
+        "to_month": 5,
+        "label": "Earnings · April 2026 – May 2026 · EPS ≥ 2%, Rev ≥ 2%",
+        "enabled": true
+      },
+      {
+        "filter_type": "macd",
+        "source": "macd",
+        "timeframe": "4D",
+        "condition": "above",
+        "pct_value": 0,
+        "target": "signal",
+        "target_value": 0,
+        "label": "MACD Level (4D) > MACD Signal",
+        "enabled": true
+      },
+      {
+        "filter_type": "macd",
+        "source": "signal",
+        "timeframe": "4D",
+        "condition": "below",
+        "pct_value": 0,
+        "target": "value",
+        "target_value": 0,
+        "label": "MACD Signal (4D) < 0",
+        "enabled": true
+      },
+      {
+        "filter_type": "macd",
+        "source": "signal",
+        "timeframe": "2W",
+        "condition": "below",
+        "pct_value": 0,
+        "target": "value",
+        "target_value": 0,
+        "label": "MACD Signal (2W) < 0",
+        "enabled": true
+      }
+    ]
+  }
+]
