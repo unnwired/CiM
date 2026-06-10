@@ -106,7 +106,6 @@ See [.gitignore](.gitignore). In short: local databases, user data, build output
 | [README_START_STOP.md](README_START_STOP.md) | Start/stop and local run |
 | [docs/UPDATE.md](docs/UPDATE.md) | Client update flow |
 | [docs/CLIENT_UPDATE.md](docs/CLIENT_UPDATE.md) | End-user update steps |
-| [CHANGELOG.md](CHANGELOG.md) | Release history |
 
 ---
 

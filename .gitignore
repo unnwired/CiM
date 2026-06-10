@@ -21,6 +21,20 @@ server/_cim_dist_embedded.py
 # Local notes that may contain secrets or machine codes
 codes.txt
 
+# Internal / vendor-only — keep locally, never push to public GitHub
+PROJECT_HANDOFF.md
+PROJECT_HANDOFF_EXEC_SUMMARY.md
+USER_REQUIREMENTS.md
+CHANGELOG.md
+docs/CLIENT-LICENSE-FIX.txt
+docs/cim-updates-README.md
+scripts/Generate-CiMInstallKey.ps1
+scripts/Show-CiMInstallKey.ps1
+scripts/Verify-CiMLicenseChain.ps1
+scripts/_gen_install_key_once.py
+scripts/dev-restore/
+update-result.txt
+
 # Env files (often hold CIM_LICENSE_SECRET)
 .env
 .env.*

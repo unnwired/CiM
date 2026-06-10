@@ -199,13 +199,6 @@ if (-not (Test-Path -LiteralPath $out)) {
 }
 Write-Host "Installer built: $out"
 if ($secretForInno) {
-    $showKey = Join-Path $ScriptDir "Show-CiMInstallKey.ps1"
-    if (Test-Path -LiteralPath $showKey) {
-        Write-Host ""
-        Write-Host "=== Install keys (must match the machine code shown in CiMSetup) ==="
-        Write-Host "Example for client MC F1927C3F4CCD33A733DD8AECEFDA6469:"
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $showKey `
-            -MachineCode "F1927C3F4CCD33A733DD8AECEFDA6469" `
-            -InstallRoot $ExportRoot
-    }
+    Write-Host ""
+    Write-Host "Installer compiled. Issue install keys using your private vendor tooling on the build machine."
 }

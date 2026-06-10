@@ -1,1 +1,0 @@
-﻿Update complete (1.0.5). Start Charts In Motion from start_cim.bat or the desktop shortcut.
