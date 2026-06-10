@@ -1,17 +1,8 @@
 import axios from 'axios';
 import React, { useState, useEffect, useCallback, useRef, useLayoutEffect, useMemo } from 'react';
 import DashboardPage  from './pages/DashboardPage';
-import ChartPage      from './pages/ChartPage';
-import SplitChartPage from './pages/SplitChartPage';
 import IndicesPage    from './pages/IndicesPage';
-import MarketPulsePage from './pages/MarketPulsePage';
-import MoversPage from './pages/MoversPage';
-import MarketMapPage from './pages/MarketMapPage';
-import IndexChartPage from './pages/IndexChartPage';
-import ConstituentsPage from './pages/ConstituentsPage';
-import WatchlistPage from './pages/WatchlistPage';
-import PotentialSwingsPage from './pages/PotentialSwingsPage';
-import EarningsBeatsPage from './pages/EarningsBeatsPage';
+
 import AdminPanel     from './components/AdminPanel';
 import { isDistributionProfile } from './config/exportProfile';
 import { dispatchChartDataUpdated, CHART_DATA_UPDATED_EVENT, MARKET_PULSE_REFRESH_EVENT, MOVERS_REFRESH_EVENT } from './chartEvents';
@@ -22,6 +13,19 @@ import AboutCiMModalBody from './components/AboutCiMModalBody';
 import CiMKnowledgeBase from './components/CiMKnowledgeBase';
 import KnowledgeBaseEditor from './components/KnowledgeBaseEditor';
 import { resolveKnowledgeBaseGuideId } from './content/knowledgeBasePages';
+
+// Performance Optimization: React Code Splitting
+// Using React.lazy() dynamic imports to split heavy sub-pages (e.g. Movers, Market Map)
+// into independent chunks. They are only fetched over the network if/when needed.
+const SplitChartPage = React.lazy(() => import('./pages/SplitChartPage'));
+const MarketPulsePage = React.lazy(() => import('./pages/MarketPulsePage'));
+const MoversPage = React.lazy(() => import('./pages/MoversPage'));
+const MarketMapPage = React.lazy(() => import('./pages/MarketMapPage'));
+const IndexChartPage = React.lazy(() => import('./pages/IndexChartPage'));
+const ConstituentsPage = React.lazy(() => import('./pages/ConstituentsPage'));
+const WatchlistPage = React.lazy(() => import('./pages/WatchlistPage'));
+const PotentialSwingsPage = React.lazy(() => import('./pages/PotentialSwingsPage'));
+const EarningsBeatsPage = React.lazy(() => import('./pages/EarningsBeatsPage'));
 
 const MAX_CHART_TABS = 5;
 const API = '';
@@ -41,13 +45,36 @@ function watchlistContainsSymbol(w, symbol, itemType) {
 }
 
 export default function AppWrapper() {
-  return <App />;
+  return (
+    <React.Suspense fallback={<div style={{ color: 'var(--text-secondary)', padding: '20px', backgroundColor: 'var(--bg-primary)', height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>Loading application...</div>}>
+      <App />
+    </React.Suspense>
+  );
 }
 
 function App() {
+  // Performance Optimization: visitedViews On-Demand Mounting
+  // To avoid mounting all views at initial load, visitedViews tracks which sub-pages
+  // have been actively navigated to. Heavy DOM trees are only initialized upon first access.
   const [view, setView]                 = useState('dashboard');
+  const [visitedViews, setVisitedViews] = useState({ dashboard: true });
   const [chartTabs, setChartTabs]       = useState([]);
   const [activeTabIdx, setActiveTabIdx] = useState(null);
+
+  useEffect(() => {
+    if (view && !visitedViews[view]) {
+      setVisitedViews(prev => ({ ...prev, [view]: true }));
+    }
+  }, [view, visitedViews]);
+
+  useEffect(() => {
+    if (view === 'chart' && activeTabIdx !== null && chartTabs[activeTabIdx]) {
+      const tabId = chartTabs[activeTabIdx].id;
+      if (!visitedViews['chart_' + tabId]) {
+        setVisitedViews(prev => ({ ...prev, ['chart_' + tabId]: true }));
+      }
+    }
+  }, [view, activeTabIdx, chartTabs, visitedViews]);
   const [indexTabs, setIndexTabs]       = useState([]);
   const [activeIndexTab, setActiveIndexTab] = useState(null);
   const [constituentsTabs, setConstituentsTabs] = useState([]);
@@ -1296,129 +1323,149 @@ function App() {
 
         {/* Market Pulse */}
         <div style={{ display: view === 'market-pulse' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-          <MarketPulsePage />
+          {visitedViews['market-pulse'] && <MarketPulsePage />}
         </div>
 
         {/* Market Movers */}
         <div style={{ display: view === 'market-movers' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-          <MoversPage
-            onOpenChart={openChart}
-            isActive={view === 'market-movers'}
-            onContextMenuRequest={handleContextMenuRequest}
-          />
+          {visitedViews['market-movers'] && (
+            <MoversPage
+              onOpenChart={openChart}
+              isActive={view === 'market-movers'}
+              onContextMenuRequest={handleContextMenuRequest}
+            />
+          )}
         </div>
 
         {/* Market Map — index breadth + constituent heatmap */}
         <div style={{ display: view === 'market-map' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-          <MarketMapPage
-            onOpenChart={openChart}
-            isActive={view === 'market-map'}
-          />
+          {visitedViews['market-map'] && (
+            <MarketMapPage
+              onOpenChart={openChart}
+              isActive={view === 'market-map'}
+            />
+          )}
         </div>
 
         {/* Earnings beats (TradingView screener) */}
         <div style={{ display: view === 'earnings-beats' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-          <EarningsBeatsPage
-            onOpenChart={openChart}
-            isActive={view === 'earnings-beats'}
-            onContextMenuRequest={handleContextMenuRequest}
-            onRefreshEarningsPlusCache={handleRefreshEarningsPlusCache}
-            earningsPlusRefreshRunning={earningsPlusRefreshPending || (updateRunning && jobStatus?.job === 'earnings_plus_cache')}
-          />
+          {visitedViews['earnings-beats'] && (
+            <EarningsBeatsPage
+              onOpenChart={openChart}
+              isActive={view === 'earnings-beats'}
+              onContextMenuRequest={handleContextMenuRequest}
+              onRefreshEarningsPlusCache={handleRefreshEarningsPlusCache}
+              earningsPlusRefreshRunning={earningsPlusRefreshPending || (updateRunning && jobStatus?.job === 'earnings_plus_cache')}
+            />
+          )}
         </div>
 
         {/* Dashboard */}
         <div style={{ display: view === 'dashboard' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-          <DashboardPage
-            pageMode="pulse"
-            onOpenChart={openChart}
-            watchlists={watchlists}
-            onGoToWatchlist={goToWatchlist}
-            onAddStocksToWatchlist={handleDashboardAddToWatchlist}
-            onContextMenuRequest={handleContextMenuRequest}
-          />
+          {visitedViews['dashboard'] && (
+            <DashboardPage
+              pageMode="pulse"
+              onOpenChart={openChart}
+              watchlists={watchlists}
+              onGoToWatchlist={goToWatchlist}
+              onAddStocksToWatchlist={handleDashboardAddToWatchlist}
+              onContextMenuRequest={handleContextMenuRequest}
+            />
+          )}
         </div>
         <div style={{ display: view === 'portfolio' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-          <DashboardPage
-            pageMode="portfolio"
-            onOpenChart={openChart}
-            watchlists={watchlists}
-            onGoToWatchlist={goToWatchlist}
-            onAddStocksToWatchlist={handleDashboardAddToWatchlist}
-            onContextMenuRequest={handleContextMenuRequest}
-          />
+          {visitedViews['portfolio'] && (
+            <DashboardPage
+              pageMode="portfolio"
+              onOpenChart={openChart}
+              watchlists={watchlists}
+              onGoToWatchlist={goToWatchlist}
+              onAddStocksToWatchlist={handleDashboardAddToWatchlist}
+              onContextMenuRequest={handleContextMenuRequest}
+            />
+          )}
         </div>
         <div style={{ display: view === 'potential-swings' && !isDistributionProfile ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-          {!isDistributionProfile && (
-          <PotentialSwingsPage
-            onOpenChart={openChart}
-            watchlists={watchlists}
-            onGoToWatchlist={goToWatchlist}
-            onAddStocksToWatchlist={handleDashboardAddToWatchlist}
-          />
+          {!isDistributionProfile && visitedViews['potential-swings'] && (
+            <PotentialSwingsPage
+              onOpenChart={openChart}
+              watchlists={watchlists}
+              onGoToWatchlist={goToWatchlist}
+              onAddStocksToWatchlist={handleDashboardAddToWatchlist}
+            />
           )}
         </div>
         <div style={{ display: view === 'watchlist' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-          <WatchlistPage
-            onOpenChart={openChart}
-            onOpenConstituents={openConstituents}
-            watchlists={watchlists}
-            onWatchlistsChange={loadWatchlists}
-            appActiveWatchlistName={activeWatchlistName}
-            onAppActiveWatchlistNameChange={setActiveWatchlistName}
-            appSelectedItem={watchlistSelectedItem}
-            onAppSelectedItemChange={setWatchlistSelectedItem}
-            onContextMenuRequest={handleContextMenuRequest}
-          />
+          {visitedViews['watchlist'] && (
+            <WatchlistPage
+              onOpenChart={openChart}
+              onOpenConstituents={openConstituents}
+              watchlists={watchlists}
+              onWatchlistsChange={loadWatchlists}
+              appActiveWatchlistName={activeWatchlistName}
+              onAppActiveWatchlistNameChange={setActiveWatchlistName}
+              appSelectedItem={watchlistSelectedItem}
+              onAppSelectedItemChange={setWatchlistSelectedItem}
+              onContextMenuRequest={handleContextMenuRequest}
+            />
+          )}
         </div>
 
 
         {/* Market Indices list */}
         <div style={{ display: view === 'indices' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-          <IndicesPage
-            onOpenConstituents={openConstituents}
-            onContextMenuRequest={handleContextMenuRequest}
-          />
+          {visitedViews['indices'] && (
+            <IndicesPage
+              onOpenConstituents={openConstituents}
+              onContextMenuRequest={handleContextMenuRequest}
+            />
+          )}
         </div>
 
         {/* Index chart tabs */}
         {indexTabs.map(idx => (
           <div key={idx.symbol} style={{ display: view === 'index_' + idx.symbol ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-            <IndexChartPage
-              index={idx}
-              onOpenChart={openChart}
-              onOpenConstituents={openConstituents}
-              onBack={goToIndices}
-            />
+            {visitedViews['index_' + idx.symbol] && (
+              <IndexChartPage
+                index={idx}
+                onOpenChart={openChart}
+                onOpenConstituents={openConstituents}
+                onBack={goToIndices}
+              />
+            )}
           </div>
         ))}
 
         {/* Constituents tabs */}
         {constituentsTabs.map(idx => (
           <div key={idx.symbol} style={{ display: view === 'constituents_' + idx.symbol ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-            <ConstituentsPage
-              index={idx}
-              onOpenChart={openChart}
-              onContextMenuRequest={handleContextMenuRequest}
-              onBack={() => {
-                const indexTab = indexTabs.find(t => t.symbol === idx.symbol);
-                if (indexTab) setView('index_' + idx.symbol);
-                else setView('indices');
-              }}
-            />
+            {visitedViews['constituents_' + idx.symbol] && (
+              <ConstituentsPage
+                index={idx}
+                onOpenChart={openChart}
+                onContextMenuRequest={handleContextMenuRequest}
+                onBack={() => {
+                  const indexTab = indexTabs.find(t => t.symbol === idx.symbol);
+                  if (indexTab) setView('index_' + idx.symbol);
+                  else setView('indices');
+                }}
+              />
+            )}
           </div>
         ))}
 
         {/* Chart tabs */}
         {chartTabs.map((tab, idx) => (
           <div key={tab.id} style={{ display: (view === 'chart' && idx === activeTabIdx) ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-            <SplitChartPage
-              symbol={tab.symbol}
-              onOpenChart={openChart}
-              onActiveSymbolChange={(sym) => {
-                setChartTabs(prev => prev.map((t, i) => i === activeTabIdx ? { ...t, symbol: sym } : t));
-              }}
-            />
+            {visitedViews['chart_' + tab.id] && (
+              <SplitChartPage
+                symbol={tab.symbol}
+                onOpenChart={openChart}
+                onActiveSymbolChange={(sym) => {
+                  setChartTabs(prev => prev.map((t, i) => i === activeTabIdx ? { ...t, symbol: sym } : t));
+                }}
+              />
+            )}
           </div>
         ))}
           </div>

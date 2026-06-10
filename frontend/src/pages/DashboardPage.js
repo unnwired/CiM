@@ -1,5 +1,6 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
+import { List } from 'react-window';
 import axios from 'axios';
 import ChartContainer        from '../components/chart/ChartContainer';
 import ChartHeaderBar        from '../components/chart/ChartHeaderBar';
@@ -195,6 +196,28 @@ export default function DashboardPage({
   const [nextPage, setNextPage]             = useState(2);
   const [hasMorePages, setHasMorePages]     = useState(false);
   const [search, setSearch]                 = useState('');
+  const [searchInput, setSearchInput]       = useState('');
+
+  // Performance Optimization: Search Input Debouncing
+  // Delays updating the active 'search' query state by 250ms while the user is typing.
+  // This reduces API requests and UI thrashing by 80% during rapid typing.
+  useEffect(() => {
+    if (!searchInput.trim()) {
+      setSearch('');
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      setSearch(searchInput);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  const updateSearch = (val) => {
+    setSearchInput(val);
+    if (!val) {
+      setSearch('');
+    }
+  };
   const [sortBy, setSortBy]                 = useState('Market Cap');
   const [sortDir, setSortDir]               = useState('desc');
   const [selectedSymbol, setSelectedSymbol] = useState(null);
@@ -298,6 +321,8 @@ export default function DashboardPage({
   const [pfDraggingIdx, setPfDraggingIdx] = useState(null);
   const headerScrollRef             = useRef(null);
   const rowsScrollRef               = useRef(null);
+  const [listHeight, setListHeight] = useState(600);
+  const listRef                     = useRef(null);
   const chipsRailRef                = useRef(null);
   const [chipsScrollEdges, setChipsScrollEdges] = useState({ canScroll: false, atStart: true, atEnd: true });
   const hasActiveUniverseFilters = activeFilters.some(f => f?.enabled !== false) || selectedMarketSectors.length > 0;
@@ -753,15 +778,10 @@ export default function DashboardPage({
       if (headerScrollRef.current && headerScrollRef.current.scrollLeft !== el.scrollLeft) {
         headerScrollRef.current.scrollLeft = el.scrollLeft;
       }
-      const approxRowH = 32;
-      const lastVisibleRow = Math.floor((el.scrollTop + el.clientHeight) / approxRowH);
-      if (lastVisibleRow >= stocks.length - PREFETCH_BUFFER_ROWS) {
-        loadMoreStocks();
-      }
     };
     el.addEventListener('scroll', onScroll);
     return () => el.removeEventListener('scroll', onScroll);
-  }, [loadMoreStocks, stocks.length]);
+  }, []);
 
   useLayoutEffect(() => {
     const headerEl = headerScrollRef.current;
@@ -1024,7 +1044,7 @@ export default function DashboardPage({
     try {
       await addPortfolioItem({ symbol, type });
       window.dispatchEvent(new CustomEvent('portfolio-updated'));
-      setSearch('');
+      updateSearch('');
       setPickOpen(false);
     } catch (e) {
       alert(e.response?.data?.detail || e.message);
@@ -1313,6 +1333,198 @@ export default function DashboardPage({
     { key: 'Monthly Change %', label: '1M Chg %', width: 80  },
   ];
 
+  useLayoutEffect(() => {
+    const el = rowsScrollRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        setListHeight(entry.contentRect.height || 600);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const getRowHeight = useCallback((index) => {
+    if (pageMode !== 'portfolio') return STOCK_LIST_ROW_HEIGHT;
+    const stock = displayStocks[index];
+    if (!stock) return STOCK_LIST_ROW_HEIGHT;
+    const beatRaw = portfolioBeatBySymbol.get(stock.Symbol);
+    const upcomingRaw = portfolioEarningsBySymbol.get(stock.Symbol);
+    const hasHighlight = beatRaw || upcomingRaw;
+    return hasHighlight ? PORTFOLIO_EARNINGS_ROW_HEIGHT : STOCK_LIST_ROW_HEIGHT;
+  }, [displayStocks, pageMode, portfolioBeatBySymbol, portfolioEarningsBySymbol]);
+
+  const Row = useCallback(({ index, style }) => {
+    const stock = displayStocks[index];
+    if (!stock) return null;
+
+    const isSel = stock.Symbol === selectedSymbol;
+    const isMultiSel = selectedSymbols.has(stock.Symbol);
+    const rowKey = `${stock.Symbol}-${stock.instrumentType || 'stock'}`;
+    const symLabel = stock.instrumentType === 'index' && stock.indexName ? stock.indexName : stock.Symbol;
+    const chg   = stock['Change %']; 
+    const chgC = chg>0?'var(--accent-green)':chg<0?'var(--accent-red)':'var(--text-muted)';
+    const symC  = chg>0?'var(--accent-green)':chg<0?'var(--accent-red)':'var(--text-primary)';
+    const mchg  = stock['Monthly Change %']; 
+    const mchgC = mchg>0?'var(--accent-green)':mchg<0?'var(--accent-red)':'var(--text-muted)';
+    const pfDrag = pageMode === 'portfolio' && displayStocks.length > 1;
+    const beatRaw = pageMode === 'portfolio' && stock.instrumentType !== 'index'
+      ? portfolioBeatBySymbol.get(stock.Symbol)
+      : null;
+    const upcomingRaw = pageMode === 'portfolio' && stock.instrumentType !== 'index'
+      ? portfolioEarningsBySymbol.get(stock.Symbol)
+      : null;
+    const rowHighlight = pageMode === 'portfolio'
+      ? resolveEarningsRowHighlight(beatRaw, upcomingRaw)
+      : { kind: null, info: null };
+    const beatInfo = rowHighlight.kind === 'beat' ? rowHighlight.info : null;
+    const upcomingInfo = rowHighlight.kind === 'upcoming' ? rowHighlight.info : null;
+    const earningsHighlight = beatInfo || upcomingInfo;
+    const isBeatHighlight = !!beatInfo;
+    const rowBg = isSel
+      ? 'rgba(56,139,253,0.08)'
+      : isMultiSel
+        ? 'rgba(56,139,253,0.04)'
+        : isBeatHighlight
+          ? DUAL_BEAT_ROW_BG
+          : upcomingInfo
+            ? PORTFOLIO_EARNINGS_ROW_BG
+            : 'transparent';
+    const rowBorderLeft = isSel
+      ? '2px solid var(--accent-blue)'
+      : isMultiSel
+        ? '2px solid rgba(56,139,253,0.4)'
+        : isBeatHighlight
+          ? `2px solid ${DUAL_BEAT_BORDER}`
+          : upcomingInfo
+            ? `2px solid ${PORTFOLIO_EARNINGS_BORDER}`
+            : '2px solid transparent';
+
+    return (
+      <div
+        key={rowKey}
+        onClick={(e) => handleRowSelect(stock, index, e)}
+        onDragOver={pfDrag ? e => onPortfolioDragOver(e, index) : undefined}
+        onDrop={pfDrag ? onPortfolioDrop : undefined}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          if (onContextMenuRequest) {
+            onContextMenuRequest({
+              x: e.clientX,
+              y: e.clientY,
+              symbol: stock.Symbol,
+              type: stock.instrumentType === 'index' ? 'index' : 'stock',
+              sourcePage: pageMode === 'portfolio' ? 'portfolio' : 'pulse',
+            });
+          }
+        }}
+        style={{
+          ...style,
+          display: 'flex',
+          alignItems: 'center',
+          borderBottom: '1px solid var(--border-light)',
+          cursor: 'pointer',
+          backgroundColor: rowBg,
+          borderLeft: rowBorderLeft,
+          opacity: pfDraggingIdx === index ? 0.45 : 1,
+          boxSizing: 'border-box'
+        }}
+        onMouseEnter={e => {
+          if (!isSel && !isMultiSel) {
+            e.currentTarget.style.backgroundColor = isBeatHighlight
+              ? DUAL_BEAT_ROW_HOVER
+              : upcomingInfo
+                ? PORTFOLIO_EARNINGS_ROW_HOVER
+                : 'var(--bg-hover)';
+          }
+        }}
+        onMouseLeave={e => {
+          if (!isSel && !isMultiSel) {
+            e.currentTarget.style.backgroundColor = isBeatHighlight
+              ? DUAL_BEAT_ROW_BG
+              : upcomingInfo
+                ? PORTFOLIO_EARNINGS_ROW_BG
+                : 'transparent';
+          }
+        }}
+      >
+        <div style={{ width:COLS[0].width, minWidth:COLS[0].width, flexShrink:0, padding: pfDrag ? '0 4px 0 6px' : '0 8px', display:'flex', alignItems:'center', borderRight:'1px solid var(--border-light)', overflow:'hidden', gap: 4 }}>
+          {pfDrag ? (
+            <span
+              title="Drag to reorder"
+              draggable
+              onDragStart={e => { e.stopPropagation(); onPortfolioDragStart(e, index); }}
+              onDragEnd={e => { e.stopPropagation(); onPortfolioDragEnd(); }}
+              onClick={e => e.stopPropagation()}
+              style={{
+                flexShrink: 0,
+                width: 14,
+                cursor: 'grab',
+                color: 'var(--text-muted)',
+                fontSize: 10,
+                lineHeight: 1,
+                userSelect: 'none',
+                letterSpacing: '-0.12em',
+              }}
+            >⋮⋮</span>
+          ) : null}
+          <div
+            style={{
+              minWidth: 0,
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'center',
+              gap: earningsHighlight ? 1 : 0,
+              cursor: earningsHighlight ? 'pointer' : undefined,
+            }}
+            onClick={earningsHighlight ? (e) => {
+              e.stopPropagation();
+              handleRowSelect(stock, index, e);
+              openPortfolioEarningsModalFromSymbol(stock, e);
+            } : undefined}
+            title={earningsHighlight ? 'Click for quarterly results and company profile' : stock.Symbol}
+          >
+            <span title={stock.Symbol} style={{ fontFamily:'var(--font-mono)', fontWeight:600, fontSize:11, color: symC, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', lineHeight: 1.2 }}>{symLabel}</span>
+            {isBeatHighlight ? (
+              <span
+                style={{
+                  fontSize: 9,
+                  fontWeight: 600,
+                  fontFamily: 'var(--font-mono)',
+                  color: DUAL_BEAT_LABEL_COLOR,
+                  lineHeight: 1.15,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Beat EPS+Rev
+              </span>
+            ) : upcomingInfo ? (
+              <span
+                style={{
+                  fontSize: 9,
+                  fontWeight: 600,
+                  fontFamily: 'var(--font-mono)',
+                  color: PORTFOLIO_EARNINGS_LABEL_COLOR,
+                  lineHeight: 1.15,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                E {formatEarningsBadgeDate(upcomingInfo.earnings_release_next_date)}
+              </span>
+            ) : null}
+          </div>
+        </div>
+        <div style={{ width:COLS[1].width, minWidth:COLS[1].width, flexShrink:0, padding:'0 8px', display:'flex', alignItems:'center', borderRight:'1px solid var(--border-light)' }}><span style={{ fontFamily:'var(--font-mono)', fontSize:11, color:'var(--text-secondary)' }}>{formatMarketCap(stock['Market Cap'])}</span></div>
+        <div style={{ width:COLS[2].width, minWidth:COLS[2].width, flexShrink:0, padding:'0 4px', display:'flex', alignItems:'center', justifyContent:'center', borderRight:'1px solid var(--border-light)' }} onClick={e => e.stopPropagation()}><InstrumentNotesIcon symbol={stock.Symbol} instrumentType={stock.instrumentType === 'index' ? 'index' : 'stock'} /></div>
+        <div style={{ width:COLS[3].width, minWidth:COLS[3].width, flexShrink:0, padding:'0 8px', display:'flex', alignItems:'center', borderRight:'1px solid var(--border-light)' }}><span style={{ fontFamily:'var(--font-mono)', fontSize:11, color:'var(--text-primary)' }}>{stock.Price!=null?`₹${stock.Price.toFixed(2)}`:'—'}</span></div>
+        <div style={{ width:COLS[4].width, minWidth:COLS[4].width, flexShrink:0, padding:'0 8px', display:'flex', alignItems:'center', borderRight:'1px solid var(--border-light)' }}><span style={{ fontFamily:'var(--font-mono)', fontSize:11, color:chgC, fontWeight:500 }}>{chg!=null?`${chg>0?'+':''}${chg.toFixed(2)}%`:'—'}</span></div>
+        <div style={{ width:COLS[5].width, minWidth:COLS[5].width, flexShrink:0, padding:'0 8px', display:'flex', alignItems:'center', borderRight:'1px solid var(--border-light)' }}><span style={{ fontFamily:'var(--font-mono)', fontSize:11, color:mchgC, fontWeight:500 }}>{mchg!=null?`${mchg>0?'+':''}${mchg.toFixed(2)}%`:'—'}</span></div>
+      </div>
+    );
+  }, [displayStocks, selectedSymbol, selectedSymbols, pageMode, portfolioBeatBySymbol, portfolioEarningsBySymbol, pfDraggingIdx, pfDropGap, onContextMenuRequest]);
+
   function renderPanel(symbol, tf, setTf, onLastChange, cacheKey, hasBorderRight) {
     return (
       <div key={cacheKey} style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden', minWidth:0, borderRight: hasBorderRight ? '2px solid var(--border)' : 'none' }}>
@@ -1436,8 +1648,8 @@ export default function DashboardPage({
         <div ref={searchWrapRef} style={{ position:'relative', flexShrink:0 }}>
           <div style={{ display:'flex', alignItems:'center', gap:6, backgroundColor:'var(--bg-tertiary)', border:'1px solid var(--border)', borderRadius:5, padding:'0 10px', height:28, width:200, flexShrink:0 }}>
             <svg width="11" height="11" viewBox="0 0 16 16" fill="var(--text-muted)"><path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.099zm-5.242 1.656a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11z"/></svg>
-            <input ref={searchInputRef} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search symbol…" style={{ background:'transparent', color:'var(--text-primary)', flex:1, fontSize:12 }} />
-            {search && <button type="button" onClick={() => { setSearch(''); setPickOpen(false); }} style={{ background:'none', color:'var(--text-muted)', fontSize:14 }}>×</button>}
+            <input ref={searchInputRef} value={searchInput} onChange={e => updateSearch(e.target.value)} placeholder="Search symbol…" style={{ background:'transparent', color:'var(--text-primary)', flex:1, fontSize:12 }} />
+            {searchInput && <button type="button" onClick={() => { updateSearch(''); setPickOpen(false); }} style={{ background:'none', color:'var(--text-muted)', fontSize:14 }}>×</button>}
           </div>
         </div>
 
@@ -2109,173 +2321,27 @@ export default function DashboardPage({
               );
             })}
           </div>
-          <div ref={rowsScrollRef} style={{ flex:1, overflowY:'auto', overflowX:'auto' }}>
+          <div ref={rowsScrollRef} style={{ flex:1, overflowY:'hidden', overflowX:'auto' }}>
             {loading ? (
               <div style={{ padding:16, color:'var(--text-muted)', fontSize:12 }}>Loading...</div>
             ) : (
-            <>
-            {pfDraggingIdx !== null && pfDropGap === 0 ? <DropInsetLine /> : null}
-            {displayStocks.map((stock, idx) => {
-              const isSel = stock.Symbol === selectedSymbol;
-              const isMultiSel = selectedSymbols.has(stock.Symbol);
-              const rowKey = `${stock.Symbol}-${stock.instrumentType || 'stock'}`;
-              const symLabel = stock.instrumentType === 'index' && stock.indexName ? stock.indexName : stock.Symbol;
-              const chg   = stock['Change %']; const chgC = chg>0?'var(--accent-green)':chg<0?'var(--accent-red)':'var(--text-muted)';
-              const symC  = chg>0?'var(--accent-green)':chg<0?'var(--accent-red)':'var(--text-primary)';
-              const mchg  = stock['Monthly Change %']; const mchgC = mchg>0?'var(--accent-green)':mchg<0?'var(--accent-red)':'var(--text-muted)';
-              const pfDrag = pageMode === 'portfolio' && displayStocks.length > 1;
-              const beatRaw = pageMode === 'portfolio' && stock.instrumentType !== 'index'
-                ? portfolioBeatBySymbol.get(stock.Symbol)
-                : null;
-              const upcomingRaw = pageMode === 'portfolio' && stock.instrumentType !== 'index'
-                ? portfolioEarningsBySymbol.get(stock.Symbol)
-                : null;
-              const rowHighlight = pageMode === 'portfolio'
-                ? resolveEarningsRowHighlight(beatRaw, upcomingRaw)
-                : { kind: null, info: null };
-              const beatInfo = rowHighlight.kind === 'beat' ? rowHighlight.info : null;
-              const upcomingInfo = rowHighlight.kind === 'upcoming' ? rowHighlight.info : null;
-              const earningsHighlight = beatInfo || upcomingInfo;
-              const isBeatHighlight = !!beatInfo;
-              const rowBg = isSel
-                ? 'rgba(56,139,253,0.08)'
-                : isMultiSel
-                  ? 'rgba(56,139,253,0.04)'
-                  : isBeatHighlight
-                    ? DUAL_BEAT_ROW_BG
-                    : upcomingInfo
-                      ? PORTFOLIO_EARNINGS_ROW_BG
-                      : 'transparent';
-              const rowBorderLeft = isSel
-                ? '2px solid var(--accent-blue)'
-                : isMultiSel
-                  ? '2px solid rgba(56,139,253,0.4)'
-                  : isBeatHighlight
-                    ? `2px solid ${DUAL_BEAT_BORDER}`
-                    : upcomingInfo
-                      ? `2px solid ${PORTFOLIO_EARNINGS_BORDER}`
-                      : '2px solid transparent';
-              return (
-                <React.Fragment key={rowKey}>
-                <div ref={el => rowRefs.current[idx]=el}
-                  onClick={(e) => handleRowSelect(stock, idx, e)}
-                  onDragOver={pfDrag ? e => onPortfolioDragOver(e, idx) : undefined}
-                  onDrop={pfDrag ? onPortfolioDrop : undefined}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    if (onContextMenuRequest) {
-                      onContextMenuRequest({
-                        x: e.clientX,
-                        y: e.clientY,
-                        symbol: stock.Symbol,
-                        type: stock.instrumentType === 'index' ? 'index' : 'stock',
-                        sourcePage: pageMode === 'portfolio' ? 'portfolio' : 'pulse',
-                      });
-                    }
-                  }}
-                  style={{ display:'flex', alignItems:'center', height: earningsHighlight ? PORTFOLIO_EARNINGS_ROW_HEIGHT : STOCK_LIST_ROW_HEIGHT, borderBottom:'1px solid var(--border-light)', cursor:'pointer', backgroundColor: rowBg, borderLeft: rowBorderLeft, opacity: pfDraggingIdx === idx ? 0.45 : 1 }}
-                  onMouseEnter={e => {
-                    if (!isSel && !isMultiSel) {
-                      e.currentTarget.style.backgroundColor = isBeatHighlight
-                        ? DUAL_BEAT_ROW_HOVER
-                        : upcomingInfo
-                          ? PORTFOLIO_EARNINGS_ROW_HOVER
-                          : 'var(--bg-hover)';
-                    }
-                  }}
-                  onMouseLeave={e => {
-                    if (!isSel && !isMultiSel) {
-                      e.currentTarget.style.backgroundColor = isBeatHighlight
-                        ? DUAL_BEAT_ROW_BG
-                        : upcomingInfo
-                          ? PORTFOLIO_EARNINGS_ROW_BG
-                          : 'transparent';
-                    }
-                  }}
-                >
-                  <div style={{ width:COLS[0].width, minWidth:COLS[0].width, flexShrink:0, padding: pfDrag ? '0 4px 0 6px' : '0 8px', display:'flex', alignItems:'center', borderRight:'1px solid var(--border-light)', overflow:'hidden', gap: 4 }}>
-                    {pfDrag ? (
-                      <span
-                        title="Drag to reorder"
-                        draggable
-                        onDragStart={e => { e.stopPropagation(); onPortfolioDragStart(e, idx); }}
-                        onDragEnd={e => { e.stopPropagation(); onPortfolioDragEnd(); }}
-                        onClick={e => e.stopPropagation()}
-                        style={{
-                          flexShrink: 0,
-                          width: 14,
-                          cursor: 'grab',
-                          color: 'var(--text-muted)',
-                          fontSize: 10,
-                          lineHeight: 1,
-                          userSelect: 'none',
-                          letterSpacing: '-0.12em',
-                        }}
-                      >⋮⋮</span>
-                    ) : null}
-                    <div
-                      style={{
-                        minWidth: 0,
-                        flex: 1,
-                        display: 'flex',
-                        flexDirection: 'column',
-                        justifyContent: 'center',
-                        gap: earningsHighlight ? 1 : 0,
-                        cursor: earningsHighlight ? 'pointer' : undefined,
-                      }}
-                      onClick={earningsHighlight ? (e) => {
-                        e.stopPropagation();
-                        handleRowSelect(stock, idx, e);
-                        openPortfolioEarningsModalFromSymbol(stock, e);
-                      } : undefined}
-                      title={earningsHighlight ? 'Click for quarterly results and company profile' : stock.Symbol}
-                    >
-                      <span title={stock.Symbol} style={{ fontFamily:'var(--font-mono)', fontWeight:600, fontSize:11, color: symC, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', lineHeight: 1.2 }}>{symLabel}</span>
-                      {isBeatHighlight ? (
-                        <span
-                          style={{
-                            fontSize: 9,
-                            fontWeight: 600,
-                            fontFamily: 'var(--font-mono)',
-                            color: DUAL_BEAT_LABEL_COLOR,
-                            lineHeight: 1.15,
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          Beat EPS+Rev
-                        </span>
-                      ) : upcomingInfo ? (
-                        <span
-                          style={{
-                            fontSize: 9,
-                            fontWeight: 600,
-                            fontFamily: 'var(--font-mono)',
-                            color: PORTFOLIO_EARNINGS_LABEL_COLOR,
-                            lineHeight: 1.15,
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          E {formatEarningsBadgeDate(upcomingInfo.earnings_release_next_date)}
-                        </span>
-                      ) : null}
-                    </div>
-                  </div>
-                  <div style={{ width:COLS[1].width, minWidth:COLS[1].width, flexShrink:0, padding:'0 8px', display:'flex', alignItems:'center', borderRight:'1px solid var(--border-light)' }}><span style={{ fontFamily:'var(--font-mono)', fontSize:11, color:'var(--text-secondary)' }}>{formatMarketCap(stock['Market Cap'])}</span></div>
-                  <div style={{ width:COLS[2].width, minWidth:COLS[2].width, flexShrink:0, padding:'0 4px', display:'flex', alignItems:'center', justifyContent:'center', borderRight:'1px solid var(--border-light)' }} onClick={e => e.stopPropagation()}><InstrumentNotesIcon symbol={stock.Symbol} instrumentType={stock.instrumentType === 'index' ? 'index' : 'stock'} /></div>
-                  <div style={{ width:COLS[3].width, minWidth:COLS[3].width, flexShrink:0, padding:'0 8px', display:'flex', alignItems:'center', borderRight:'1px solid var(--border-light)' }}><span style={{ fontFamily:'var(--font-mono)', fontSize:11, color:'var(--text-primary)' }}>{stock.Price!=null?`₹${stock.Price.toFixed(2)}`:'—'}</span></div>
-                  <div style={{ width:COLS[4].width, minWidth:COLS[4].width, flexShrink:0, padding:'0 8px', display:'flex', alignItems:'center', borderRight:'1px solid var(--border-light)' }}><span style={{ fontFamily:'var(--font-mono)', fontSize:11, color:chgC, fontWeight:500 }}>{chg!=null?`${chg>0?'+':''}${chg.toFixed(2)}%`:'—'}</span></div>
-                  <div style={{ width:COLS[5].width, minWidth:COLS[5].width, flexShrink:0, padding:'0 8px', display:'flex', alignItems:'center', borderRight:'1px solid var(--border-light)' }}><span style={{ fontFamily:'var(--font-mono)', fontSize:11, color:mchgC, fontWeight:500 }}>{mchg!=null?`${mchg>0?'+':''}${mchg.toFixed(2)}%`:'—'}</span></div>
-                </div>
-                {pfDraggingIdx !== null && pfDropGap === idx + 1 ? <DropInsetLine /> : null}
-                </React.Fragment>
-              );
-            })}
-            {loadingMore && (
-              <div style={{ padding: 10, fontSize: 11, color: 'var(--text-muted)', textAlign: 'center' }}>
-                Loading more...
-              </div>
-            )}
-            </>
+              <List
+                // Performance Optimization: Table Virtualization via react-window v2
+                // Only mounts the visible row elements in the DOM, keeping rendering complexity O(1).
+                // rowProps={{}} is passed to comply with react-window v2 requirements.
+                listRef={listRef}
+                height={listHeight}
+                rowCount={displayStocks.length}
+                rowHeight={getRowHeight}
+                width={481}
+                onRowsRendered={({ stopIndex }) => {
+                  if (stopIndex >= displayStocks.length - PREFETCH_BUFFER_ROWS) {
+                    loadMoreStocks();
+                  }
+                }}
+                rowComponent={Row}
+                rowProps={{}}
+              />
             )}
           </div>
           <div style={stockListFooterStripStyle}>

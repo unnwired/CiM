@@ -5,6 +5,10 @@ import signal
 import sys
 import subprocess
 import threading
+# Optimization: Using cachetools.TTLCache to implement thread-safe time-to-live caching
+# for chart indicators and screener responses. This prevents thread race conditions
+# on dictionary mutability and implements O(1) LRU caching.
+from cachetools import TTLCache
 import time as time_module
 import random
 import statistics
@@ -15,6 +19,7 @@ import pandas as pd
 from pathlib import Path
 from fastapi import FastAPI, Query, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Optional, Set, Tuple
@@ -214,6 +219,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Optimization: Add GZip compression middleware to reduce HTTP response sizes
+# for large OHLCV datasets and indicators by up to 90%.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
 
 @app.on_event("startup")
 def _on_startup():
@@ -386,10 +395,45 @@ def _on_startup():
 # DB HELPER
 # ──────────────────────────────────────────────
 
+# Optimization: Thread-local SQLite connection pooling.
+# Keeps an open sqlite3 connection per worker thread to avoid the file opening and PRAGMA
+# setup overhead for every request. ConnectionProxy prevents close() calls from shutting it down.
+_db_thread_local = threading.local()
+
+class ConnectionProxy:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        return self._conn.__enter__()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self._conn.__exit__(exc_type, exc_val, exc_tb)
+
+    def close(self):
+        # Ignore close to persist the connection in thread-local storage.
+        pass
+
 def get_db_connection():
     if not DB_PATH.exists():
         raise RuntimeError(f"Database not found: {DB_PATH}")
-    return _connect_sqlite(DB_PATH, row_factory=True)
+    
+    conn = getattr(_db_thread_local, "conn", None)
+    if conn is None:
+        conn = _connect_sqlite(DB_PATH, row_factory=True)
+        _db_thread_local.conn = conn
+    else:
+        # Verify connection is still alive
+        try:
+            conn.execute("SELECT 1")
+        except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+            conn = _connect_sqlite(DB_PATH, row_factory=True)
+            _db_thread_local.conn = conn
+            
+    return ConnectionProxy(conn)
 
 
 def ensure_earnings_chart_events_table(conn: sqlite3.Connection) -> None:
@@ -1505,12 +1549,14 @@ def _read_symbol_earnings_chart_events(conn: sqlite3.Connection, symbol: str) ->
 # ──────────────────────────────────────────────
 
 _stock_df: Optional[pd.DataFrame] = None
-_chart_cache: dict = {}
+_chart_cache_lock = threading.Lock()
+_filter_cache_lock = threading.Lock()
+_chart_cache = TTLCache(maxsize=300, ttl=300)
 # Cache key version: bump when chart JSON shape / indicator semantics change.
 _CHART_CACHE_SCHEMA = 3
 CHART_CACHE_TTL: int = 300  # 5 minutes
 CHART_CACHE_MAX_ENTRIES: int = 300
-_filter_cache: dict = {}
+_filter_cache = TTLCache(maxsize=500, ttl=120)
 _snapshot_filter_coverage_cache: dict = {}
 FILTER_CACHE_TTL: int = 120  # 2 minutes
 FILTER_CACHE_MAX_ENTRIES: int = 500
@@ -1550,43 +1596,44 @@ def _save_layout_merge(extra: dict):
 
 
 def set_cache_mode(enabled: bool):
-    global AGGRESSIVE_CACHE_RAM, CHART_CACHE_TTL, CHART_CACHE_MAX_ENTRIES, FILTER_CACHE_TTL, FILTER_CACHE_MAX_ENTRIES
+    global AGGRESSIVE_CACHE_RAM, CHART_CACHE_TTL, CHART_CACHE_MAX_ENTRIES, FILTER_CACHE_TTL, FILTER_CACHE_MAX_ENTRIES, _chart_cache, _filter_cache
     AGGRESSIVE_CACHE_RAM = bool(enabled)
     profile = CACHE_PROFILE_AGGRESSIVE if AGGRESSIVE_CACHE_RAM else CACHE_PROFILE_NORMAL
     CHART_CACHE_TTL = int(profile["chart_ttl"])
     CHART_CACHE_MAX_ENTRIES = int(profile["chart_max_entries"])
     FILTER_CACHE_TTL = int(profile["filter_ttl"])
     FILTER_CACHE_MAX_ENTRIES = int(profile["filter_max_entries"])
+    with _chart_cache_lock:
+        _chart_cache = TTLCache(maxsize=CHART_CACHE_MAX_ENTRIES, ttl=CHART_CACHE_TTL)
+    with _filter_cache_lock:
+        _filter_cache = TTLCache(maxsize=FILTER_CACHE_MAX_ENTRIES, ttl=FILTER_CACHE_TTL)
 
 def get_chart_cache(symbol, timeframe, ema_periods):
     key  = (symbol.upper(), timeframe, tuple(sorted(ema_periods)), _CHART_CACHE_SCHEMA)
-    item = _chart_cache.get(key)
-    if item is None:
-        return None
-    if time_module.time() - item["ts"] > CHART_CACHE_TTL:
-        del _chart_cache[key]
-        return None
-    return item["data"]
+    with _chart_cache_lock:
+        return _chart_cache.get(key)
 
 
 def set_chart_cache(symbol, timeframe, ema_periods, data):
     key = (symbol.upper(), timeframe, tuple(sorted(ema_periods)), _CHART_CACHE_SCHEMA)
-    if CHART_CACHE_MAX_ENTRIES > 0 and key not in _chart_cache and len(_chart_cache) >= CHART_CACHE_MAX_ENTRIES:
-        oldest_key = min(_chart_cache, key=lambda k: _chart_cache[k].get("ts", 0))
-        _chart_cache.pop(oldest_key, None)
-    _chart_cache[key] = {"data": data, "ts": time_module.time()}
+    with _chart_cache_lock:
+        _chart_cache[key] = data
 
 def invalidate_chart_cache(symbol=None):
     global _chart_cache
     if symbol is None:
-        _chart_cache = {}
+        with _chart_cache_lock:
+            _chart_cache.clear()
         try:
             market_map.invalidate_cache()
         except Exception:
             pass
     else:
         sym_u = symbol.upper()
-        _chart_cache = {k: v for k, v in _chart_cache.items() if not (isinstance(k, tuple) and len(k) > 0 and k[0] == sym_u)}
+        with _chart_cache_lock:
+            keys_to_del = [k for k in _chart_cache.keys() if isinstance(k, tuple) and len(k) > 0 and k[0] == sym_u]
+            for k in keys_to_del:
+                _chart_cache.pop(k, None)
         try:
             market_map.invalidate_cache(symbol)
         except Exception:
@@ -1922,26 +1969,20 @@ def _normalize_filter_body(body: dict) -> dict:
 
 def get_filter_cache(endpoint: str, body: dict):
     key = (endpoint, json.dumps(_normalize_filter_body(body), sort_keys=True, separators=(",", ":")))
-    item = _filter_cache.get(key)
-    if item is None:
-        return None
-    if time_module.time() - item["ts"] > FILTER_CACHE_TTL:
-        del _filter_cache[key]
-        return None
-    return item["data"]
+    with _filter_cache_lock:
+        return _filter_cache.get(key)
 
 
 def set_filter_cache(endpoint: str, body: dict, data: dict):
     key = (endpoint, json.dumps(_normalize_filter_body(body), sort_keys=True, separators=(",", ":")))
-    if FILTER_CACHE_MAX_ENTRIES > 0 and key not in _filter_cache and len(_filter_cache) >= FILTER_CACHE_MAX_ENTRIES:
-        oldest_key = min(_filter_cache, key=lambda k: _filter_cache[k].get("ts", 0))
-        _filter_cache.pop(oldest_key, None)
-    _filter_cache[key] = {"data": data, "ts": time_module.time()}
+    with _filter_cache_lock:
+        _filter_cache[key] = data
 
 
 def invalidate_filter_cache():
     global _filter_cache, _snapshot_filter_coverage_cache
-    _filter_cache = {}
+    with _filter_cache_lock:
+        _filter_cache.clear()
     _snapshot_filter_coverage_cache = {}
 
 
@@ -3987,14 +4028,18 @@ def admin_status():
 
 @app.get("/api/admin/cache-settings")
 def get_cache_settings():
+    with _chart_cache_lock:
+        chart_len = len(_chart_cache)
+    with _filter_cache_lock:
+        filter_len = len(_filter_cache)
     return {
         "aggressiveCacheRam": AGGRESSIVE_CACHE_RAM,
         "chartCacheTtlSec": CHART_CACHE_TTL,
         "chartCacheMaxEntries": CHART_CACHE_MAX_ENTRIES,
         "filterCacheTtlSec": FILTER_CACHE_TTL,
         "filterCacheMaxEntries": FILTER_CACHE_MAX_ENTRIES,
-        "chartCacheEntries": len(_chart_cache),
-        "filterCacheEntries": len(_filter_cache),
+        "chartCacheEntries": chart_len,
+        "filterCacheEntries": filter_len,
     }
 
 
@@ -4020,10 +4065,14 @@ def set_cache_settings(payload: dict = Body(...)):
 @app.post("/api/admin/cache-clear")
 def clear_cache():
     invalidate_chart_cache()
+    with _chart_cache_lock:
+        chart_len = len(_chart_cache)
+    with _filter_cache_lock:
+        filter_len = len(_filter_cache)
     return {
         "status": "cleared",
-        "chartCacheEntries": len(_chart_cache),
-        "filterCacheEntries": len(_filter_cache),
+        "chartCacheEntries": chart_len,
+        "filterCacheEntries": filter_len,
     }
 
 

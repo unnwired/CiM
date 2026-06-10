@@ -5,3 +5,4 @@ yfinance
 tradingview-screener
 requests
 cryptography
+cachetools
