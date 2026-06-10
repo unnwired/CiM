@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import ChartContainer from './ChartContainer';
-import { CHART_DATA_UPDATED_EVENT } from '../../chartEvents';
+import { CHART_DATA_UPDATED_EVENT, dispatchChromeIntroReadyOnce } from '../../chartEvents';
 
 const API = '';
 
@@ -37,6 +37,7 @@ export default function IndexChartContainer({
       .then(r => {
         setChartData(r.data);
         setLoading(false);
+        if (r.data?.bars?.length) dispatchChromeIntroReadyOnce();
       })
       .catch(err => { setError(err.message); setLoading(false); });
   }, [symbol, timeframe, emaKey]);

@@ -1,6 +1,6 @@
 """
 
-FlowX in-app update: local UPDATE folder first, GitHub Releases second.
+Charts In Motion in-app update: local UPDATE folder first, GitHub Releases second.
 
 """
 
@@ -36,7 +36,7 @@ VERSION_FILE = BASE_DIR / "version.txt"
 
 CONFIG_GITHUB = BASE_DIR / "config" / "github_updates.json"
 
-APPLY_SCRIPT = BASE_DIR / "scripts" / "FlowXApplyUpdate.ps1"
+APPLY_SCRIPT = BASE_DIR / "scripts" / "CiMApplyUpdate.ps1"
 
 PENDING_FILE = BASE_DIR / "runtime" / "logs" / "update-pending.json"
 
@@ -53,6 +53,8 @@ PROTECTED_REL = frozenset({
     "data/saved_filters.json",
 
     "data/screener_session.json",
+
+    "data/.cim-license",
 
 })
 
@@ -80,7 +82,7 @@ def configure_install_root(base_dir: Path) -> None:
 
     CONFIG_GITHUB = BASE_DIR / "config" / "github_updates.json"
 
-    APPLY_SCRIPT = BASE_DIR / "scripts" / "FlowXApplyUpdate.ps1"
+    APPLY_SCRIPT = BASE_DIR / "scripts" / "CiMApplyUpdate.ps1"
 
     PENDING_FILE = BASE_DIR / "runtime" / "logs" / "update-pending.json"
 
@@ -174,7 +176,7 @@ def _local_update_package_roots() -> List[Path]:
 
     for child in sorted(UPDATE_DIR.iterdir()):
 
-        if not child.is_dir() or not child.name.startswith("FlowX-Update"):
+        if not child.is_dir() or not child.name.startswith("CiM-Update"):
 
             continue
 
@@ -369,6 +371,16 @@ def update_settings():
     settings = github_updates.get_client_settings()
 
     settings["currentVersion"] = _read_version()
+
+    try:
+
+        from server import app_code_crypto as crypto
+
+        settings["productName"] = crypto.product_display_name(BASE_DIR)
+
+    except Exception:
+
+        settings["productName"] = "CiM"
 
     return settings
 
@@ -655,7 +667,7 @@ def update_apply(body: dict = Body(default={})):
         str(PENDING_FILE),
     ]
     apply_env = os.environ.copy()
-    apply_env["FLOWX_NO_PAUSE"] = "1"
+    apply_env["CIM_NO_PAUSE"] = "1"
     creationflags = 0
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
@@ -672,7 +684,7 @@ def update_apply(body: dict = Body(default={})):
 
         "status": "apply_scheduled",
 
-        "message": "FlowX will close to apply update.",
+        "message": "Charts In Motion will close to apply update.",
 
         "version": manifest["version"],
 

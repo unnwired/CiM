@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Smoke verification for FlowX distribution pipeline (vendor).
+  Smoke verification for Charts In Motion distribution pipeline (vendor).
 #>
 [CmdletBinding()]
 param(
@@ -12,9 +12,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $ScriptDir "Get-FlowXPaths.ps1")
+. (Join-Path $ScriptDir "Get-CiMPaths.ps1")
 $RepoRoot = Split-Path -Parent $ScriptDir
-$fx = Get-FlowXPaths -RepoRoot $RepoRoot
+$fx = Get-CiMPaths -RepoRoot $RepoRoot
 if (-not $ExportRoot) {
     $ExportRoot = $fx.ExportRoot
 }
@@ -23,13 +23,13 @@ $py = "python"
 $rp = Join-Path $RepoRoot "runtime\python\python.exe"
 if (Test-Path -LiteralPath $rp) { $py = $rp }
 
-Write-Host "=== FlowX distribution verify ==="
+Write-Host "=== Charts In Motion distribution verify ==="
 
 & $py -c @"
 import os, sys, tempfile, json, shutil
 from pathlib import Path
 sys.path.insert(0, r'$RepoRoot')
-os.environ['FLOWX_LICENSE_SECRET'] = 'verify-test'
+os.environ['CIM_LICENSE_SECRET'] = 'verify-test'
 from server.app_code_crypto import (
     install_key_for_machine, validate_install_key,
     encrypt_bytes, decrypt_bytes, app_code_key,
@@ -40,19 +40,19 @@ mc = 'TESTMACHINE001'
 k = install_key_for_machine(mc)
 assert validate_install_key(mc, k)
 assert ua._is_newer('2.0.0', '1.0.0')
-# Installed tree must not use a stale FLOWX_LICENSE_SECRET env over config file.
+# Installed tree must not use a stale CIM_LICENSE_SECRET env over config file.
 tmpdir = Path(tempfile.mkdtemp())
 try:
     (tmpdir / 'config').mkdir()
     (tmpdir / 'config' / '.fx-dist.cfg').write_text('file-secret', encoding='utf-8')
-    os.environ['FLOWX_LICENSE_SECRET'] = 'env-secret'
+    os.environ['CIM_LICENSE_SECRET'] = 'env-secret'
     kf = install_key_for_machine(mc, base_dir=tmpdir)
     ke = install_key_for_machine(mc)
     assert kf != ke
     assert validate_install_key(mc, kf, base_dir=tmpdir)
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
-    os.environ.pop('FLOWX_LICENSE_SECRET', None)
+    os.environ.pop('CIM_LICENSE_SECRET', None)
 print('[ok] crypto + version compare + vendor file precedence')
 "@
 
@@ -79,9 +79,9 @@ if (-not $SkipInstaller) {
 }
 
 Write-Host "=== Manual checklist ==="
-Write-Host "1. Clean VM: FlowXSetup + install key"
+Write-Host "1. Clean VM: CiMSetup + install key"
 Write-Host "2. Re-install over same dir: user JSON preserved"
-Write-Host "3. Copy FlowX-Update-* to UPDATE\; cogwheel Apply update"
+Write-Host "3. Copy CiM-Update-* to UPDATE\; cogwheel Apply update"
 Write-Host "4. HTTPS manifest with file urls; Apply update (remote)"
-Write-Host "5. Encrypted build starts (valid .flowx-license)"
+Write-Host "5. Encrypted build starts (valid .cim-license)"
 Write-Host "=== Done ==="

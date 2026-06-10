@@ -1,5 +1,5 @@
 /**
- * FlowX INR / large-number display contract
+ * Charts In Motion INR / large-number display contract
  *
  * All monetary UI uses short-scale ₹M / ₹B / ₹T only — never Cr, L, or lakh/crore labels.
  * Backend market cap & TradingView revenue fields store full INR.

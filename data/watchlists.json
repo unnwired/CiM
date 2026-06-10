@@ -891,6 +891,10 @@
       {
         "symbol": "IDEA",
         "type": "stock"
+      },
+      {
+        "symbol": "ITC",
+        "type": "stock"
       }
     ]
   }

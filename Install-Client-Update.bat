@@ -1,9 +1,9 @@
 @echo off
 setlocal
-REM Run this from the extracted FlowX-Update-* folder on the CLIENT PC (double-click).
+REM Run this from the extracted CiM-Update-* folder on the CLIENT PC (double-click).
 for %%I in ("%~dp0.") do set "PKG=%%~fI"
 echo.
-echo FlowX client update - extract into FlowX\UPDATE\FlowX-Update-* then run this bat.
+echo Charts In Motion client update - extract into CiM\UPDATE\CiM-Update-* then run this bat.
 echo.
 if exist "%PKG%\Install-Client-Update.ps1" (
   set "PS1=%PKG%\Install-Client-Update.ps1"

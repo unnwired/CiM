@@ -289,8 +289,8 @@ export default function MarketMapPage({ onOpenChart, isActive }) {
       ...(selected?.symbol ? { marketMapSelectedSymbol: selected.symbol } : {}),
     };
     axios.post(`${API}/api/layout`, payload)
-      .then(() => window.dispatchEvent(new CustomEvent('flowx-toast', { detail: 'Layout saved.' })))
-      .catch(() => window.dispatchEvent(new CustomEvent('flowx-toast', { detail: 'Failed to save layout.' })));
+      .then(() => window.dispatchEvent(new CustomEvent('cim-toast', { detail: 'Layout saved.' })))
+      .catch(() => window.dispatchEvent(new CustomEvent('cim-toast', { detail: 'Failed to save layout.' })));
   }
 
   function onDividerMouseDown(e) {
@@ -465,7 +465,6 @@ export default function MarketMapPage({ onOpenChart, isActive }) {
             {asOf}
           </span>
         )}
-        <button type="button" onClick={() => loadSummary(true)} style={toolBtnStyle()}>Refresh</button>
         <button type="button" onClick={handleSaveLayout} style={toolBtnStyle()}>Save Layout</button>
       </div>
 

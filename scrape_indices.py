@@ -94,6 +94,16 @@ NSE_NAME_MAP = {
 SKIP_KEYWORDS = ["G-SEC", "BOND", "BHARAT BOND", "COMPOSITE G-SEC"]
 CHARTABLE_NAMES = set(NSE_NAME_MAP.values())
 
+# Yahoo has no OHLC series — always use NSE historicalOR/indicesHistory.
+NSE_ONLY_INDEX_SYMBOLS = frozenset({
+    "^CNXINDDEF",
+})
+
+# Earliest calendar date to request from NSE (index may list later).
+NSE_INDEX_HISTORY_START = {
+    "^CNXINDDEF": "2024-11-11",
+}
+
 
 def get_usd_inr():
     try:
@@ -154,9 +164,45 @@ def scrape_history(symbol, name, category, usd_inr, conn):
         start = "2010-01-01"
 
     end = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
-    df  = yf.download(symbol, start=start, end=end, progress=False, auto_adjust=True)
+    nse_name = NSE_NAME_MAP.get(symbol)
+
+    if symbol in NSE_ONLY_INDEX_SYMBOLS and nse_name and category == "equity":
+        try:
+            from nse_index_history import scrape_history_from_nse
+
+            history_start = NSE_INDEX_HISTORY_START.get(symbol, "2010-01-01")
+            rows = scrape_history_from_nse(
+                conn,
+                symbol,
+                nse_name,
+                history_start=history_start,
+            )
+            if rows:
+                _log(f"    [OK] {rows} rows from NSE history API")
+                return rows
+        except Exception as exc:
+            _log(f"    NSE history failed: {exc}")
+        _log("    No data returned")
+        return 0
+
+    df = yf.download(symbol, start=start, end=end, progress=False, auto_adjust=True)
 
     if df.empty:
+        if nse_name and category == "equity":
+            try:
+                from nse_index_history import scrape_history_from_nse
+
+                rows = scrape_history_from_nse(
+                    conn,
+                    symbol,
+                    nse_name,
+                    history_start=start,
+                )
+                if rows:
+                    _log(f"    [OK] {rows} rows from NSE history API (Yahoo fallback)")
+                    return rows
+            except Exception as exc:
+                _log(f"    NSE history fallback failed: {exc}")
         _log("    No data returned")
         return 0
 
@@ -405,6 +451,108 @@ def ensure_equity_index_rows(conn) -> int:
     return added
 
 
+def _nse_history_symbols_to_refresh(
+    conn,
+    *,
+    max_lag_days: int = 5,
+    min_rows: int = 2,
+) -> list[tuple[str, str]]:
+    """Symbols that need NSE index_history backfill or extension."""
+    from datetime import date as date_cls
+
+    from nse_index_history import find_index_history_gaps
+
+    cutoff = (date_cls.today() - timedelta(days=max_lag_days)).strftime("%Y-%m-%d")
+    cursor = conn.cursor()
+    to_refresh: dict[str, str] = {}
+
+    for symbol in NSE_ONLY_INDEX_SYMBOLS:
+        nse_name = NSE_NAME_MAP.get(symbol)
+        if not nse_name:
+            continue
+        cursor.execute("SELECT name FROM indices WHERE symbol = ?", (symbol,))
+        row = cursor.fetchone()
+        name = (row[0] if row else None) or symbol
+        if find_index_history_gaps(conn, symbol):
+            to_refresh[symbol] = name
+            continue
+        cursor.execute(
+            "SELECT MAX(SUBSTR(Date, 1, 10)) FROM index_history WHERE Symbol = ?",
+            (symbol,),
+        )
+        last = cursor.fetchone()[0]
+        if not last or str(last)[:10] < cutoff:
+            to_refresh[symbol] = name
+
+    cursor.execute(
+        """
+        SELECT i.symbol, i.name
+        FROM indices i
+        WHERE i.category = 'equity'
+          AND (SELECT COUNT(*) FROM index_history h WHERE h.Symbol = i.symbol) < ?
+        """,
+        (min_rows,),
+    )
+    for symbol, name in cursor.fetchall():
+        if NSE_NAME_MAP.get(symbol):
+            to_refresh[str(symbol)] = str(name or symbol)
+
+    return sorted(to_refresh.items())
+
+
+def sync_nse_index_history(conn, *, max_lag_days: int = 5, min_rows: int = 2) -> int:
+    """
+    Backfill or extend index_history for NSE-only / Yahoo-missing indices.
+    Runs on startup and after index updates so charts do not freeze on an old bar.
+    """
+    from nse_index_history import (
+        find_index_history_gaps,
+        make_nse_history_session,
+        scrape_history_from_nse,
+    )
+
+    targets = _nse_history_symbols_to_refresh(
+        conn, max_lag_days=max_lag_days, min_rows=min_rows
+    )
+    if not targets:
+        return 0
+
+    session = make_nse_history_session()
+    total = 0
+    try:
+        for symbol, name in targets:
+            nse_name = NSE_NAME_MAP.get(symbol)
+            if not nse_name:
+                continue
+            history_start = NSE_INDEX_HISTORY_START.get(symbol, "2010-01-01")
+            force_full = bool(find_index_history_gaps(conn, symbol))
+            try:
+                rows = scrape_history_from_nse(
+                    conn,
+                    symbol,
+                    nse_name,
+                    history_start=history_start,
+                    session=session,
+                    force_full=force_full,
+                )
+                if rows:
+                    _log(f"  [OK] {name}: {rows} NSE history row(s)")
+                    total += rows
+            except Exception as exc:
+                _log(f"  [X] {name} NSE history: {exc}")
+    finally:
+        session.close()
+
+    if total:
+        recalculate_index_changes(conn)
+    return total
+
+
+def ensure_missing_index_history(conn, **kwargs) -> int:
+    """Backward-compatible alias for sync_nse_index_history."""
+    return sync_nse_index_history(conn, **kwargs)
+
+
 def recalculate_index_changes(conn):
     _log("\nRecalculating index change % from history...")
     cursor = conn.cursor()
@@ -463,6 +611,7 @@ if __name__ == "__main__":
 
     update_live_prices(usd_inr, conn)
     fetch_all_nse_indices(conn)
+    sync_nse_index_history(conn)
     recalculate_index_changes(conn)
 
     conn.close()

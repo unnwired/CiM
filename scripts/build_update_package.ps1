@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Build FlowX-Update-{version} folder with update.manifest.json + payload mirror.
+  Build CiM-Update-{version} folder with update.manifest.json + payload mirror.
 #>
 [CmdletBinding()]
 param(
@@ -14,9 +14,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $ScriptDir "Get-FlowXPaths.ps1")
+. (Join-Path $ScriptDir "Get-CiMPaths.ps1")
 $RepoRoot = Split-Path -Parent $ScriptDir
-$fx = Get-FlowXPaths -RepoRoot $RepoRoot
+$fx = Get-CiMPaths -RepoRoot $RepoRoot
 
 function Test-PowerShellScriptSyntax {
     param([Parameter(Mandatory)][string[]]$Paths)
@@ -61,7 +61,8 @@ $protectedPrefixes = @(
     "data/layout.json",
     "data/saved_filters.json",
     "data/screener_session.json",
-    "data/screener_profile/"
+    "data/screener_profile/",
+    "data/.cim-license"
 )
 
 function Test-ProtectedPath([string]$Rel) {
@@ -96,6 +97,11 @@ function Add-Entry {
 }
 
 $exportResolved = (Resolve-Path -LiteralPath $ExportRoot).Path
+$exportLicense = Join-Path $exportResolved "data\.cim-license"
+if (Test-Path -LiteralPath $exportLicense) {
+    Remove-Item -LiteralPath $exportLicense -Force
+    Write-Host "Removed data\.cim-license from export (never ship in update package)"
+}
 $entries = [System.Collections.ArrayList]@()
 $seen = @{}
 
@@ -114,8 +120,8 @@ foreach ($scan in $scanRoots) {
 }
 
 $rootFiles = @(
-    "start_flowx.bat",
-    "stop_flowx.bat",
+    "start_cim.bat",
+    "stop_cim.bat",
     "Apply-Update.bat",
     "db_sqlite.py",
     "requirements_runtime.txt"
@@ -136,7 +142,7 @@ if ($entries.Count -eq 0) {
     throw "No update files found under $exportResolved"
 }
 
-$outName = "FlowX-Update-$Version"
+$outName = "CiM-Update-$Version"
 if (-not $OutputDir) {
     $OutputDir = Join-Path $fx.InstallerOutputDir $outName
 }
@@ -159,15 +165,15 @@ foreach ($e in $entries) {
 
 # Always ship latest client update scripts from repo (export may be stale)
 foreach ($rel in @(
-        "scripts\FlowXUpdatePackage.ps1",
+        "scripts\CiMUpdatePackage.ps1",
         "scripts\Apply-LocalUpdate-Entry.ps1",
-        "scripts\FlowXInstallLocator.ps1",
+        "scripts\CiMInstallLocator.ps1",
         "scripts\Install-Client-Update.ps1",
         "scripts\_Apply-LocalUpdate.ps1",
-        "scripts\Diagnose-FlowXInstall.ps1",
-        "scripts\FlowXApplyUpdate.ps1",
+        "scripts\Diagnose-CiMInstall.ps1",
+        "scripts\CiMApplyUpdate.ps1",
         "server\app_code_crypto.py",
-        "server\flowx_bootstrap.py",
+        "server\cim_bootstrap.py",
         "server\github_updates.py",
         "config\github_updates.json",
         "Apply-Update.bat"
@@ -198,16 +204,16 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText($manifestPath, $manifestJson, $utf8NoBom)
 
 $clientReadme = @"
-FlowX update package (version $Version)
+Charts In Motion update package (version $Version)
 =====================================
 
 CLIENT PC - double-click Install-Client-Update.bat in this folder.
 
-1. Close FlowX.
-2. Extract this folder into your FlowX UPDATE folder (e.g. D:\FlowX\UPDATE\FlowX-Update-1.0.2).
+1. Close Charts In Motion.
+2. Extract this folder into your Charts In Motion UPDATE folder (e.g. D:\CiM\UPDATE\CiM-Update-1.0.2).
 3. Run Install-Client-Update.bat (install path is detected automatically).
-4. If license is missing, run Repair-FlowXLicense.bat in the FlowX install folder.
-5. Run start_flowx.bat in the FlowX install folder.
+4. If license is missing, run Repair-CiMLicense.bat in the Charts In Motion install folder.
+5. Run start_cim.bat in the Charts In Motion install folder.
 
 See CLIENT-STEPS.txt in this folder.
 "@
@@ -222,9 +228,9 @@ $installerPs1 = Join-Path $RepoRoot "scripts\Install-Client-Update.ps1"
 if (Test-Path -LiteralPath $installerBat) {
     Copy-Item -LiteralPath $installerBat -Destination (Join-Path $OutputDir "Install-Client-Update.bat") -Force
 }
-$repairBat = Join-Path $RepoRoot "Repair-FlowXLicense.bat"
+$repairBat = Join-Path $RepoRoot "Repair-CiMLicense.bat"
 if (Test-Path -LiteralPath $repairBat) {
-    Copy-Item -LiteralPath $repairBat -Destination (Join-Path $OutputDir "Repair-FlowXLicense.bat") -Force
+    Copy-Item -LiteralPath $repairBat -Destination (Join-Path $OutputDir "Repair-CiMLicense.bat") -Force
 }
 $clientPs1Paths = @()
 if (Test-Path -LiteralPath $installerPs1) {
@@ -232,7 +238,7 @@ if (Test-Path -LiteralPath $installerPs1) {
     Copy-ClientPowerShellScript -SourcePath $installerPs1 -DestPath $dst
     $clientPs1Paths += $dst
 }
-foreach ($rel in @("FlowXInstallLocator.ps1", "FlowXUpdatePackage.ps1")) {
+foreach ($rel in @("CiMInstallLocator.ps1", "CiMUpdatePackage.ps1")) {
     $srcPs1 = Join-Path $RepoRoot "scripts\$rel"
     if (-not (Test-Path -LiteralPath $srcPs1)) { continue }
     $scriptsOut = Join-Path $OutputDir "scripts"
@@ -242,10 +248,10 @@ foreach ($rel in @("FlowXInstallLocator.ps1", "FlowXUpdatePackage.ps1")) {
 }
 $repoClientScripts = @(
     (Join-Path $RepoRoot "scripts\Install-Client-Update.ps1"),
-    (Join-Path $RepoRoot "scripts\FlowXInstallLocator.ps1"),
-    (Join-Path $RepoRoot "scripts\FlowXUpdatePackage.ps1"),
+    (Join-Path $RepoRoot "scripts\CiMInstallLocator.ps1"),
+    (Join-Path $RepoRoot "scripts\CiMUpdatePackage.ps1"),
     (Join-Path $RepoRoot "scripts\Apply-LocalUpdate-Entry.ps1"),
-    (Join-Path $RepoRoot "scripts\Diagnose-FlowXInstall.ps1")
+    (Join-Path $RepoRoot "scripts\Diagnose-CiMInstall.ps1")
 )
 Test-PowerShellScriptSyntax -Paths ($repoClientScripts + $clientPs1Paths)
 
@@ -261,6 +267,6 @@ Write-Host "Creating GitHub release ZIP: $zipPath"
 Compress-Archive -LiteralPath $OutputDir -DestinationPath $zipPath -CompressionLevel Optimal
 Write-Host ""
 Write-Host "Publish to GitHub Releases:"
-Write-Host "  Repo:  https://github.com/unnwired/flowx-updates/releases"
+Write-Host "  Repo:  https://github.com/unnwired/CiM-Updates/releases"
 Write-Host "  Tag:   v$Version"
 Write-Host "  Asset: $outName.zip"

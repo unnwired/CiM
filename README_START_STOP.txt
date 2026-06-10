@@ -1,4 +1,4 @@
-FlowX - Start and Stop Guide
+Charts In Motion - Start and Stop Guide
 
 This project includes one-click scripts to bootstrap, start, and stop the app.
 Keep both documentation files together for distribution:
@@ -8,15 +8,15 @@ Keep both documentation files together for distribution:
 
 Files to use (root folder)
 
-- start_flowx.bat - Bootstraps automatically and starts the app with the best available mode
-- stop_flowx.bat - Stops backend/frontend processes
+- start_cim.bat - Bootstraps automatically and starts the app with the best available mode
+- stop_cim.bat - Stops backend/frontend processes
 - requirements_runtime.txt - Backend Python runtime dependency list
-- create_desktop_shortcut.bat - Creates a Desktop shortcut named FlowX
-- export_flowx.ps1 - Builds frontend + runtime package for distribution
+- create_desktop_shortcut.bat - Creates a Desktop shortcut named Charts In Motion
+- export_cim.ps1 - Builds frontend + runtime package for distribution
 
 One-click start (recommended)
 
-1. Double-click start_flowx.bat
+1. Double-click start_cim.bat
 2. Script will automatically:
    - Verify required files exist (for safer unzip/use anywhere)
    - Use bundled embedded Python from runtime\python (no user install needed)
@@ -30,7 +30,7 @@ Build distribution package
 
 Run this from project root in PowerShell:
 
-powershell -ExecutionPolicy Bypass -File ".\export_flowx.ps1"
+powershell -ExecutionPolicy Bypass -File ".\export_cim.ps1"
 
 Export modes:
 
@@ -42,28 +42,28 @@ Export modes:
 
 Examples:
 
-- powershell -ExecutionPolicy Bypass -File ".\export_flowx.ps1" -Mode standard
-- powershell -ExecutionPolicy Bypass -File ".\export_flowx.ps1" -Mode distribution
+- powershell -ExecutionPolicy Bypass -File ".\export_cim.ps1" -Mode standard
+- powershell -ExecutionPolicy Bypass -File ".\export_cim.ps1" -Mode distribution
 
 Note: if you pass -SkipFrontendBuild in distribution mode, existing frontend/build is reused as-is and may not reflect the distribution default indicator/EMA profile.
 
 Optional: Create desktop shortcut
 
 1. Double-click create_desktop_shortcut.bat
-2. A Desktop shortcut named FlowX will be created
+2. A Desktop shortcut named Charts In Motion will be created
 3. Use the shortcut for one-click launch in future
 
 Stop the app
 
 Preferred method (desktop app):
 
-1. Click the window close button (X) on the FlowX desktop window.
+1. Click the window close button (X) on the Charts In Motion desktop window.
 2. Confirm shutdown when prompted.
-3. FlowX will stop backend services and close the desktop app.
+3. Charts In Motion will stop backend services and close the desktop app.
 
 Fallback method:
 
-1. Double-click stop_flowx.bat
+1. Double-click stop_cim.bat
 2. This attempts to stop backend/frontend processes and related port listeners.
 
 Notes
@@ -74,7 +74,7 @@ Notes
   - runtime\python\python.exe
   - runtime\wheelhouse\ (offline Python dependency packages)
   - frontend\build\index.html
-- export_flowx.ps1 prepares these by default unless skip flags are used.
+- export_cim.ps1 prepares these by default unless skip flags are used.
 - If winget is needed and missing:
   - Install App Installer from Microsoft Store.
 - Some machines may still require Run as Administrator on first setup.

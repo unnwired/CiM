@@ -1,0 +1,14 @@
+{
+  "displayName": "Charts In Motion",
+  "displayNameDev": "Charts In Motion Dev",
+  "slug": "CiM",
+  "localAppDataFolder": "CiM",
+  "desktopFolder": "CiMDesktop",
+  "licenseFile": "data/.cim-license",
+  "bootstrapModule": "server.cim_bootstrap:app",
+  "updateZipPrefix": "CiM-Update-",
+  "githubOwner": "unnwired",
+  "githubRepo": "CiM-Updates",
+  "defaultInstallDir": "D:\\CiM",
+  "exportFolderName": "CiM"
+}

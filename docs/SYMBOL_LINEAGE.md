@@ -3,7 +3,7 @@
 ## Problem
 
 NSE occasionally **renames tickers** while the issuer stays the same (e.g. `MCDOWELL-N` → `UNITDSPR`, effective 2024-06-07).  
-FlowX stores OHLC in `historical_data` keyed by **current** `screener.symbol` and loads charts via `yfinance` as `{symbol}.NS`.
+Charts In Motion stores OHLC in `historical_data` keyed by **current** `screener.symbol` and loads charts via `yfinance` as `{symbol}.NS`.
 
 Yahoo history for the **new** ticker only exists from the rename date onward. TradingView shows a **continuous** series because it maps the instrument to one identity across renames.
 
@@ -127,7 +127,7 @@ For `UNITDSPR` / 1M chart:
 |-------|-------------|--------|
 | 1 | This doc + `symbol_lineage.json` + `symbol_lineage.py` + `backfill_symbol_history.py` | Current |
 | 2 | `scrape_daily` integration (gaps + shallow lineage) | Current |
-| 3 | `export_flowx.ps1` copies config; optional admin endpoint | Partial |
+| 3 | `export_cim.ps1` copies config; optional admin endpoint | Partial |
 | 4 | ISIN-linked auto lineage from exchange master | Planned |
 | 5 | UI: chart footnote “includes history as MCDOWELL-N” | Planned |
 

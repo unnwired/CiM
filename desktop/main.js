@@ -4,7 +4,7 @@ const http = require('http');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const TARGET_URL = process.env.FLOWX_URL || 'http://127.0.0.1:8000';
+const TARGET_URL = process.env.CIM_URL || 'http://127.0.0.1:8000';
 const ROOT_DIR = path.resolve(__dirname, '..');
 const LOG_DIR = path.join(ROOT_DIR, 'runtime', 'logs');
 const DESKTOP_RENDERER_LOG = path.join(LOG_DIR, 'desktop-renderer.log');
@@ -18,7 +18,7 @@ app.disableHardwareAcceleration();
 
 try {
   const localAppData = process.env.LOCALAPPDATA || app.getPath('appData');
-  const base = path.join(localAppData, 'FlowXDesktop');
+  const base = path.join(localAppData, 'CiMDesktop');
   fs.mkdirSync(base, { recursive: true });
   app.setPath('userData', path.join(base, 'user-data'));
   app.setPath('sessionData', path.join(base, 'session-data'));
@@ -57,7 +57,33 @@ function postStopAll() {
 }
 
 function devToolsEnabled() {
-  return !app.isPackaged || process.env.FLOWX_DEV_TOOLS === '1';
+  return !app.isPackaged || process.env.CIM_DEV_TOOLS === '1';
+}
+
+function readInstalledVersion() {
+  try {
+    const vf = path.join(ROOT_DIR, 'version.txt');
+    if (fs.existsSync(vf)) {
+      return fs.readFileSync(vf, 'utf8').replace(/^\uFEFF/, '').trim();
+    }
+  } catch {
+    // ignore
+  }
+  return '';
+}
+
+function resolveProductDisplayName() {
+  const serverPy = path.join(ROOT_DIR, 'server', 'server.py');
+  if (fs.existsSync(serverPy)) return 'Charts In Motion Dev';
+  const devEnv = String(process.env.CIM_DEV || '').trim().toLowerCase();
+  if (devEnv === '1' || devEnv === 'true' || devEnv === 'yes') return 'Charts In Motion Dev';
+  return 'Charts In Motion';
+}
+
+function resolveWindowTitle() {
+  const name = resolveProductDisplayName();
+  const ver = readInstalledVersion();
+  return ver ? `${name} ${ver}` : name;
 }
 
 function resolvePythonExe() {
@@ -68,11 +94,19 @@ function resolvePythonExe() {
   return process.env.PYTHON_EXE || 'python';
 }
 
+function resolveUvicornApp() {
+  const serverPy = path.join(ROOT_DIR, 'server', 'server.py');
+  if (fs.existsSync(serverPy)) {
+    return 'server.server:app';
+  }
+  return 'server.cim_bootstrap:app';
+}
+
 function startBackendProcess() {
   const pythonExe = resolvePythonExe();
   const child = spawn(
     pythonExe,
-    ['-s', '-m', 'uvicorn', 'server.flowx_bootstrap:app', '--host', '127.0.0.1', '--port', '8000'],
+    ['-s', '-m', 'uvicorn', resolveUvicornApp(), '--host', '127.0.0.1', '--port', '8000'],
     {
       cwd: ROOT_DIR,
       detached: true,
@@ -131,14 +165,14 @@ async function confirmAndShutdown(win) {
   try {
     shouldShutdown = await win.webContents.executeJavaScript(`
       new Promise((resolve) => {
-        const existing = document.getElementById('flowx-close-confirm-overlay');
+        const existing = document.getElementById('cim-close-confirm-overlay');
         if (existing) {
           resolve(false);
           return;
         }
 
         const overlay = document.createElement('div');
-        overlay.id = 'flowx-close-confirm-overlay';
+        overlay.id = 'cim-close-confirm-overlay';
         overlay.style.position = 'fixed';
         overlay.style.inset = '0';
         overlay.style.background = 'rgba(0,0,0,0.62)';
@@ -164,7 +198,7 @@ async function confirmAndShutdown(win) {
         header.style.justifyContent = 'space-between';
 
         const title = document.createElement('div');
-        title.textContent = 'Shut down FlowX?';
+        title.textContent = 'Shut down Charts In Motion?';
         title.style.fontSize = '15px';
         title.style.fontWeight = '600';
         title.style.color = 'var(--text-primary, #e6edf3)';
@@ -274,8 +308,9 @@ async function confirmAndShutdown(win) {
 }
 
 function ping(url) {
+  const healthUrl = url.replace(/\/$/, '') + '/api/health';
   return new Promise((resolve, reject) => {
-    const req = http.get(url, (res) => {
+    const req = http.get(healthUrl, (res) => {
       res.resume();
       if (res.statusCode && res.statusCode >= 200 && res.statusCode < 500) {
         resolve();
@@ -336,7 +371,7 @@ async function createWindow() {
     height: 900,
     minWidth: 1024,
     minHeight: 700,
-    title: 'FlowX',
+    title: resolveWindowTitle(),
     autoHideMenuBar: true,
     show: true,
     backgroundColor: '#0d1117',
@@ -347,7 +382,7 @@ async function createWindow() {
     },
   });
 
-  // Screener + TradingView: system default browser, not a second FlowX window.
+  // Screener + TradingView: system default browser, not a second Charts In Motion window.
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (openInSystemBrowser(url)) return { action: 'deny' };
     return { action: 'allow' };
@@ -405,7 +440,7 @@ async function createWindow() {
   try {
     await ping(TARGET_URL);
     backendAlreadyUp = true;
-    setLoadingStatus(win, 'Backend is ready. Loading FlowX…');
+    setLoadingStatus(win, 'Backend is ready. Loading Charts In Motion…');
   } catch {
     setLoadingStatus(win, 'Starting backend service…');
     startBackendProcess();
@@ -425,14 +460,14 @@ async function createWindow() {
     try {
       await ping(TARGET_URL);
       clearInterval(interval);
-      setLoadingStatus(win, 'Loading FlowX…');
+      setLoadingStatus(win, 'Loading Charts In Motion…');
       await win.loadURL(TARGET_URL);
     } catch {
       if (attempts >= maxAttempts) {
         clearInterval(interval);
         setLoadingStatus(
           win,
-          `Backend not reachable at ${TARGET_URL}. Run start_flowx.bat from the FlowX folder, or check runtime\\logs\\backend-startup.log.`,
+          `Backend not reachable at ${TARGET_URL}. Run start_cim.bat from the Charts In Motion folder, or check runtime\\logs\\backend-startup.log.`,
           true,
         );
       }
@@ -441,7 +476,7 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  ipcMain.handle('flowx-open-external', async (_event, url) => {
+  ipcMain.handle('cim-open-external', async (_event, url) => {
     const target = String(url || '').trim();
     if (!openInSystemBrowser(target)) {
       throw new Error('URL is not allowed for external open');
@@ -449,20 +484,20 @@ app.whenReady().then(async () => {
     return { ok: true };
   });
 
-  ipcMain.handle('flowx-can-restart-backend', async () => devToolsEnabled());
-  ipcMain.handle('flowx-restart-backend', async () => {
+  ipcMain.handle('cim-can-restart-backend', async () => devToolsEnabled());
+  ipcMain.handle('cim-restart-backend', async () => {
     if (!devToolsEnabled()) {
       throw new Error('Restart backend is disabled outside development mode');
     }
     await restartBackendNow();
     return { ok: true };
   });
-  ipcMain.handle('flowx-quit', async () => {
+  ipcMain.handle('cim-quit', async () => {
     isQuitting = true;
     app.quit();
     return { ok: true };
   });
-  ipcMain.handle('flowx-quit-for-update', async () => {
+  ipcMain.handle('cim-quit-for-update', async () => {
     isQuitting = true;
     try {
       await postStopAll();
@@ -473,14 +508,14 @@ app.whenReady().then(async () => {
     app.quit();
     return { ok: true };
   });
-  ipcMain.handle('flowx-can-reload-frontend', async () => devToolsEnabled());
-  ipcMain.handle('flowx-reload-frontend', async () => {
+  ipcMain.handle('cim-can-reload-frontend', async () => devToolsEnabled());
+  ipcMain.handle('cim-reload-frontend', async () => {
     if (!devToolsEnabled()) {
       throw new Error('Reload frontend is disabled outside development mode');
     }
     const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
     if (!win || win.isDestroyed()) {
-      throw new Error('No active FlowX window found');
+      throw new Error('No active Charts In Motion window found');
     }
     await win.loadURL(TARGET_URL);
     return { ok: true };

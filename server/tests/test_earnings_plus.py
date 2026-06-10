@@ -72,8 +72,8 @@ class EarningsPlusHelpersTest(unittest.TestCase):
         )
         self.assertFalse(is_qualified)
 
-    def test_pick_prefers_standalone_qualified_over_consolidated_not_qualified(self):
-        sym = "DEMO"
+    def test_pick_uses_consolidated_not_qualified_over_standalone_qualified(self):
+        sym = "FINCABLES"
         computed_at = "2026-05-27 12:00:00"
         c_ev = {
             "decision": "not_qualified",
@@ -82,7 +82,7 @@ class EarningsPlusHelpersTest(unittest.TestCase):
             "latest_period_date_key": "2026-03-31",
             "previous_period": "Dec 2025",
             "previous_year_period": "Mar 2025",
-            "note": "no",
+            "note": "consolidated fails",
             "source_fetched_at": "2026-05-27 10:00:00",
         }
         s_ev = {
@@ -92,7 +92,38 @@ class EarningsPlusHelpersTest(unittest.TestCase):
             "latest_period_date_key": "2026-03-31",
             "previous_period": "Dec 2025",
             "previous_year_period": "Mar 2025",
-            "note": "yes",
+            "note": "standalone passes",
+            "source_fetched_at": "2026-05-27 10:00:00",
+        }
+        basis_results = [
+            ("consolidated", c_ev, None, False),
+            ("standalone", s_ev, None, False),
+        ]
+        entry = self.srv._pick_best_earnings_plus_entry(sym, basis_results, computed_at)
+        self.assertEqual(entry["decision"], "not_qualified")
+        self.assertEqual(entry["basis_used"], "consolidated")
+
+    def test_pick_falls_back_to_standalone_when_consolidated_insufficient(self):
+        sym = "DEMO"
+        computed_at = "2026-05-27 12:00:00"
+        c_ev = {
+            "decision": "insufficient_data",
+            "basis_used": "consolidated",
+            "latest_period": None,
+            "latest_period_date_key": None,
+            "previous_period": None,
+            "previous_year_period": None,
+            "note": "no consolidated",
+            "source_fetched_at": None,
+        }
+        s_ev = {
+            "decision": "qualified",
+            "basis_used": "standalone",
+            "latest_period": "Mar 2026",
+            "latest_period_date_key": "2026-03-31",
+            "previous_period": "Dec 2025",
+            "previous_year_period": "Mar 2025",
+            "note": "standalone passes",
             "source_fetched_at": "2026-05-27 10:00:00",
         }
         basis_results = [
@@ -102,6 +133,26 @@ class EarningsPlusHelpersTest(unittest.TestCase):
         entry = self.srv._pick_best_earnings_plus_entry(sym, basis_results, computed_at)
         self.assertEqual(entry["decision"], "qualified")
         self.assertEqual(entry["basis_used"], "standalone")
+
+    def test_pick_uses_consolidated_qualified_when_both_qualify(self):
+        sym = "DEMO"
+        computed_at = "2026-05-27 12:00:00"
+        base = {
+            "latest_period": "Mar 2026",
+            "latest_period_date_key": "2026-03-31",
+            "previous_period": "Dec 2025",
+            "previous_year_period": "Mar 2025",
+            "source_fetched_at": "2026-05-27 10:00:00",
+        }
+        c_ev = {"decision": "qualified", "basis_used": "consolidated", "note": "c", **base}
+        s_ev = {"decision": "qualified", "basis_used": "standalone", "note": "s", **base}
+        entry = self.srv._pick_best_earnings_plus_entry(
+            sym,
+            [("consolidated", c_ev, None, False), ("standalone", s_ev, None, False)],
+            computed_at,
+        )
+        self.assertEqual(entry["decision"], "qualified")
+        self.assertEqual(entry["basis_used"], "consolidated")
 
 
 if __name__ == "__main__":

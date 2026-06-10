@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import './styles/global.css';
+import './styles/knowledgeBase.css';
 import App from './App';
 
 // Patch ResizeObserver to prevent CRA overlay from showing the benign loop warning

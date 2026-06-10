@@ -22,6 +22,6 @@ $pendingPath = Join-Path $logDir "update-pending-local.json"
     sourceDir = $UpdateDir
     manifest  = $manifest
 } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pendingPath -Encoding UTF8
-$apply = Join-Path $InstallRoot "scripts\FlowXApplyUpdate.ps1"
+$apply = Join-Path $InstallRoot "scripts\CiMApplyUpdate.ps1"
 & powershell -NoProfile -ExecutionPolicy Bypass -File $apply -InstallRoot $InstallRoot -ManifestPath $pendingPath
 exit $LASTEXITCODE

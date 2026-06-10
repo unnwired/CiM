@@ -18,6 +18,10 @@ import { dispatchChartDataUpdated, CHART_DATA_UPDATED_EVENT, MARKET_PULSE_REFRES
 import useAdminJobStatus from './hooks/useAdminJobStatus';
 import { searchUniverse } from './api/client';
 import SupportQrModalBody from './components/SupportQrModalBody';
+import AboutCiMModalBody from './components/AboutCiMModalBody';
+import CiMKnowledgeBase from './components/CiMKnowledgeBase';
+import KnowledgeBaseEditor from './components/KnowledgeBaseEditor';
+import { resolveKnowledgeBaseGuideId } from './content/knowledgeBasePages';
 
 const MAX_CHART_TABS = 5;
 const API = '';
@@ -80,6 +84,7 @@ function App() {
   const [earningsPlusRefreshPending, setEarningsPlusRefreshPending] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [supportOpen, setSupportOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const [feedbackType, setFeedbackType] = useState('issue');
   const [feedbackMessage, setFeedbackMessage] = useState('');
   const [feedbackSending, setFeedbackSending] = useState(false);
@@ -87,12 +92,31 @@ function App() {
   const [globalSearchQuery, setGlobalSearchQuery] = useState('');
   const [globalSearchResults, setGlobalSearchResults] = useState([]);
   const [globalSearchActiveIndex, setGlobalSearchActiveIndex] = useState(0);
+  const [knowledgeBaseOpen, setKnowledgeBaseOpen] = useState(false);
+  const [knowledgeBaseEditorOpen, setKnowledgeBaseEditorOpen] = useState(false);
+  const [knowledgeBaseContentRevision, setKnowledgeBaseContentRevision] = useState(0);
+  const [knowledgeBasePreview, setKnowledgeBasePreview] = useState(null);
+  const mainColumnRef = useRef(null);
   const updateRequestedRef = useRef(false);
   const globalSearchInputRef = useRef(null);
   const globalSearchTimerRef = useRef(null);
   const contextMenuRef = useRef(null);
   const settingsRef = useRef(null);
+
+  useEffect(() => {
+    if (!knowledgeBaseOpen) return;
+    setSettingsOpen(false);
+    setGlobalSearchOpen(false);
+    setGlobalSearchQuery('');
+    setGlobalSearchResults([]);
+    setGlobalSearchActiveIndex(0);
+  }, [knowledgeBaseOpen]);
   const tabCreationOrder                = useRef([]);
+  const viewRef                         = useRef(view);
+
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
   const {
     status: jobStatus,
     isRunning: updateRunning,
@@ -174,7 +198,7 @@ function App() {
     let mounted = true;
     async function checkDesktopRestartCapability() {
       try {
-        const fn = window?.flowxDesktop?.canRestartBackend;
+        const fn = window?.cimDesktop?.canRestartBackend;
         if (typeof fn !== 'function') {
           if (mounted) setDesktopCanRestartBackend(false);
           return;
@@ -193,7 +217,7 @@ function App() {
     let mounted = true;
     async function checkDesktopReloadCapability() {
       try {
-        const fn = window?.flowxDesktop?.canReloadFrontend;
+        const fn = window?.cimDesktop?.canReloadFrontend;
         if (typeof fn !== 'function') {
           if (mounted) setDesktopCanReloadFrontend(false);
           return;
@@ -260,25 +284,57 @@ function App() {
     setTimeout(poll, 1000);
   }, []);
 
+  const navigateAfterLastChartClosed = useCallback((returnView) => {
+    if (returnView && returnView !== 'chart') {
+      if (returnView.startsWith('index_')) {
+        setActiveIndexTab(returnView.slice('index_'.length));
+      }
+      setView(returnView);
+      return;
+    }
+    // Go to most recently active indices-related tab, not dashboard
+    setConstituentsTabs(ct => {
+      if (ct.length > 0) {
+        setView('constituents_' + ct[ct.length - 1].symbol);
+        return ct;
+      }
+      setIndexTabs(it => {
+        if (it.length > 0) {
+          setActiveIndexTab(it[it.length - 1].symbol);
+          setView('index_' + it[it.length - 1].symbol);
+        } else {
+          setView('dashboard');
+        }
+        return it;
+      });
+      return ct;
+    });
+  }, []);
+
   // ── Open stock chart ───────────────────────────────────────────────────────
   const openChart = useCallback((symbol) => {
+    const originView = viewRef.current === 'chart' ? null : viewRef.current;
     setChartTabs(prev => {
       const existingIdx = prev.findIndex(t => t.symbol === symbol);
       if (existingIdx !== -1) {
         setActiveTabIdx(existingIdx);
         setView('chart');
-        return prev;
+        if (!originView) return prev;
+        return prev.map((t, i) => (
+          i === existingIdx ? { ...t, returnView: originView } : t
+        ));
       }
       let next;
+      const tab = { symbol, id: `${symbol}-${Date.now()}`, returnView: originView };
       if (prev.length < MAX_CHART_TABS) {
-        next = [...prev, { symbol, id: `${symbol}-${Date.now()}` }];
+        next = [...prev, tab];
         setActiveTabIdx(next.length - 1);
       } else {
         const oldestId  = tabCreationOrder.current[0];
         const oldestIdx = prev.findIndex(t => t.id === oldestId);
         const replaceAt = oldestIdx !== -1 ? oldestIdx : 0;
         next            = [...prev];
-        next[replaceAt] = { symbol, id: `${symbol}-${Date.now()}` };
+        next[replaceAt] = tab;
         setActiveTabIdx(replaceAt);
       }
       tabCreationOrder.current = next.map(t => t.id);
@@ -289,27 +345,12 @@ function App() {
 
   const closeChart = useCallback((idx) => {
     setChartTabs(prev => {
+      const closedTab = prev[idx];
       const next = prev.filter((_, i) => i !== idx);
       tabCreationOrder.current = next.map(t => t.id);
       if (next.length === 0) {
         setActiveTabIdx(null);
-        // Go to most recently active indices-related tab, not dashboard
-        setConstituentsTabs(ct => {
-          if (ct.length > 0) {
-            setView('constituents_' + ct[ct.length - 1].symbol);
-            return ct;
-          }
-          setIndexTabs(it => {
-            if (it.length > 0) {
-              setActiveIndexTab(it[it.length - 1].symbol);
-              setView('index_' + it[it.length - 1].symbol);
-            } else {
-              setView('dashboard');
-            }
-            return it;
-          });
-          return ct;
-        });
+        navigateAfterLastChartClosed(closedTab?.returnView);
       } else {
         const newIdx = Math.min(idx, next.length - 1);
         setActiveTabIdx(newIdx);
@@ -317,7 +358,7 @@ function App() {
       }
       return next;
     });
-  }, []);
+  }, [navigateAfterLastChartClosed]);
 
   const switchChart = useCallback((idx) => {
     setActiveTabIdx(idx);
@@ -513,8 +554,8 @@ function App() {
       if (!msg) return;
       setToastMessage(msg);
     }
-    window.addEventListener('flowx-toast', onToast);
-    return () => window.removeEventListener('flowx-toast', onToast);
+    window.addEventListener('cim-toast', onToast);
+    return () => window.removeEventListener('cim-toast', onToast);
   }, []);
 
   useEffect(() => {
@@ -659,10 +700,15 @@ function App() {
     setSupportOpen(true);
   }, []);
 
+  const openAbout = useCallback(() => {
+    setSettingsOpen(false);
+    setAboutOpen(true);
+  }, []);
+
   const openFeedback = useCallback((type) => {
     const now = new Date();
     const template = [
-      `Product: FlowX`,
+      `Product: Charts In Motion`,
       `Type: ${type === 'issue' ? 'Issue report' : 'Feature request'}`,
       `View: ${view}`,
       `Time: ${now.toLocaleString('en-IN')}`,
@@ -722,13 +768,14 @@ function App() {
     setCacheBusy(false);
   }, []);
 
-  const [flowxUpdateBusy, setFlowxUpdateBusy] = useState(false);
+  const [cimUpdateBusy, setCimUpdateBusy] = useState(false);
   const [appVersion, setAppVersion] = useState('');
-  const DISMISSED_UPDATE_KEY = 'flowx.dismissedUpdateVersion';
+  const [productName, setProductName] = useState('CiM');
+  const DISMISSED_UPDATE_KEY = 'cim.dismissedUpdateVersion';
 
-  const runFlowXUpdateApply = useCallback(async ({ skipConfirm = false, promptData = null } = {}) => {
-    if (flowxUpdateBusy || updateRunning) return false;
-    setFlowxUpdateBusy(true);
+  const runCiMUpdateApply = useCallback(async ({ skipConfirm = false, promptData = null } = {}) => {
+    if (cimUpdateBusy || updateRunning) return false;
+    setCimUpdateBusy(true);
     try {
       let preview = promptData;
       if (!preview) {
@@ -737,7 +784,7 @@ function App() {
       }
       if (!preview?.available) {
         if (!skipConfirm) {
-          setToastMessage('No FlowX update available. Add a package under FlowX\\UPDATE or publish a release on GitHub.');
+          setToastMessage('No Charts In Motion update available. Add a package under CiM\\UPDATE or publish a release on GitHub.');
         }
         return false;
       }
@@ -745,12 +792,12 @@ function App() {
       const sourceLabel = u.source === 'local'
         ? 'local UPDATE folder'
         : u.source === 'github'
-          ? `GitHub (${preview.githubRepo || 'unnwired/flowx-updates'})`
+          ? `GitHub (${preview.githubRepo || 'unnwired/cim-updates'})`
           : 'update source';
       const count = u.fileCount ?? '?';
       if (!skipConfirm) {
         const ok = window.confirm(
-          `Apply FlowX update ${u.version} from ${sourceLabel}${count !== '?' ? ` (${count} files)` : ''}?\n\nFlowX will close to apply the update.`,
+          `Apply Charts In Motion update ${u.version} from ${sourceLabel}${count !== '?' ? ` (${count} files)` : ''}?\n\nCharts In Motion will close to apply the update.`,
         );
         if (!ok) return false;
       }
@@ -770,10 +817,10 @@ function App() {
       } catch {
         // apply script still runs after exit
       }
-      setToastMessage('Applying update — FlowX is closing…');
+      setToastMessage('Applying update — Charts In Motion is closing…');
       setSettingsOpen(false);
-      if (typeof window?.flowxDesktop?.quitForUpdate === 'function') {
-        setTimeout(() => { window.flowxDesktop.quitForUpdate(); }, 700);
+      if (typeof window?.cimDesktop?.quitForUpdate === 'function') {
+        setTimeout(() => { window.cimDesktop.quitForUpdate(); }, 700);
       }
       return true;
     } catch (e) {
@@ -782,13 +829,13 @@ function App() {
       setToastMessage(msg);
       return false;
     } finally {
-      setFlowxUpdateBusy(false);
+      setCimUpdateBusy(false);
     }
-  }, [flowxUpdateBusy, updateRunning]);
+  }, [cimUpdateBusy, updateRunning]);
 
-  const handleApplyFlowXUpdate = useCallback(async () => {
-    await runFlowXUpdateApply({ skipConfirm: false });
-  }, [runFlowXUpdateApply]);
+  const handleApplyCiMUpdate = useCallback(async () => {
+    await runCiMUpdateApply({ skipConfirm: false });
+  }, [runCiMUpdateApply]);
 
   useEffect(() => {
     let mounted = true;
@@ -811,7 +858,7 @@ function App() {
     };
 
     const runBackgroundCheck = async () => {
-      if (flowxUpdateBusy || updateRunning || updatePendingStart) return;
+      if (cimUpdateBusy || updateRunning || updatePendingStart) return;
       try {
         const { data } = await axios.get(`${API}/api/update/check`, { params: { background: true } });
         if (!mounted || !data?.available) return;
@@ -820,16 +867,16 @@ function App() {
         const ver = u.version;
         if (!ver || isDismissed(ver)) return;
         const sourceName = u.source === 'github'
-          ? `GitHub (${data.githubRepo || 'unnwired/flowx-updates'})`
+          ? `GitHub (${data.githubRepo || 'unnwired/cim-updates'})`
           : 'your UPDATE folder';
         const ok = window.confirm(
-          `FlowX update ${ver} is available from ${sourceName}.\n\nWould you like to update now? FlowX will close to apply the update.`,
+          `Charts In Motion update ${ver} is available from ${sourceName}.\n\nWould you like to update now? Charts In Motion will close to apply the update.`,
         );
         if (!ok) {
           rememberDismiss(ver);
           return;
         }
-        await runFlowXUpdateApply({ skipConfirm: true, promptData: data });
+        await runCiMUpdateApply({ skipConfirm: true, promptData: data });
       } catch {
         // background check failures are silent
       }
@@ -843,10 +890,14 @@ function App() {
       try {
         const { data } = await axios.get(`${API}/api/update/settings`);
         if (!mounted) return;
+        const name = String(data?.productName || 'CiM').trim() || 'CiM';
+        setProductName(name);
         const ver = String(data?.currentVersion || '').trim();
         if (ver) {
           setAppVersion(ver);
-          document.title = `FlowX ${ver}`;
+          document.title = `${name} ${ver}`;
+        } else {
+          document.title = name;
         }
         runBackgroundCheck();
         if (data?.backgroundCheckEnabled === false) return;
@@ -863,12 +914,12 @@ function App() {
       mounted = false;
       if (intervalId) clearInterval(intervalId);
     };
-  }, [flowxUpdateBusy, updateRunning, updatePendingStart, runFlowXUpdateApply]);
+  }, [cimUpdateBusy, updateRunning, updatePendingStart, runCiMUpdateApply]);
 
   const handleRestartBackendAndFrontendDev = useCallback(async () => {
     if (restartBackendBusy || reloadFrontendBusy) return;
-    const canRestartBackend = typeof window?.flowxDesktop?.restartBackend === 'function';
-    const canReloadFrontend = typeof window?.flowxDesktop?.reloadFrontend === 'function';
+    const canRestartBackend = typeof window?.cimDesktop?.restartBackend === 'function';
+    const canReloadFrontend = typeof window?.cimDesktop?.reloadFrontend === 'function';
     if (!canRestartBackend || !canReloadFrontend) {
       setToastMessage('Restart backend + frontend is not available in this build.');
       return;
@@ -881,9 +932,9 @@ function App() {
     setReloadFrontendBusy(true);
     try {
       setToastMessage('Restarting backend and frontend...');
-      await window.flowxDesktop.restartBackend();
+      await window.cimDesktop.restartBackend();
       dispatchChartDataUpdated({ job: 'backend_restart' });
-      await window.flowxDesktop.reloadFrontend();
+      await window.cimDesktop.reloadFrontend();
       setToastMessage('Backend and frontend restarted.');
     } catch (e) {
       const msg = e?.message || e?.toString?.() || 'Failed to restart backend and frontend.';
@@ -905,6 +956,16 @@ function App() {
       window.dispatchEvent(new CustomEvent('dashboard-refresh'));
     }
   }, [view]);
+
+  const handleKnowledgeBaseSaved = useCallback(() => {
+    setKnowledgeBasePreview(null);
+    setKnowledgeBaseContentRevision((n) => n + 1);
+  }, []);
+
+  const handleKnowledgeBasePreview = useCallback((_guideId, content) => {
+    setKnowledgeBasePreview(content);
+    setKnowledgeBaseOpen(true);
+  }, []);
 
   const addToPortfolio = useCallback(async (symbol, type) => {
     const sym = String(symbol || '').trim().toUpperCase();
@@ -1038,7 +1099,7 @@ function App() {
       : view === 'watchlist' ? 'watchlist'
       : view === 'indices' ? 'indices'
       : 'dashboard';
-    window.dispatchEvent(new CustomEvent('flowx-global-search-select', {
+    window.dispatchEvent(new CustomEvent('cim-global-search-select', {
       detail: {
         symbol: String(row.symbol || '').toUpperCase(),
         type: String(row.type || 'stock').toLowerCase() === 'index' ? 'index' : 'stock',
@@ -1098,6 +1159,8 @@ function App() {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const key = e.key || '';
 
+      if (knowledgeBaseOpen) return;
+
       if (globalSearchOpen) {
         if (key === 'Escape') {
           consume();
@@ -1148,7 +1211,7 @@ function App() {
     }
     window.addEventListener('keydown', onKeydown, true);
     return () => window.removeEventListener('keydown', onKeydown, true);
-  }, [applyGlobalSearchPick, canOpenGlobalSearch, globalSearchActiveIndex, globalSearchOpen, globalSearchResults]);
+  }, [applyGlobalSearchPick, canOpenGlobalSearch, globalSearchActiveIndex, globalSearchOpen, globalSearchResults, knowledgeBaseOpen]);
 
   return (
     <div style={{
@@ -1159,65 +1222,77 @@ function App() {
       backgroundColor: 'var(--bg-primary)',
       overflow:        'hidden',
     }}>
-      <TabBar
-        view={view}
-        chartTabs={chartTabs}
-        activeTabIdx={activeTabIdx}
-        indexTabs={indexTabs}
-        activeIndexTab={activeIndexTab}
-        constituentsTabs={constituentsTabs}
-        onDashboard={goToDashboard}
-        onIndices={goToIndices}
-        onWatchlist={goToWatchlist}
-        onPortfolio={goToPortfolio}
-        onPotentialSwings={goToPotentialSwings}
-        onMarketPulse={goToMarketPulse}
-        onMarketMovers={goToMarketMovers}
-        onMarketMap={goToMarketMap}
-        onEarningsBeats={goToEarningsBeats}
-        onSwitchChart={switchChart}
-        onCloseChart={closeChart}
-        onSwitchIndex={sym => { setActiveIndexTab(sym); setView('index_' + sym); }}
-        onCloseIndex={closeIndexTab}
-        onSwitchConstituents={sym => setView('constituents_' + sym)}
-        onCloseConstituents={closeConstituentsTab}
-        onReorderChartTabs={reorderChartTabs}
-        onOpenSectors={() => { setAdminOpen(true); setSettingsOpen(false); }}
-        onOpenSettings={() => setSettingsOpen(v => !v)}
-        onOpenIssue={() => openFeedback('issue')}
-        onOpenFeature={() => openFeedback('feature')}
-        onOpenSupport={openSupport}
-        aggressiveCacheRam={aggressiveCacheRam}
-        cacheBusy={cacheBusy}
-        onToggleAggressiveCache={handleToggleAggressiveCache}
-        onClearCacheNow={handleClearCacheNow}
-        onUpdatePriceVolume={handleUpdatePriceVolume}
-        onUpdateIndicatorSnapshots={handleUpdateIndicatorSnapshots}
-        onUpdateSplitAdjustments={handleStockSplitAdjustments}
-        onSplitCatchupScan={handleSplitCatchupScan}
-        splitPendingCount={splitPendingCount}
-        onRefreshShareCounts={handleRefreshShareCounts}
-        onRefreshEarningsPlusCache={() => handleRefreshEarningsPlusCache()}
-        onToggleUpdateProgress={() => setUpdatePanelOpen(true)}
-        updateRunning={updateRunning}
-        updatePercent={updatePercent}
-        settingsOpen={settingsOpen}
-        settingsRef={settingsRef}
-        rebuildSnapshotsBusy={rebuildSnapshotsBusy}
-        onRebuildIndicatorSnapshots={onRebuildIndicatorSnapshots}
-        earningsPlusRefreshRunning={earningsPlusRefreshPending || (updateRunning && jobStatus?.job === 'earnings_plus_cache')}
-        desktopCanRestartBackend={desktopCanRestartBackend}
-        restartBackendBusy={restartBackendBusy}
-        desktopCanReloadFrontend={desktopCanReloadFrontend}
-        reloadFrontendBusy={reloadFrontendBusy}
-        onRestartBackendAndFrontendDev={handleRestartBackendAndFrontendDev}
-        onApplyFlowXUpdate={handleApplyFlowXUpdate}
-        flowxUpdateBusy={flowxUpdateBusy}
-        appVersion={appVersion}
-        onRefresh={handleGlobalRefresh}
-      />
+      <div className="cim-app-body" style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+          <TabBar
+            view={view}
+            chartTabs={chartTabs}
+            activeTabIdx={activeTabIdx}
+            indexTabs={indexTabs}
+            activeIndexTab={activeIndexTab}
+            constituentsTabs={constituentsTabs}
+            onDashboard={goToDashboard}
+            onIndices={goToIndices}
+            onWatchlist={goToWatchlist}
+            onPortfolio={goToPortfolio}
+            onPotentialSwings={goToPotentialSwings}
+            onMarketPulse={goToMarketPulse}
+            onMarketMovers={goToMarketMovers}
+            onMarketMap={goToMarketMap}
+            onEarningsBeats={goToEarningsBeats}
+            onSwitchChart={switchChart}
+            onCloseChart={closeChart}
+            onSwitchIndex={sym => { setActiveIndexTab(sym); setView('index_' + sym); }}
+            onCloseIndex={closeIndexTab}
+            onSwitchConstituents={sym => setView('constituents_' + sym)}
+            onCloseConstituents={closeConstituentsTab}
+            onReorderChartTabs={reorderChartTabs}
+            onOpenSectors={() => { setAdminOpen(true); setSettingsOpen(false); }}
+            onOpenSettings={() => setSettingsOpen(v => !v)}
+            onOpenKnowledgeBaseEditor={!isDistributionProfile ? () => {
+              setSettingsOpen(false);
+              setKnowledgeBaseEditorOpen(true);
+            } : undefined}
+            onOpenIssue={() => openFeedback('issue')}
+            onOpenFeature={() => openFeedback('feature')}
+            onOpenSupport={openSupport}
+            onOpenAbout={openAbout}
+            aggressiveCacheRam={aggressiveCacheRam}
+            cacheBusy={cacheBusy}
+            onToggleAggressiveCache={handleToggleAggressiveCache}
+            onClearCacheNow={handleClearCacheNow}
+            onUpdatePriceVolume={handleUpdatePriceVolume}
+            onUpdateIndicatorSnapshots={handleUpdateIndicatorSnapshots}
+            onUpdateSplitAdjustments={handleStockSplitAdjustments}
+            onSplitCatchupScan={handleSplitCatchupScan}
+            splitPendingCount={splitPendingCount}
+            onRefreshShareCounts={handleRefreshShareCounts}
+            onRefreshEarningsPlusCache={() => handleRefreshEarningsPlusCache()}
+            onToggleUpdateProgress={() => setUpdatePanelOpen(true)}
+            updateRunning={updateRunning}
+            updatePercent={updatePercent}
+            settingsOpen={settingsOpen}
+            settingsRef={settingsRef}
+            rebuildSnapshotsBusy={rebuildSnapshotsBusy}
+            onRebuildIndicatorSnapshots={onRebuildIndicatorSnapshots}
+            earningsPlusRefreshRunning={earningsPlusRefreshPending || (updateRunning && jobStatus?.job === 'earnings_plus_cache')}
+            desktopCanRestartBackend={desktopCanRestartBackend}
+            restartBackendBusy={restartBackendBusy}
+            desktopCanReloadFrontend={desktopCanReloadFrontend}
+            reloadFrontendBusy={reloadFrontendBusy}
+            onRestartBackendAndFrontendDev={handleRestartBackendAndFrontendDev}
+            onApplyCiMUpdate={handleApplyCiMUpdate}
+            cimUpdateBusy={cimUpdateBusy}
+            appVersion={appVersion}
+            productName={productName}
+            onRefresh={handleGlobalRefresh}
+            knowledgeBaseOpen={knowledgeBaseOpen}
+          />
 
-      <div style={{ flex: 1, overflow: 'hidden', position: 'relative', display: 'flex', flexDirection: 'column' }}>
+          <div
+            ref={mainColumnRef}
+            style={{ flex: 1, position: 'relative', overflow: 'hidden', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}
+          >
 
         {/* Market Pulse */}
         <div style={{ display: view === 'market-pulse' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
@@ -1346,13 +1421,24 @@ function App() {
             />
           </div>
         ))}
+          </div>
+        </div>
+
+        <CiMKnowledgeBase
+          mainColumnRef={mainColumnRef}
+          open={knowledgeBaseOpen}
+          onOpenChange={setKnowledgeBaseOpen}
+          view={view}
+          contentRevision={knowledgeBaseContentRevision}
+          previewContent={knowledgeBasePreview}
+        />
       </div>
 
       {(updateRunning || updatePendingStart || updatePanelOpen) && (
         <div style={{
           position: 'fixed',
           top: 'calc(var(--tabbar-height) + 8px)',
-          right: 12,
+          right: 'calc(var(--cim-kb-chrome-width, 16px) + 12px)',
           zIndex: 12000,
           width: 360,
           backgroundColor: 'var(--bg-secondary)',
@@ -1428,6 +1514,17 @@ function App() {
       )}
 
       {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} defaultTab="sectors" hideJobsTab={true} />}
+      {knowledgeBaseEditorOpen && !isDistributionProfile && (
+        <KnowledgeBaseEditor
+          onClose={() => {
+            setKnowledgeBaseEditorOpen(false);
+            setKnowledgeBasePreview(null);
+          }}
+          initialGuideId={resolveKnowledgeBaseGuideId(view)}
+          onSaved={handleKnowledgeBaseSaved}
+          onPreview={handleKnowledgeBasePreview}
+        />
+      )}
       {contextMenuState.visible && (
         <div
           ref={contextMenuRef}
@@ -1596,6 +1693,35 @@ function App() {
               </button>
             </div>
           )}
+        </div>
+      )}
+      {aboutOpen && (
+        <div
+          style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.62)', zIndex: 16000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          onClick={(e) => { if (e.target === e.currentTarget) setAboutOpen(false); }}
+        >
+          <div
+            style={{
+              width: 'min(480px, 94vw)',
+              maxHeight: 'min(85vh, 640px)',
+              backgroundColor: 'var(--bg-secondary)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              boxShadow: '0 20px 48px rgba(0,0,0,0.6)',
+              overflow: 'hidden',
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>About Charts In Motion</div>
+              <button type="button" onClick={() => setAboutOpen(false)} aria-label="Close" style={{ background: 'none', color: 'var(--text-muted)', fontSize: 18, lineHeight: 1 }}>×</button>
+            </div>
+            <div style={{ padding: 16, overflowY: 'auto' }}>
+              <AboutCiMModalBody />
+            </div>
+          </div>
         </div>
       )}
       {supportOpen && (
@@ -1838,21 +1964,26 @@ function TabBar({
   view, chartTabs, activeTabIdx, indexTabs, activeIndexTab,
   constituentsTabs, onDashboard, onIndices, onWatchlist, onPortfolio, onPotentialSwings, onMarketPulse, onMarketMovers, onMarketMap, onEarningsBeats, onSwitchChart, onCloseChart,
   onSwitchIndex, onCloseIndex, onSwitchConstituents, onCloseConstituents,
-  onReorderChartTabs, onOpenSectors, onOpenSettings, onOpenIssue, onOpenFeature, onOpenSupport,
+  onReorderChartTabs, onOpenSectors, onOpenSettings, onOpenKnowledgeBaseEditor, onOpenIssue, onOpenFeature, onOpenAbout, onOpenSupport,
   aggressiveCacheRam, cacheBusy, onToggleAggressiveCache, onClearCacheNow,
   onUpdatePriceVolume, onUpdateIndicatorSnapshots, onUpdateSplitAdjustments, onSplitCatchupScan, splitPendingCount, onRefreshShareCounts, onRefreshEarningsPlusCache, onToggleUpdateProgress, updateRunning, updatePercent, settingsOpen, settingsRef,
   rebuildSnapshotsBusy, onRebuildIndicatorSnapshots,
   earningsPlusRefreshRunning,
   desktopCanRestartBackend, restartBackendBusy,
   desktopCanReloadFrontend, reloadFrontendBusy, onRestartBackendAndFrontendDev,
-  onApplyFlowXUpdate, flowxUpdateBusy, appVersion,
+  onApplyCiMUpdate, cimUpdateBusy, appVersion, productName,
   onRefresh,
+  knowledgeBaseOpen,
 }) {
   const dragIdx     = useRef(null);
   const dragType    = useRef(null);
   const updateBtnRef = useRef(null);
   const updateMenuRef = useRef(null);
   const [updateMenuRect, setUpdateMenuRect] = useState(null);
+
+  useEffect(() => {
+    if (knowledgeBaseOpen) setUpdateMenuRect(null);
+  }, [knowledgeBaseOpen]);
 
   function onDragStart(e, type, idx) {
     dragIdx.current  = idx;
@@ -1986,10 +2117,10 @@ function TabBar({
           userSelect: 'none',
           gap: 6,
         }}
-        title={appVersion ? `FlowX ${appVersion}` : 'FlowX'}
+        title={appVersion ? `${productName} ${appVersion}` : productName}
       >
         <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '0.02em' }}>
-          FlowX
+          {productName}
         </span>
         {appVersion ? (
           <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
@@ -1998,55 +2129,7 @@ function TabBar({
         ) : null}
       </div>
       <div style={{ flex: 1, overflowX: 'auto', overflowY: 'hidden', display: 'flex', alignItems: 'stretch' }}>
-        {/* Market Pulse — locked */}
-        <div onClick={onMarketPulse} style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: '0 16px', cursor: 'pointer',
-          borderRight: '1px solid var(--border)',
-          backgroundColor: view === 'market-pulse' ? 'var(--bg-tertiary)' : 'transparent',
-          borderBottom: view === 'market-pulse' ? '2px solid var(--accent-blue)' : '2px solid transparent',
-          color: view === 'market-pulse' ? 'var(--text-primary)' : 'var(--text-secondary)',
-          fontSize: 12, fontWeight: view === 'market-pulse' ? 600 : 400,
-          whiteSpace: 'nowrap', flexShrink: 0, userSelect: 'none',
-        }}>
-          Market Pulse
-        </div>
-        <div onClick={onMarketMovers} style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: '0 16px', cursor: 'pointer',
-          borderRight: '1px solid var(--border)',
-          backgroundColor: view === 'market-movers' ? 'var(--bg-tertiary)' : 'transparent',
-          borderBottom: view === 'market-movers' ? '2px solid var(--accent-blue)' : '2px solid transparent',
-          color: view === 'market-movers' ? 'var(--text-primary)' : 'var(--text-secondary)',
-          fontSize: 12, fontWeight: view === 'market-movers' ? 600 : 400,
-          whiteSpace: 'nowrap', flexShrink: 0, userSelect: 'none',
-        }}>
-          Market Movers
-        </div>
-        <div onClick={onMarketMap} style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: '0 16px', cursor: 'pointer',
-          borderRight: '1px solid var(--border)',
-          backgroundColor: view === 'market-map' ? 'var(--bg-tertiary)' : 'transparent',
-          borderBottom: view === 'market-map' ? '2px solid var(--accent-blue)' : '2px solid transparent',
-          color: view === 'market-map' ? 'var(--text-primary)' : 'var(--text-secondary)',
-          fontSize: 12, fontWeight: view === 'market-map' ? 600 : 400,
-          whiteSpace: 'nowrap', flexShrink: 0, userSelect: 'none',
-        }}>
-          Market Map
-        </div>
-        <div onClick={onEarningsBeats} style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: '0 16px', cursor: 'pointer',
-          borderRight: '1px solid var(--border)',
-          backgroundColor: view === 'earnings-beats' ? 'var(--bg-tertiary)' : 'transparent',
-          borderBottom: view === 'earnings-beats' ? '2px solid var(--accent-blue)' : '2px solid transparent',
-          color: view === 'earnings-beats' ? 'var(--text-primary)' : 'var(--text-secondary)',
-          fontSize: 12, fontWeight: view === 'earnings-beats' ? 600 : 400,
-          whiteSpace: 'nowrap', flexShrink: 0, userSelect: 'none',
-        }}>
-          Earnings
-        </div>
+        {/* Fixed nav tabs — order: NSE | Indices | Market Map | Market Pulse | Market Movers | Earnings | Watchlist | Portfolio | Potential Swings */}
         <div onClick={onDashboard} style={{
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           gap: 7, padding: '0 16px', cursor: 'pointer',
@@ -2075,6 +2158,54 @@ function TabBar({
           whiteSpace: 'nowrap', flexShrink: 0, userSelect: 'none',
         }}>
           Indices
+        </div>
+        <div onClick={onMarketMap} style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '0 16px', cursor: 'pointer',
+          borderRight: '1px solid var(--border)',
+          backgroundColor: view === 'market-map' ? 'var(--bg-tertiary)' : 'transparent',
+          borderBottom: view === 'market-map' ? '2px solid var(--accent-blue)' : '2px solid transparent',
+          color: view === 'market-map' ? 'var(--text-primary)' : 'var(--text-secondary)',
+          fontSize: 12, fontWeight: view === 'market-map' ? 600 : 400,
+          whiteSpace: 'nowrap', flexShrink: 0, userSelect: 'none',
+        }}>
+          Market Map
+        </div>
+        <div onClick={onMarketPulse} style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '0 16px', cursor: 'pointer',
+          borderRight: '1px solid var(--border)',
+          backgroundColor: view === 'market-pulse' ? 'var(--bg-tertiary)' : 'transparent',
+          borderBottom: view === 'market-pulse' ? '2px solid var(--accent-blue)' : '2px solid transparent',
+          color: view === 'market-pulse' ? 'var(--text-primary)' : 'var(--text-secondary)',
+          fontSize: 12, fontWeight: view === 'market-pulse' ? 600 : 400,
+          whiteSpace: 'nowrap', flexShrink: 0, userSelect: 'none',
+        }}>
+          Market Pulse
+        </div>
+        <div onClick={onMarketMovers} style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '0 16px', cursor: 'pointer',
+          borderRight: '1px solid var(--border)',
+          backgroundColor: view === 'market-movers' ? 'var(--bg-tertiary)' : 'transparent',
+          borderBottom: view === 'market-movers' ? '2px solid var(--accent-blue)' : '2px solid transparent',
+          color: view === 'market-movers' ? 'var(--text-primary)' : 'var(--text-secondary)',
+          fontSize: 12, fontWeight: view === 'market-movers' ? 600 : 400,
+          whiteSpace: 'nowrap', flexShrink: 0, userSelect: 'none',
+        }}>
+          Market Movers
+        </div>
+        <div onClick={onEarningsBeats} style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '0 16px', cursor: 'pointer',
+          borderRight: '1px solid var(--border)',
+          backgroundColor: view === 'earnings-beats' ? 'var(--bg-tertiary)' : 'transparent',
+          borderBottom: view === 'earnings-beats' ? '2px solid var(--accent-blue)' : '2px solid transparent',
+          color: view === 'earnings-beats' ? 'var(--text-primary)' : 'var(--text-secondary)',
+          fontSize: 12, fontWeight: view === 'earnings-beats' ? 600 : 400,
+          whiteSpace: 'nowrap', flexShrink: 0, userSelect: 'none',
+        }}>
+          Earnings
         </div>
         <div onClick={onWatchlist} style={{
           display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -2373,15 +2504,19 @@ function TabBar({
               />
             )}
             <MenuItem icon="🗂" label="Data Management" onClick={onOpenSectors} />
+            {onOpenKnowledgeBaseEditor && (
+              <MenuItem icon="📖" label="Edit Knowledge Base" onClick={onOpenKnowledgeBaseEditor} />
+            )}
             <MenuItem icon="🐞" label="Report Issue" onClick={onOpenIssue} />
             <MenuItem icon="💡" label="Feature Request" onClick={onOpenFeature} />
             <MenuItem
               icon="⬆"
-              label={flowxUpdateBusy ? 'Updating App…' : 'Update App'}
-              onClick={onApplyFlowXUpdate}
-              disabled={cacheBusy || flowxUpdateBusy || updateRunning}
+              label={cimUpdateBusy ? 'Updating App…' : 'Update App'}
+              onClick={onApplyCiMUpdate}
+              disabled={cacheBusy || cimUpdateBusy || updateRunning}
             />
             <MenuItem icon="❤" label="Support the Development" onClick={onOpenSupport} />
+            <MenuItem icon="ℹ" label="About Charts In Motion" onClick={onOpenAbout} />
           </div>
         )}
       </div>

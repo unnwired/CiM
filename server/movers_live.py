@@ -557,6 +557,7 @@ def live_cache_snapshot() -> dict[str, dict[str, Any]]:
 def apply_live_overlay(df: pd.DataFrame, live: dict[str, dict[str, Any]]) -> pd.DataFrame:
     if df.empty or not live:
         return df
+    md = _load_movers_data_module()
     out = df.copy()
     for idx, row in out.iterrows():
         sym = str(row.get("symbol", "")).upper()
@@ -574,7 +575,8 @@ def apply_live_overlay(df: pd.DataFrame, live: dict[str, dict[str, Any]]) -> pd.
             live_chg = _pct_change(live_price, ref_close)
         if live_chg is None:
             live_chg = _finite_or_none(snap.get("change_pct"))
-        if live_chg is not None:
+        existing_chg = _finite_or_none(row.get("change_pct"))
+        if live_chg is not None and md.should_apply_live_day_change(existing_chg, live_chg):
             out.at[idx, "change_pct"] = round(live_chg, 2)
         live_vol = _finite_or_none(snap.get("volume"))
         if live_vol is not None:
@@ -636,6 +638,7 @@ def _query_live(
     if mode == "day_change":
         side_n = (side or "gainers").strip().lower()
         df = df[df["change_pct"].apply(lambda v: _finite_or_none(v) is not None)]
+        df = md.filter_day_change_by_side(df, side_n)
         ascending = side_n == "losers"
         pre = df.sort_values("change_pct", ascending=ascending, na_position="last")
         candidates = [str(s).upper() for s in pre.head(max(limit * 5, 150))["symbol"]]
@@ -647,6 +650,7 @@ def _query_live(
             df = apply_live_overlay(df, live)
             df = md._apply_mcap_filter(df, min_mcap, max_mcap)
             df = df[df["change_pct"].apply(lambda v: _finite_or_none(v) is not None)]
+            df = md.filter_day_change_by_side(df, side_n)
             df = md._apply_sector_filter(df, allowed_symbols)
         if df.empty and live:
             df = md.load_movers_universe(conn, mcap_sql)
@@ -654,6 +658,7 @@ def _query_live(
             df = md._apply_mcap_filter(df, min_mcap, max_mcap)
             df = md._apply_sector_filter(df, allowed_symbols)
             df = df[df["change_pct"].apply(lambda v: _finite_or_none(v) is not None)]
+            df = md.filter_day_change_by_side(df, side_n)
             live = {}
             as_of = None
         df = df.sort_values("change_pct", ascending=ascending, na_position="last")

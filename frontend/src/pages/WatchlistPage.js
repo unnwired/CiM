@@ -140,7 +140,7 @@ export default function WatchlistPage({
   const [search, setSearch] = useState('');
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const [newWatchlistName, setNewWatchlistName] = useState('');
-  const [renameMode, setRenameMode] = useState(false);
+  const [renamingWatchlistName, setRenamingWatchlistName] = useState(null);
   const [renameName, setRenameName] = useState('');
   const [timeframe, setTimeframe] = useState(DEFAULT_CHART_TIMEFRAME_1);
   const [emas, setEmas] = useState(() => getPersistedEmaSet());
@@ -173,6 +173,7 @@ export default function WatchlistPage({
   const headerScrollRef = useRef(null);
   const rowsScrollRef = useRef(null);
   const watchlistReorderRef = useRef(null);
+  const watchlistImportRef = useRef(null);
   const searchWrapRef = useRef(null);
   const searchInputRef = useRef(null);
   const currentHeightsRef = useRef({});
@@ -428,8 +429,8 @@ export default function WatchlistPage({
       setVisiblePanels(prev => (JSON.stringify(prev) === JSON.stringify(e.detail) ? prev : e.detail));
     }
     function onStorage(e) {
-      if (e.key === 'flowx.chart.ema') setEmas(getPersistedEmaSet());
-      if (e.key === 'flowx.chart.volumeVisible') setVolumeVisible(getPersistedVolumeVisible(true));
+      if (e.key === 'cim.chart.ema') setEmas(getPersistedEmaSet());
+      if (e.key === 'cim.chart.volumeVisible') setVolumeVisible(getPersistedVolumeVisible(true));
       if (e.key === PANELS_PREFS_KEY) setVisiblePanels(getPersistedVisiblePanels());
     }
     window.addEventListener(EMA_PREFS_UPDATED_EVENT, onEmaPrefs);
@@ -499,7 +500,7 @@ export default function WatchlistPage({
     if (!el) return;
     const update = () => {
       const r = el.getBoundingClientRect();
-      const width = 260;
+      const width = 280;
       const pad = 8;
       const maxLeft = Math.max(pad, window.innerWidth - width - pad);
       const left = Math.min(Math.max(pad, r.left), maxLeft);
@@ -513,6 +514,13 @@ export default function WatchlistPage({
       window.removeEventListener('scroll', update, true);
     };
   }, [watchlistReorderOpen, watchlists]);
+
+  useEffect(() => {
+    if (!watchlistReorderOpen) {
+      setRenamingWatchlistName(null);
+      setRenameName('');
+    }
+  }, [watchlistReorderOpen]);
 
   useLayoutEffect(() => {
     if (!viewOpen) {
@@ -646,17 +654,22 @@ export default function WatchlistPage({
     }
   }
 
+  function cancelRenameWatchlist() {
+    setRenamingWatchlistName(null);
+    setRenameName('');
+  }
+
   async function renameWatchlist() {
-    if (!activeWatchlist) return;
+    const oldNm = renamingWatchlistName || activeWatchlist?.name;
+    if (!oldNm) return;
     const name = renameName.trim();
-    if (!name || name === activeWatchlist.name) {
-      setRenameMode(false);
+    if (!name || name === oldNm) {
+      cancelRenameWatchlist();
       return;
     }
     try {
-      const oldNm = activeWatchlist.name;
       await axios.patch(`${API}/api/watchlists/${encodeURIComponent(oldNm)}`, { new_name: name });
-      setRenameMode(false);
+      cancelRenameWatchlist();
       setWatchlistItemOrder(prev => {
         const next = { ...prev };
         const ord = next[oldNm];
@@ -668,26 +681,137 @@ export default function WatchlistPage({
         return next;
       });
       await onWatchlistsChange();
-      onAppActiveWatchlistNameChange(name);
+      if (
+        String(appActiveWatchlistName || '').toLowerCase() === String(oldNm).toLowerCase()
+      ) {
+        onAppActiveWatchlistNameChange(name);
+      }
       window.dispatchEvent(new CustomEvent('watchlists-updated'));
     } catch (e) {
       alert(e.response?.data?.detail || e.message);
     }
   }
 
-  async function deleteWatchlist() {
-    if (!activeWatchlist) return;
-    if (!window.confirm(`Delete watchlist "${activeWatchlist.name}"?`)) return;
-    const deletedName = activeWatchlist.name;
-    await axios.delete(`${API}/api/watchlists/${encodeURIComponent(activeWatchlist.name)}`);
+  function handleExportWatchlists() {
+    if (!watchlists.length) {
+      alert('No watchlists available to export.');
+      return;
+    }
+    try {
+      const names = new Set(watchlists.map(w => w.name));
+      const order = {};
+      for (const [listName, keys] of Object.entries(watchlistItemOrder)) {
+        if (names.has(listName) && Array.isArray(keys) && keys.length) {
+          order[listName] = keys;
+        }
+      }
+      const payload = {
+        version: 1,
+        exported_at: new Date().toISOString(),
+        watchlists: watchlists.map(w => ({
+          name: w.name,
+          items: (w.items || []).map(it => ({
+            symbol: String(it.symbol || '').toUpperCase(),
+            type: String(it.type || 'stock').toLowerCase() === 'index' ? 'index' : 'stock',
+          })),
+        })),
+        watchlist_item_order: order,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `cim-watchlists-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(`Failed to export watchlists: ${e?.message || 'Unknown error'}`);
+    }
+  }
+
+  async function handleImportWatchlistFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const imported = Array.isArray(parsed) ? parsed : (parsed?.watchlists || []);
+      const cleaned = imported
+        .filter(w => w && typeof w.name === 'string' && w.name.trim())
+        .map(w => ({
+          name: w.name.trim(),
+          items: Array.isArray(w.items)
+            ? w.items
+              .filter(it => it && typeof it.symbol === 'string' && String(it.symbol).trim())
+              .map(it => ({
+                symbol: String(it.symbol).trim().toUpperCase(),
+                type: String(it.type || 'stock').toLowerCase() === 'index' ? 'index' : 'stock',
+              }))
+            : [],
+        }));
+      if (!cleaned.length) {
+        alert('No valid watchlists found in this file.');
+        return;
+      }
+      const importedOrder = (
+        parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.watchlist_item_order
+      ) ? parsed.watchlist_item_order : {};
+      const replaceAll = window.confirm(
+        `Import ${cleaned.length} watchlist(s)?\n\n` +
+        'Click OK to REPLACE all existing watchlists.\n' +
+        'Click Cancel to MERGE (keep lists not in the file; overwrite lists with the same name).'
+      );
+      const r = await axios.post(`${API}/api/watchlists/import`, {
+        mode: replaceAll ? 'replace' : 'merge',
+        watchlists: cleaned,
+        watchlist_item_order: importedOrder,
+      });
+      const data = r.data || {};
+      if (data.watchlist_item_order && typeof data.watchlist_item_order === 'object') {
+        setWatchlistItemOrder(data.watchlist_item_order);
+      }
+      await onWatchlistsChange();
+      const nextLists = data.watchlists || [];
+      const activeStillExists = nextLists.some(
+        w => w.name === appActiveWatchlistName || w.name?.toLowerCase() === String(appActiveWatchlistName || '').toLowerCase(),
+      );
+      if (!activeStillExists && nextLists[0]?.name) {
+        onAppActiveWatchlistNameChange(nextLists[0].name);
+      }
+      window.dispatchEvent(new CustomEvent('watchlists-updated'));
+      window.dispatchEvent(new CustomEvent('cim-toast', {
+        detail: `Imported ${cleaned.length} watchlist(s) successfully.`,
+      }));
+    } catch (err) {
+      alert(`Failed to import watchlists: ${err.response?.data?.detail || err.message}`);
+    }
+  }
+
+  async function deleteWatchlist(listName) {
+    const target = String(listName || activeWatchlist?.name || '').trim();
+    if (!target) return;
+    if (!window.confirm(`Delete watchlist "${target}"?`)) return;
+    const wasActive = String(appActiveWatchlistName || '').toLowerCase() === target.toLowerCase();
+    const remaining = watchlists.filter(w => w.name.toLowerCase() !== target.toLowerCase());
+    await axios.delete(`${API}/api/watchlists/${encodeURIComponent(target)}`);
+    if (String(renamingWatchlistName || '').toLowerCase() === target.toLowerCase()) {
+      cancelRenameWatchlist();
+    }
     setWatchlistItemOrder(prev => {
-      if (!prev[deletedName]) return prev;
+      if (!prev[target]) return prev;
       const next = { ...prev };
-      delete next[deletedName];
+      delete next[target];
       axios.post(`${API}/api/layout`, { watchlistItemOrder: next }).catch(() => {});
       return next;
     });
     await onWatchlistsChange();
+    if (wasActive) {
+      onAppActiveWatchlistNameChange(remaining[0]?.name || '');
+    }
     window.dispatchEvent(new CustomEvent('watchlists-updated'));
   }
 
@@ -767,7 +891,7 @@ export default function WatchlistPage({
       watchlistTimeframe2: timeframe2,
       watchlistTimeframe3: timeframe3,
       watchlistItemOrder,
-    }).then(() => window.dispatchEvent(new CustomEvent('flowx-toast', { detail: 'Layout saved.' }))).catch(() => window.dispatchEvent(new CustomEvent('flowx-toast', { detail: 'Failed to save layout.' })));
+    }).then(() => window.dispatchEvent(new CustomEvent('cim-toast', { detail: 'Layout saved.' }))).catch(() => window.dispatchEvent(new CustomEvent('cim-toast', { detail: 'Failed to save layout.' })));
   }
 
   function clearWlDnD() {
@@ -905,8 +1029,8 @@ export default function WatchlistPage({
         setCrosshairTime(null);
       }
     }
-    window.addEventListener('flowx-global-search-select', onGlobalPick);
-    return () => window.removeEventListener('flowx-global-search-select', onGlobalPick);
+    window.addEventListener('cim-global-search-select', onGlobalPick);
+    return () => window.removeEventListener('cim-global-search-select', onGlobalPick);
   }, [displayWlItems, onAppSelectedItemChange]);
 
   const activeItemData = useMemo(() => {
@@ -1261,48 +1385,157 @@ export default function WatchlistPage({
             <span style={{ opacity: 0.7 }}>▾</span>
           </button>
           {watchlistReorderOpen && watchlistReorderRect && (
-            <div style={{ position: 'fixed', top: watchlistReorderRect.top, left: watchlistReorderRect.left, width: watchlistReorderRect.width, maxHeight: 260, overflowY: 'auto', zIndex: 200000, backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 6, boxShadow: '0 8px 24px rgba(0,0,0,0.35)', padding: '6px 0' }}>
-              {displayWatchlists.length === 0 ? (
-                <div style={{ padding: '8px 10px', fontSize: 12, color: 'var(--text-muted)' }}>Create a watchlist below…</div>
-              ) : (
-                <>
-                  {watchlistDraggingIdx !== null && watchlistDropGap === 0 ? <DropInsetLine /> : null}
-                  {displayWatchlists.map((w, wi) => {
-                    const isActive = activeWatchlist?.name === w.name;
-                    const canDrag = watchlistSortMode === 'manual' && watchlists.length > 1;
-                    return (
-                      <React.Fragment key={w.name}>
-                        <div
-                          draggable={canDrag}
-                          onDragStart={canDrag ? e => onWatchlistDragStart(e, wi) : undefined}
-                          onDragEnd={canDrag ? onWatchlistDragEnd : undefined}
-                          onDragOver={canDrag ? e => onWatchlistDragOver(e, wi) : undefined}
-                          onDrop={canDrag ? onWatchlistDrop : undefined}
-                          onClick={() => {
-                            onAppActiveWatchlistNameChange(w.name);
-                            setWatchlistReorderOpen(false);
-                          }}
-                          style={{
-                            height: 30,
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 8,
-                            padding: '0 10px',
-                            cursor: canDrag ? 'grab' : 'pointer',
-                            color: isActive ? 'var(--accent-blue)' : 'var(--text-primary)',
-                            backgroundColor: isActive ? 'rgba(56,139,253,0.10)' : 'transparent',
-                            opacity: watchlistDraggingIdx === wi ? 0.45 : 1,
-                          }}
-                        >
-                          {canDrag ? <span style={{ width: 12, color: 'var(--text-muted)', fontSize: 10, letterSpacing: '-0.12em' }}>⋮⋮</span> : null}
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{w.name}</span>
-                        </div>
-                        {watchlistDraggingIdx !== null && watchlistDropGap === wi + 1 ? <DropInsetLine /> : null}
-                      </React.Fragment>
-                    );
-                  })}
-                </>
-              )}
+            <div style={{ position: 'fixed', top: watchlistReorderRect.top, left: watchlistReorderRect.left, width: watchlistReorderRect.width, zIndex: 200000, backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 6, boxShadow: '0 8px 24px rgba(0,0,0,0.35)', overflow: 'hidden' }}>
+              <div style={{ maxHeight: 220, overflowY: 'auto', padding: '6px 0' }}>
+                {displayWatchlists.length === 0 ? (
+                  <div style={{ padding: '8px 10px', fontSize: 12, color: 'var(--text-muted)' }}>Create a watchlist below…</div>
+                ) : (
+                  <>
+                    {watchlistDraggingIdx !== null && watchlistDropGap === 0 ? <DropInsetLine /> : null}
+                    {displayWatchlists.map((w, wi) => {
+                      const isActive = activeWatchlist?.name === w.name;
+                      const canDrag = watchlistSortMode === 'manual' && watchlists.length > 1 && renamingWatchlistName !== w.name;
+                      const isRenaming = renamingWatchlistName === w.name;
+                      return (
+                        <React.Fragment key={w.name}>
+                          <div
+                            draggable={canDrag}
+                            onDragStart={canDrag ? e => onWatchlistDragStart(e, wi) : undefined}
+                            onDragEnd={canDrag ? onWatchlistDragEnd : undefined}
+                            onDragOver={canDrag ? e => onWatchlistDragOver(e, wi) : undefined}
+                            onDrop={canDrag ? onWatchlistDrop : undefined}
+                            onClick={isRenaming ? undefined : () => {
+                              onAppActiveWatchlistNameChange(w.name);
+                              setWatchlistReorderOpen(false);
+                            }}
+                            style={{
+                              minHeight: 30,
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 6,
+                              padding: '0 8px 0 10px',
+                              cursor: isRenaming ? 'default' : (canDrag ? 'grab' : 'pointer'),
+                              color: isActive ? 'var(--accent-blue)' : 'var(--text-primary)',
+                              backgroundColor: isActive ? 'rgba(56,139,253,0.10)' : 'transparent',
+                              opacity: watchlistDraggingIdx === wi ? 0.45 : 1,
+                            }}
+                          >
+                            {isRenaming ? (
+                              <>
+                                <input
+                                  value={renameName}
+                                  onChange={e => setRenameName(e.target.value)}
+                                  onClick={e => e.stopPropagation()}
+                                  onKeyDown={e => {
+                                    e.stopPropagation();
+                                    if (e.key === 'Enter') renameWatchlist();
+                                    if (e.key === 'Escape') cancelRenameWatchlist();
+                                  }}
+                                  autoFocus
+                                  style={{ flex: 1, minWidth: 0, height: 24, background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)', borderRadius: 4, padding: '0 6px', fontSize: 12 }}
+                                />
+                                <button
+                                  type="button"
+                                  title="Save rename"
+                                  onClick={e => { e.stopPropagation(); renameWatchlist(); }}
+                                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 22, height: 22, flexShrink: 0, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg-tertiary)', cursor: 'pointer', padding: 0, color: 'var(--accent-blue)', fontSize: 12 }}
+                                >
+                                  ✓
+                                </button>
+                                <button
+                                  type="button"
+                                  title="Cancel rename"
+                                  onClick={e => { e.stopPropagation(); cancelRenameWatchlist(); }}
+                                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 22, height: 22, flexShrink: 0, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg-tertiary)', cursor: 'pointer', padding: 0, color: 'var(--text-muted)', fontSize: 13 }}
+                                >
+                                  ×
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                {canDrag ? <span style={{ width: 12, color: 'var(--text-muted)', fontSize: 10, letterSpacing: '-0.12em', flexShrink: 0 }}>⋮⋮</span> : null}
+                                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{w.name}</span>
+                                <button
+                                  type="button"
+                                  className="cim-row-edit-btn"
+                                  title="Rename watchlist"
+                                  onClick={e => {
+                                    e.stopPropagation();
+                                    setRenamingWatchlistName(w.name);
+                                    setRenameName(w.name);
+                                  }}
+                                >
+                                  <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                    <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61-3.447 1.148 1.148-3.447 8.61-8.61z" />
+                                  </svg>
+                                </button>
+                                <button
+                                  type="button"
+                                  title="Delete watchlist"
+                                  onClick={e => { e.stopPropagation(); deleteWatchlist(w.name); }}
+                                  style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 14, cursor: 'pointer', padding: 0, lineHeight: 1, flexShrink: 0, width: 18 }}
+                                  onMouseEnter={e => { e.currentTarget.style.color = 'var(--accent-red)'; }}
+                                  onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+                                >
+                                  ×
+                                </button>
+                              </>
+                            )}
+                          </div>
+                          {watchlistDraggingIdx !== null && watchlistDropGap === wi + 1 ? <DropInsetLine /> : null}
+                        </React.Fragment>
+                      );
+                    })}
+                  </>
+                )}
+              </div>
+              <div style={{
+                borderTop: '1px solid var(--border)',
+                padding: '8px 10px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+                backgroundColor: 'var(--bg-tertiary)',
+              }}>
+                <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Backup</span>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    type="button"
+                    onClick={e => { e.stopPropagation(); handleExportWatchlists(); }}
+                    disabled={!watchlists.length}
+                    style={{
+                      fontSize: 11,
+                      color: watchlists.length ? 'var(--text-secondary)' : 'var(--text-muted)',
+                      background: 'var(--bg-secondary)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 4,
+                      cursor: watchlists.length ? 'pointer' : 'not-allowed',
+                      padding: '3px 10px',
+                      opacity: watchlists.length ? 1 : 0.5,
+                    }}
+                    title={watchlists.length ? 'Export all watchlists to a JSON file' : 'No watchlists to export'}
+                  >
+                    Export
+                  </button>
+                  <button
+                    type="button"
+                    onClick={e => { e.stopPropagation(); watchlistImportRef.current?.click(); }}
+                    style={{
+                      fontSize: 11,
+                      color: 'var(--text-secondary)',
+                      background: 'var(--bg-secondary)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                      padding: '3px 10px',
+                    }}
+                    title="Import watchlists from a JSON backup file"
+                  >
+                    Import
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -1314,19 +1547,13 @@ export default function WatchlistPage({
           style={{ height: 28, width: 180, background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)', borderRadius: 4, padding: '0 8px', flexShrink: 0, fontSize: 12 }}
         />
         <button onClick={createWatchlist} style={actionBtnStyle()}>Create</button>
-        {activeWatchlist && !renameMode && (
-          <button onClick={() => { setRenameMode(true); setRenameName(activeWatchlist.name); }} style={actionBtnStyle()}>Rename</button>
-        )}
-        {renameMode && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-            <input value={renameName} onChange={e => setRenameName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') renameWatchlist(); if (e.key === 'Escape') setRenameMode(false); }} style={{ height: 28, width: 180, background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)', borderRadius: 4, padding: '0 8px', fontSize: 12 }} />
-            <button onClick={renameWatchlist} style={actionBtnStyle()}>Save</button>
-            <button type="button" onClick={() => { setRenameMode(false); setRenameName(''); }} style={{ ...actionBtnStyle(), width: 28, padding: 0, justifyContent: 'center' }}>×</button>
-          </div>
-        )}
-        {activeWatchlist && (
-          <button onClick={deleteWatchlist} style={{ ...actionBtnStyle(), color: 'var(--accent-red)' }}>Delete</button>
-        )}
+        <input
+          ref={watchlistImportRef}
+          type="file"
+          accept="application/json,.json"
+          style={{ display: 'none' }}
+          onChange={handleImportWatchlistFile}
+        />
       </div>
       <div ref={wrapperRef} style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
         <div ref={paneRef} style={{ width: paneWidth, minWidth: 300, borderRight: '1px solid var(--border)', flexShrink: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>

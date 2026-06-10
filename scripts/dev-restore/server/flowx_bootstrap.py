@@ -1,5 +1,5 @@
 """
-Uvicorn entry for FlowX distribution builds with encrypted app code.
+Uvicorn entry for Charts In Motion distribution builds with encrypted app code.
 
 Dev / plaintext trees: imports server.server directly.
 Encrypted trees: decrypt to LOCALAPPDATA cache, then load server from cache.

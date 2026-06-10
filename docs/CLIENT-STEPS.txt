@@ -4,39 +4,39 @@ FLOWX UPDATE - CLIENT PC ONLY
 
 
 
-1. Close FlowX completely.
+1. Close Charts In Motion completely.
 
 
 
-2. Extract the ZIP support sent you (folder like FlowX-Update-1.0.2).
+2. Extract the ZIP support sent you (folder like CiM-Update-1.0.2).
 
 
 
-3. Put that folder inside your FlowX UPDATE folder (no typing paths):
+3. Put that folder inside your Charts In Motion UPDATE folder (no typing paths):
 
-   D:\FlowX\UPDATE\FlowX-Update-1.0.2
+   D:\CiM\UPDATE\CiM-Update-1.0.2
 
-   (Replace D:\FlowX with your FlowX install folder.)
+   (Replace D:\CiM with your Charts In Motion install folder.)
 
 
 
 4. Double-click Install-Client-Update.bat inside the extracted folder.
-   FlowX install is detected automatically from the UPDATE folder path.
+   Charts In Motion install is detected automatically from the UPDATE folder path.
 
 
 
 5. Wait until it says update complete.
 
    Only if support told you to re-apply without re-running the bat:
-   run Apply-Update.bat from the FlowX install folder.
+   run Apply-Update.bat from the Charts In Motion install folder.
 
 
 
-6. If license is missing, double-click Repair-FlowXLicense.bat in the FlowX folder.
+6. If license is missing, double-click Repair-CiMLicense.bat in the Charts In Motion folder.
 
 
 
-7. Double-click start_flowx.bat in your FlowX folder.
+7. Double-click start_cim.bat in your Charts In Motion folder.
 
 
 

@@ -7,7 +7,7 @@ import {
   HistogramSeries,
 } from 'lightweight-charts';
 import { fetchChartData, fetchEarningsChartEvents } from '../../api/client';
-import { CHART_DATA_UPDATED_EVENT } from '../../chartEvents';
+import { CHART_DATA_UPDATED_EVENT, dispatchChromeIntroReadyOnce } from '../../chartEvents';
 import PanelResizeHandle from './PanelResizeHandle';
 import DrawingOverlay from './drawing/DrawingOverlay';
 import { CHART_DRAWINGS_ENABLED } from './drawing/drawingFeature';
@@ -1262,6 +1262,7 @@ export default function ChartContainer({
       .then(data => {
         _setChartData(data);
         _setLoading(false);
+        if (data.bars?.length) dispatchChromeIntroReadyOnce();
         const cb = onLastChangeRef.current;
         if (cb && data.bars && data.bars.length >= 2) {
           const last = data.bars[data.bars.length - 1];
@@ -1290,6 +1291,7 @@ export default function ChartContainer({
 
   useEffect(() => {
     if (!isPreloaded || loading || error || !chartData?.bars?.length) return;
+    dispatchChromeIntroReadyOnce();
     const cb = onLastChangeRef.current;
     if (!cb) return;
     const pct = pickDayOverDayPctFromChartPayload(chartData, dayChangeOverrideRef.current);

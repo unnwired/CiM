@@ -1,22 +1,26 @@
-# FlowX license / vendor secrets (never commit)
+# Charts In Motion license / vendor secrets (never commit)
 config/.flowx_vendor_secret
 **/config/.flowx_vendor_secret
+config/.fx-dist.cfg
+**/config/.fx-dist.cfg
 config/.build_license_secret
 **/config/.build_license_secret
 config/build_license_secret
 config/build_license_secret.txt
-data/.flowx-license
-**/data/.flowx-license
+data/.cim-license
+**/data/.cim-license
 
 # Installer build artifacts with embedded secret
 installer/license_secret.iss
 installer/generated_license_secret.pas
 installer/output/
+server/_cim_dist_embedded.py
+**/server/_cim_dist_embedded.py
 
 # Local notes that may contain secrets or machine codes
 codes.txt
 
-# Env files (often hold FLOWX_LICENSE_SECRET)
+# Env files (often hold CIM_LICENSE_SECRET)
 .env
 .env.*
 !.env.example
@@ -39,8 +43,7 @@ runtime/
 backups_full/
 backups/
 UPDATE/
-installer/
-FlowX-Update-*/
+CiM-Update-*/
 \!OLD
 \!OLD/**
 

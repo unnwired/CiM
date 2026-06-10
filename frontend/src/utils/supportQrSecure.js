@@ -3,7 +3,7 @@ import { SUPPORT_QR_PAYLOAD } from '../support/supportQrPayload.generated';
 export const SUPPORT_QR_SECURE_ENABLED = process.env.REACT_APP_SUPPORT_QR_SECURE === 'true';
 
 // Must stay in sync with scripts/Generate-SupportQrPayload.ps1
-const KEY_MATERIAL = 'FlowX-SupportQr-v1';
+const KEY_MATERIAL = 'CiM-SupportQr-v1';
 
 function bytesToHex(bytes) {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');

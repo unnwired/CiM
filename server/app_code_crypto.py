@@ -1,8 +1,8 @@
 """
-FlowX app-code encryption helpers (server bytecode + frontend static JS).
+Charts In Motion (CiM) app-code encryption helpers (server bytecode + frontend static JS).
 
 Distribution builds encrypt payloads at publish time; runtime decrypts to
-%LOCALAPPDATA%\\FlowX\\app-cache\\{version}\\ after install-key validation.
+%LOCALAPPDATA%\\CiM\\app-cache\\{version}\\ after install-key validation.
 """
 from __future__ import annotations
 
@@ -22,26 +22,51 @@ MAGIC = b"FXAC1\x00"
 NONCE_LEN = 12
 TAG_LEN = 16
 APP_CODE_SALT = b"flowx-app-code-v1"
-LICENSE_FILE = "data/.flowx-license"
+LICENSE_FILE = "data/.cim-license"
 DIST_PROFILE_FILE = "config/.fx-dist.cfg"
 LEGACY_DIST_PROFILE_FILE = "config/.flowx_vendor_secret"
 VERSION_FILE = "version.txt"
-PLAINTEXT_BOOTSTRAP_STEMS = frozenset({"__init__", "app_code_crypto", "flowx_bootstrap"})
+PLAINTEXT_BOOTSTRAP_STEMS = frozenset(
+    {"__init__", "app_code_crypto", "cim_bootstrap", "product_config", "_cim_dist_embedded"}
+)
 
 
 def is_dev_mode() -> bool:
-    return os.getenv("FLOWX_DEV", "").strip().lower() in ("1", "true", "yes")
+    from server.product_config import is_dev_env
+    return is_dev_env()
+
+
+def has_embedded_distribution_secret(base_dir: Path) -> bool:
+    return (base_dir / "server" / "_cim_dist_embedded.py").is_file()
 
 
 def is_development_tree(base_dir: Path) -> bool:
     """Repo / dev working copy — not a client-only distribution install."""
+    server_py = base_dir / "server" / "server.py"
+    profile = distribution_profile_path(base_dir)
+    has_embedded = has_embedded_distribution_secret(base_dir)
+    is_distribution = (
+        (profile.is_file() or has_embedded)
+        and (has_encrypted_server(base_dir) or has_encrypted_js(base_dir))
+        and not server_py.is_file()
+    )
+    if is_distribution:
+        return False
+    if server_py.is_file():
+        return True
     if is_dev_mode():
         return True
-    return (base_dir / "server" / "server.py").is_file()
+    return False
+
+
+def product_display_name(base_dir: Path) -> str:
+    """UI product label from config/product.json."""
+    from server.product_config import display_name
+    return display_name(dev=is_development_tree(base_dir))
 
 
 def _read_vendor_secret_text(secret_path: Path) -> str:
-    """Read vendor secret without BOM/whitespace drift (must match Inno + Show-FlowXInstallKey)."""
+    """Read vendor secret without BOM/whitespace drift (must match Inno + Show-CiMInstallKey)."""
     raw = secret_path.read_text(encoding="utf-8-sig", errors="ignore").strip()
     return raw.lstrip("\ufeff").strip()
 
@@ -57,15 +82,33 @@ def distribution_profile_path(base_dir: Path) -> Path:
     return new_path
 
 
+def _embedded_distribution_secret(base_dir: Path) -> Optional[bytes]:
+    mod_path = base_dir / "server" / "_cim_dist_embedded.py"
+    if not mod_path.is_file():
+        return None
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_cim_dist_embedded_runtime", mod_path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.distribution_secret_bytes()
+
+
 def distribution_secret(base_dir: Optional[Path] = None) -> bytes:
-    # Installed tree: config file wins over FLOWX_LICENSE_SECRET env (dev shells often set env).
+    # New builds: server/_cim_dist_embedded.py (config/.fx-dist.cfg is not shipped).
+    # Legacy installs may still have config/.fx-dist.cfg on disk.
     if base_dir is not None:
+        embedded = _embedded_distribution_secret(base_dir)
+        if embedded is not None:
+            return embedded
         secret_path = distribution_profile_path(base_dir)
         if secret_path.is_file():
             return _read_vendor_secret_text(secret_path).encode("utf-8")
-    raw = os.getenv("FLOWX_LICENSE_SECRET", "").strip()
+    raw = os.getenv("CIM_LICENSE_SECRET", "").strip()
     if not raw:
-        raw = "flowx-distribution-change-me"
+        raw = "cim-distribution-change-me"
     return raw.encode("utf-8")
 
 
@@ -187,7 +230,8 @@ def app_cache_root(base_dir: Path) -> Path:
     local = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
     version = read_installed_version(base_dir)
     safe_ver = "".join(c if c.isalnum() or c in ".-_" else "_" for c in version)
-    return Path(local) / "FlowX" / "app-cache" / safe_ver
+    from server.product_config import local_appdata_folder
+    return Path(local) / local_appdata_folder() / "app-cache" / safe_ver
 
 
 def clear_app_cache(base_dir: Path) -> None:
@@ -279,6 +323,53 @@ def sync_plaintext_static_to_cache(base_dir: Path, cache_dir: Path) -> None:
             shutil.copy2(item, target)
 
 
+def _install_enc_fingerprint(base_dir: Path) -> str:
+    """Hash of encrypted payloads on disk; invalidates app-cache when export is rebuilt."""
+    parts: list[str] = []
+    server_dir = base_dir / "server"
+    if server_dir.is_dir():
+        for enc in sorted(server_dir.rglob("*.pyc.enc")):
+            st = enc.stat()
+            rel = enc.relative_to(server_dir).as_posix()
+            parts.append(f"s:{rel}:{st.st_size}:{st.st_mtime_ns}")
+    js_dir = base_dir / "frontend" / "build" / "static" / "js"
+    if js_dir.is_dir():
+        for enc in sorted(js_dir.glob("*.js.enc")):
+            st = enc.stat()
+            parts.append(f"j:{enc.name}:{st.st_size}:{st.st_mtime_ns}")
+    if not parts:
+        return ""
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def _index_referenced_main_js(base_dir: Path) -> Optional[str]:
+    index = base_dir / "frontend" / "build" / "index.html"
+    if not index.is_file():
+        return None
+    import re
+
+    text = index.read_text(encoding="utf-8", errors="ignore")
+    match = re.search(r'/static/js/([^"]+\.js)"', text)
+    return match.group(1) if match else None
+
+
+def _cache_serves_index_js(base_dir: Path, cache_dir: Path) -> bool:
+    main_js = _index_referenced_main_js(base_dir)
+    if not main_js:
+        return True
+    return (cache_dir / "frontend" / "build" / "static" / "js" / main_js).is_file()
+
+
+def cache_is_current(base_dir: Path, cache_dir: Path) -> bool:
+    marker = cache_dir / ".ready"
+    if not marker.is_file() or not cache_static_ready(cache_dir):
+        return False
+    if not _cache_serves_index_js(base_dir, cache_dir):
+        return False
+    expected = _install_enc_fingerprint(base_dir) or "ok"
+    return marker.read_text(encoding="utf-8").strip() == expected
+
+
 def cache_static_ready(cache_dir: Path) -> bool:
     static_root = cache_dir / "frontend" / "build" / "static"
     js_dir = static_root / "js"
@@ -293,11 +384,10 @@ def ensure_app_cache(base_dir: Path) -> Path:
         return base_dir
     if not license_valid(base_dir):
         raise RuntimeError(
-            "FlowX license missing or invalid. Re-run the installer or contact support."
+            "Charts In Motion license missing or invalid. Re-run the installer or contact support."
         )
     cache_dir = app_cache_root(base_dir)
-    marker = cache_dir / ".ready"
-    if marker.exists() and cache_static_ready(cache_dir):
+    if cache_is_current(base_dir, cache_dir):
         return cache_dir
     if cache_dir.exists():
         shutil.rmtree(cache_dir, ignore_errors=True)
@@ -313,11 +403,12 @@ def ensure_app_cache(base_dir: Path) -> Path:
         shutil.rmtree(cache_dir, ignore_errors=True)
         if exc.__class__.__name__ == "InvalidTag":
             raise RuntimeError(
-                "FlowX could not decrypt app files (secret mismatch). "
-                "Re-run Install-Client-Update.bat from a fresh FlowX-Update ZIP built after "
-                "encrypt_app_code.ps1, or reinstall FlowXSetup. Do not mix encrypted files from "
+                "Charts In Motion could not decrypt app files (secret mismatch). "
+                "Re-run Install-Client-Update.bat from a fresh CiM-Update ZIP built after "
+                "encrypt_app_code.ps1, or reinstall CiMSetup. Do not mix encrypted files from "
                 "different builds."
             ) from exc
         raise
-    marker.write_text("ok", encoding="utf-8")
+    marker = cache_dir / ".ready"
+    marker.write_text(_install_enc_fingerprint(base_dir) or "ok", encoding="utf-8")
     return cache_dir

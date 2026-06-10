@@ -12,19 +12,19 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $ScriptDir "Get-FlowXPaths.ps1")
+. (Join-Path $ScriptDir "Get-CiMPaths.ps1")
 $RepoRoot = Split-Path -Parent $ScriptDir
-$fx = Get-FlowXPaths -RepoRoot $RepoRoot
+$fx = Get-CiMPaths -RepoRoot $RepoRoot
 if (-not $SourceInstall) {
     $SourceInstall = $fx.ExportRoot
 }
 if (-not (Test-Path -LiteralPath $SourceInstall)) {
-    throw "Source install not found: $SourceInstall. Run export_flowx.ps1 first."
+    throw "Source install not found: $SourceInstall. Run export_cim.ps1 first."
 }
 
-$testRoot = Join-Path $env:TEMP ("FlowX-UpdateTest-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
-$install = Join-Path $testRoot "zTo Delete\FlowX"
-$zipSibling = Join-Path $testRoot "zTo Delete\FlowX-Update-test"
+$testRoot = Join-Path $env:TEMP ("CiM-UpdateTest-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
+$install = Join-Path $testRoot "zTo Delete\Charts In Motion"
+$zipSibling = Join-Path $testRoot "zTo Delete\CiM-Update-test"
 
 if (Test-Path -LiteralPath $testRoot) {
     Remove-Item -LiteralPath $testRoot -Recurse -Force
@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force -Path $install | Out-Null
 
 Write-Host "Copying minimal install from $SourceInstall ..."
 $keep = @(
-    "start_flowx.bat", "stop_flowx.bat", "Apply-Update.bat",
+    "start_cim.bat", "stop_cim.bat", "Apply-Update.bat",
     "scripts", "server", "config", "data", "runtime"
 )
 foreach ($name in $keep) {
@@ -46,8 +46,8 @@ foreach ($name in $keep) {
 foreach ($rel in @(
         "scripts\Apply-LocalUpdate-Entry.ps1",
         "scripts\_Apply-LocalUpdate.ps1",
-        "scripts\FlowXInstallLocator.ps1",
-        "scripts\FlowXUpdatePackage.ps1",
+        "scripts\CiMInstallLocator.ps1",
+        "scripts\CiMUpdatePackage.ps1",
         "Apply-Update.bat"
     )) {
     $src = Join-Path $RepoRoot $rel
@@ -61,12 +61,12 @@ foreach ($rel in @(
 }
 
 if (-not $UpdatePackage) {
-    $candidates = Get-ChildItem -LiteralPath $fx.InstallerOutputDir -Directory -Filter "FlowX-Update*" -ErrorAction SilentlyContinue |
+    $candidates = Get-ChildItem -LiteralPath $fx.InstallerOutputDir -Directory -Filter "CiM-Update*" -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending
     if ($candidates) { $UpdatePackage = $candidates[0].FullName }
 }
 if (-not $UpdatePackage -or -not (Test-Path -LiteralPath $UpdatePackage)) {
-    throw "No FlowX-Update package. Run: scripts\build_update_package.ps1 -Version 1.0.2"
+    throw "No CiM-Update package. Run: scripts\build_update_package.ps1 -Version 1.0.2"
 }
 
 Copy-Item -LiteralPath $UpdatePackage -Destination $zipSibling -Recurse -Force
@@ -86,9 +86,9 @@ if ($RunApply) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $entry -LauncherDir $install
     if ($LASTEXITCODE -ne 0) { throw "Apply failed with exit $LASTEXITCODE" }
 } else {
-    . (Join-Path $RepoRoot "scripts\FlowXUpdatePackage.ps1")
-    $found = Find-FlowXUpdatePackageRoot -InstallRoot $install
-    if (-not $found) { throw "Find-FlowXUpdatePackageRoot did not find sibling package" }
+    . (Join-Path $RepoRoot "scripts\CiMUpdatePackage.ps1")
+    $found = Find-CiMUpdatePackageRoot -InstallRoot $install
+    if (-not $found) { throw "Find-CiMUpdatePackageRoot did not find sibling package" }
     Copy-UpdatePackageToInstall -PackageRoot $found -InstallRoot $install | Out-Null
 }
 $manifest = Join-Path $updateDir "update.manifest.json"

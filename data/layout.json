@@ -1,8 +1,8 @@
 {
-  "stochrsi": 169,
-  "macd": 185,
-  "price": 80,
-  "dashboardPaneWidth": 447,
+  "stochrsi": 156,
+  "macd": 161,
+  "price": 82,
+  "dashboardPaneWidth": 415,
   "dashboardChartLayout": "3h",
   "watchlistPaneWidth": 432,
   "watchlistChartLayout": "3h",
@@ -51,20 +51,20 @@
     "8": "+Earnings April2026"
   },
   "portfolioRowOrder": [
-    "stock:SUZLON",
     "stock:IREDA",
-    "stock:IRCTC",
-    "stock:NTPCGREEN",
     "stock:GRSE",
     "stock:TRENT",
     "stock:ENRIN",
+    "stock:PARAS",
+    "stock:SUZLON",
+    "stock:IRCTC",
+    "stock:NTPCGREEN",
     "stock:RRKABEL",
     "stock:VGUARD",
     "stock:MARUTI",
     "stock:MAZDOCK",
     "stock:SUPREMEIND",
     "stock:LUPIN",
-    "stock:PARAS",
     "stock:HINDUNILVR",
     "stock:NESTLEIND",
     "stock:HINDZINC",
@@ -131,5 +131,8 @@
   ],
   "dashboardTimeframe": "1D",
   "dashboardTimeframe2": "1W",
-  "dashboardTimeframe3": "2W"
+  "dashboardTimeframe3": "2W",
+  "indicesTimeframe": "1D",
+  "indicesTimeframe2": "1W",
+  "indicesTimeframe3": "2W"
 }

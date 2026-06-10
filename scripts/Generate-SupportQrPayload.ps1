@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Must stay in sync with frontend/src/utils/supportQrSecure.js
-$KeyMaterial = "FlowX-SupportQr-v1"
+$KeyMaterial = "CiM-SupportQr-v1"
 
 function Get-SupportQrKeyBytes {
     $sha = [System.Security.Cryptography.SHA256]::Create()

@@ -90,8 +90,8 @@ export function DrawingWorkspaceProvider({ children, workspaceId = 'default' }) 
         setActiveToolState(tool || null);
       }
     };
-    window.addEventListener('flowx-drawing-set-tool', onExternalToolPick);
-    return () => window.removeEventListener('flowx-drawing-set-tool', onExternalToolPick);
+    window.addEventListener('cim-drawing-set-tool', onExternalToolPick);
+    return () => window.removeEventListener('cim-drawing-set-tool', onExternalToolPick);
   }, []);
 
   const mountChart = useCallback((scopeId, api) => {

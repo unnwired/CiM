@@ -1,1 +1,1 @@
-﻿Update complete (1.0.5). Start FlowX from start_flowx.bat or the desktop shortcut.
+﻿Update complete (1.0.5). Start Charts In Motion from start_cim.bat or the desktop shortcut.

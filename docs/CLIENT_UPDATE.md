@@ -1,49 +1,49 @@
-# FlowX update (client PC)
+# Charts In Motion update (client PC)
 
 ## What support sends
 
-A ZIP of **`FlowX-Update-{version}`** on [GitHub Releases](https://github.com/unnwired/flowx-updates/releases), or the same folder/ZIP sent directly.
+A ZIP of **`CiM-Update-{version}`** on [GitHub Releases](https://github.com/unnwired/cim-updates/releases), or the same folder/ZIP sent directly.
 
 ## Client steps (automatic — recommended)
 
-1. Keep FlowX running (or open it).
-2. When an update is available on GitHub, FlowX shows a popup every ~90 minutes (or use **Settings → Apply update** anytime).
-3. Click **OK** to update. FlowX downloads the release ZIP, extracts it into `UPDATE\`, applies the update, and closes.
-4. Start FlowX again with **`start_flowx.bat`**.
+1. Keep Charts In Motion running (or open it).
+2. When an update is available on GitHub, Charts In Motion shows a popup every ~90 minutes (or use **Settings → Apply update** anytime).
+3. Click **OK** to update. Charts In Motion downloads the release ZIP, extracts it into `UPDATE\`, applies the update, and closes.
+4. Start Charts In Motion again with **`start_cim.bat`**.
 
 ## Client steps (manual)
 
-1. Close FlowX.
-2. Download **`FlowX-Update-{version}.zip`** from GitHub Releases (or from support).
-3. Extract into your FlowX **`UPDATE`** folder:
+1. Close Charts In Motion.
+2. Download **`CiM-Update-{version}.zip`** from GitHub Releases (or from support).
+3. Extract into your Charts In Motion **`UPDATE`** folder:
 
    ```
-   D:\FlowX\UPDATE\FlowX-Update-1.0.4\
+   D:\CiM\UPDATE\CiM-Update-1.0.4\
    ```
 
 4. Double-click **`Install-Client-Update.bat`** inside that folder. Install path is detected automatically — no typing.
 5. If prompted about license, run:
 
    ```powershell
-   cd "<FlowX install folder>"
-   powershell -ExecutionPolicy Bypass -File ".\scripts\Repair-FlowXLicense.ps1"
+   cd "<Charts In Motion install folder>"
+   powershell -ExecutionPolicy Bypass -File ".\scripts\Repair-CiMLicense.ps1"
    ```
 
-6. Run **`start_flowx.bat`** from the install folder.
+6. Run **`start_cim.bat`** from the install folder.
 
 ## Success checks
 
 | File | Location |
 |------|----------|
 | `update-result.txt` | Install root |
-| `UPDATE\FlowX-Update-{version}\update.manifest.json` | Under install |
-| `data\.flowx-license` | Under install |
+| `UPDATE\CiM-Update-{version}\update.manifest.json` | Under install |
+| `data\.cim-license` | Under install |
 | `Apply-Update.bat` | Install root (copied automatically) |
 
 ## Do not
 
 - Run `Apply-Update.bat` from inside `UPDATE\payload` (wrong folder).
-- Put the update in the FlowX root instead of `UPDATE\` (use `UPDATE\FlowX-Update-*`).
+- Put the update in the Charts In Motion root instead of `UPDATE\` (use `UPDATE\CiM-Update-*`).
 
 ## If it fails
 

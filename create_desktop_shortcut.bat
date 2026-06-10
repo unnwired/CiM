@@ -4,11 +4,11 @@ setlocal
 REM Resolve paths
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
-set "TARGET=%ROOT%\start_flowx.bat"
+set "TARGET=%ROOT%\start_cim.bat"
 set "ICON=%SystemRoot%\System32\SHELL32.dll,220"
 
 if not exist "%TARGET%" (
-  echo [ERROR] start_flowx.bat was not found in:
+  echo [ERROR] start_cim.bat was not found in:
   echo         "%ROOT%"
   pause
   exit /b 1
@@ -18,7 +18,7 @@ set "PS_SCRIPT=%TEMP%\nse_pulse_shortcut_%RANDOM%.ps1"
 
 (
   echo $desktop = [Environment]::GetFolderPath('Desktop'^)
-  echo $shortcutPath = Join-Path $desktop 'FlowX.lnk'
+  echo $shortcutPath = Join-Path $desktop 'Charts In Motion.lnk'
   echo $targetPath = '%TARGET:\=\\%'
   echo $workingDir = '%ROOT:\=\\%'
   echo $iconLoc = '%ICON%'
@@ -28,7 +28,7 @@ set "PS_SCRIPT=%TEMP%\nse_pulse_shortcut_%RANDOM%.ps1"
   echo $shortcut.WorkingDirectory = $workingDir
   echo $shortcut.IconLocation = $iconLoc
   echo $shortcut.WindowStyle = 1
-  echo $shortcut.Description = 'Launch FlowX (bootstrap + start^)'
+  echo $shortcut.Description = 'Launch Charts In Motion (bootstrap + start^)'
   echo $shortcut.Save(^)
 ) > "%PS_SCRIPT%"
 
@@ -43,7 +43,7 @@ if not "%ERR%"=="0" (
   exit /b 1
 )
 
-echo Desktop shortcut created: "FlowX"
+echo Desktop shortcut created: "CiM"
 echo Double-click it to launch the app.
 exit /b 0
 

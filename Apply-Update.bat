@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-REM Run from FlowX install root. Paths with spaces are handled inside Apply-LocalUpdate-Entry.ps1.
+REM Run from Charts In Motion install root. Paths with spaces are handled inside Apply-LocalUpdate-Entry.ps1.
 for %%I in ("%~dp0.") do set "LAUNCHER=%%~fI"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%LAUNCHER%\scripts\Apply-LocalUpdate-Entry.ps1" -LauncherDir "%LAUNCHER%"
 set "EC=%ERRORLEVEL%"

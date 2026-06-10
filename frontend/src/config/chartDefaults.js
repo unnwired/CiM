@@ -1,23 +1,23 @@
 import { isDistributionProfile } from './exportProfile';
 
 const EMA_PREFS_KEY = isDistributionProfile
-  ? 'flowx.chart.ema.distribution'
-  : 'flowx.chart.ema';
+  ? 'cim.chart.ema.distribution'
+  : 'cim.chart.ema';
 const VOLUME_PREFS_KEY = isDistributionProfile
-  ? 'flowx.chart.volumeVisible.distribution'
-  : 'flowx.chart.volumeVisible';
+  ? 'cim.chart.volumeVisible.distribution'
+  : 'cim.chart.volumeVisible';
 /** Distribution builds use a separate key so dev localStorage on 127.0.0.1 does not leave indicators on. */
 export const PANELS_PREFS_KEY = isDistributionProfile
-  ? 'flowx.chart.visiblePanels.distribution'
-  : 'flowx.chart.visiblePanels';
-export const EMA_PREFS_UPDATED_EVENT = 'flowx:ema-prefs-updated';
-export const VOLUME_PREFS_UPDATED_EVENT = 'flowx:volume-prefs-updated';
-export const PANELS_PREFS_UPDATED_EVENT = 'flowx:panels-prefs-updated';
-const DIST_EMA_DEFAULTS_VERSION_KEY = 'flowx.chart.ema.distribution.version';
+  ? 'cim.chart.visiblePanels.distribution'
+  : 'cim.chart.visiblePanels';
+export const EMA_PREFS_UPDATED_EVENT = 'cim:ema-prefs-updated';
+export const VOLUME_PREFS_UPDATED_EVENT = 'cim:volume-prefs-updated';
+export const PANELS_PREFS_UPDATED_EVENT = 'cim:panels-prefs-updated';
+const DIST_EMA_DEFAULTS_VERSION_KEY = 'cim.chart.ema.distribution.version';
 const DIST_EMA_DEFAULTS_VERSION = 'v2-ema-100-200';
-const DIST_PANELS_DEFAULTS_VERSION_KEY = 'flowx.chart.panels.distribution.version';
+const DIST_PANELS_DEFAULTS_VERSION_KEY = 'cim.chart.panels.distribution.version';
 const DIST_PANELS_DEFAULTS_VERSION = 'v2-all-off';
-const DIST_VOLUME_DEFAULTS_VERSION_KEY = 'flowx.chart.volume.distribution.version';
+const DIST_VOLUME_DEFAULTS_VERSION_KEY = 'cim.chart.volume.distribution.version';
 const DIST_VOLUME_DEFAULTS_VERSION = 'v1-off';
 
 export const EMA_PERIODS = [21, 50, 100, 200];
@@ -158,7 +158,7 @@ export function getPersistedVisiblePanels() {
         window.localStorage.setItem(PANELS_PREFS_KEY, JSON.stringify(normalizedDefault));
         window.localStorage.setItem(DIST_PANELS_DEFAULTS_VERSION_KEY, DIST_PANELS_DEFAULTS_VERSION);
         // Legacy per-page key forced MACD/StochRSI on in Movers regardless of distribution defaults.
-        window.localStorage.removeItem('flowx.movers.visiblePanels');
+        window.localStorage.removeItem('cim.movers.visiblePanels');
         return normalizedDefault;
       }
     }

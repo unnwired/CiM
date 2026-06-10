@@ -29,6 +29,9 @@
   --header-height:  52px;
   --topbar-height:  52px;
   --tabbar-height:  36px;
+  --chart-toolbar-height: 48px;
+  --cim-kb-chrome-width: 16px;
+  --cim-kb-slide-ms: 520ms;
 }
 
 html, body, #root {
@@ -72,6 +75,37 @@ input {
   display: none !important;
   opacity: 0 !important;
   pointer-events: none !important;
+}
+
+/* Row edit (pen) icon in dropdown lists — watchlist, presets, etc. */
+.cim-row-edit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0;
+  transition:
+    background-color 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+    color 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.cim-row-edit-btn:hover {
+  background-color: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--text-primary);
+  transform: scale(1.04);
+}
+.cim-row-edit-btn:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 1px;
 }
 
 .chart-app-toolbar {

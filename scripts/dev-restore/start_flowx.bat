@@ -2,19 +2,19 @@
 setlocal DisableDelayedExpansion
 
 REM ========================================================================
-REM Primary way to run FlowX: double-click this file or run from CMD here.
+REM Primary way to run Charts In Motion: double-click this file or run from CMD here.
 REM It prepares Python, rebuilds frontend\build when frontend\src is newer,
-REM starts the API at http://127.0.0.1:8000 , then opens FlowX Desktop.
+REM starts the API at http://127.0.0.1:8000 , then opens Charts In Motion Desktop.
 REM
 REM Optional environment variables (set before running, or in System):
-REM   FLOWX_SKIP_FRONTEND_BUILD=1  — never run npm run build (uses existing build)
-REM   FLOWX_FORCE_FRONTEND_BUILD=1   — always run npm run build before start
+REM   CIM_SKIP_FRONTEND_BUILD=1  — never run npm run build (uses existing build)
+REM   CIM_FORCE_FRONTEND_BUILD=1   — always run npm run build before start
 REM
 REM Manual start without this file ^(developers^):
 REM   cd /d "<project folder>"
 REM   cd frontend ^&^& npm install ^&^& npm run build ^&^& cd ..
 REM   runtime\python\python.exe -s -m uvicorn server.server:app --host 127.0.0.1 --port 8000
-REM   Open http://127.0.0.1:8000  ^(or let FlowX Desktop load it^)
+REM   Open http://127.0.0.1:8000  ^(or let Charts In Motion Desktop load it^)
 REM ========================================================================
 
 REM Resolve project root from this script location
@@ -26,7 +26,7 @@ set "BACKEND_LOG=%ROOT%\runtime\logs\backend-startup.log"
 set "BACKEND_ERR=%ROOT%\runtime\logs\backend-startup.err.log"
 
 echo ==========================================
-echo FlowX Bootstrap + Start
+echo Charts In Motion Bootstrap + Start
 echo ==========================================
 echo Project root: "%ROOT%"
 echo.
@@ -39,37 +39,37 @@ set "SERVER_LAYOUT_OK=0"
 if exist "%ROOT%\server\server.py" set "SERVER_LAYOUT_OK=1"
 if exist "%ROOT%\server\server.pyc" set "SERVER_LAYOUT_OK=1"
 if exist "%ROOT%\server\server.pyc.enc" set "SERVER_LAYOUT_OK=1"
-if exist "%ROOT%\server\flowx_bootstrap.py" if exist "%ROOT%\server\app_code_crypto.py" (
+if exist "%ROOT%\server\cim_bootstrap.py" if exist "%ROOT%\server\app_code_crypto.py" (
   if exist "%ROOT%\server\server.pyc.enc" set "SERVER_LAYOUT_OK=1"
 )
 if "%SERVER_LAYOUT_OK%"=="0" (
-  echo [ERROR] FlowX server files are missing under server\
+  echo [ERROR] Charts In Motion server files are missing under server\
   echo Expected dev build: server\server.py or server\server.pyc
-  echo Expected distribution: server\flowx_bootstrap.py + server\server.pyc.enc
-  echo Ensure this .bat is inside a complete FlowX install folder.
-  if not defined FLOWX_NO_PAUSE pause
+  echo Expected distribution: server\cim_bootstrap.py + server\server.pyc.enc
+  echo Ensure this .bat is inside a complete Charts In Motion install folder.
+  if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 
 if not exist "%ROOT%\data\nse_data.db" (
   echo [ERROR] Required database file is missing: data\nse_data.db
   echo Please restore the distribution package or contact support.
-  if not defined FLOWX_NO_PAUSE pause
+  if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 
 if not exist "%ROOT%\db_sqlite.py" (
   echo [ERROR] Required module is missing: db_sqlite.py
-  echo This export folder is incomplete. Re-run export_flowx.ps1 from the dev project,
-  echo or copy a complete FlowX package — do not run from a partial FlowX.staging folder.
-  if not defined FLOWX_NO_PAUSE pause
+  echo This export folder is incomplete. Re-run export_cim.ps1 from the dev project,
+  echo or copy a complete Charts In Motion package — do not run from a partial Charts In Motion.staging folder.
+  if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 
 if not exist "%ROOT%\runtime\python\python.exe" (
   echo [ERROR] Bundled Python runtime is missing: runtime\python\python.exe
-  echo Re-export FlowX or restore runtime\python from a complete package.
-  if not defined FLOWX_NO_PAUSE pause
+  echo Re-export Charts In Motion or restore runtime\python from a complete package.
+  if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 
@@ -106,13 +106,13 @@ if exist "%EMBEDDED_PY%" (
     if errorlevel 1 (
       echo [ERROR] Failed to repair embedded runtime dependencies.
       echo Re-export package and ensure runtime\wheelhouse is included.
-      if not defined FLOWX_NO_PAUSE pause
+      if not defined CIM_NO_PAUSE pause
       exit /b 1
     )
     "%EMBEDDED_PY%" -c "import fastapi, uvicorn, pandas, yfinance, tradingview_screener, cryptography" >nul 2>&1
     if errorlevel 1 (
       echo [ERROR] Embedded runtime still invalid after repair.
-      if not defined FLOWX_NO_PAUSE pause
+      if not defined CIM_NO_PAUSE pause
       exit /b 1
     )
   )
@@ -139,7 +139,7 @@ where winget >nul 2>&1
 if errorlevel 1 (
   echo [ERROR] Python is unavailable and winget is not installed.
   echo Install App Installer from Microsoft Store and re-run this file.
-  if not defined FLOWX_NO_PAUSE pause
+  if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 echo Python runtime missing. Attempting automatic install via winget...
@@ -171,7 +171,7 @@ echo [ERROR] Python installation failed.
 echo Winget log: "%WINGET_LOG%"
 echo Run this manually for details:
 echo winget install --id Python.Python.3 --source winget --scope user --accept-package-agreements --accept-source-agreements --silent
-if not defined FLOWX_NO_PAUSE pause
+if not defined CIM_NO_PAUSE pause
 exit /b 1
 
 :python_found
@@ -182,7 +182,7 @@ if not exist "%VENV_PY%" (
   %BOOTSTRAP_PYTHON% -m venv "%ROOT%\runtime\venv"
   if errorlevel 1 (
     echo [ERROR] Failed to create local virtual environment.
-    if not defined FLOWX_NO_PAUSE pause
+    if not defined CIM_NO_PAUSE pause
     exit /b 1
   )
 )
@@ -215,13 +215,13 @@ if exist "%ROOT%\runtime\wheelhouse" (
 )
 if errorlevel 1 (
   echo [ERROR] Failed to install backend Python packages in runtime\venv.
-  if not defined FLOWX_NO_PAUSE pause
+  if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 "%PYTHON_EXE%" -s -c "import fastapi, uvicorn, pandas, yfinance, tradingview_screener" >nul 2>&1
 if errorlevel 1 (
   echo [ERROR] Backend dependency validation failed in runtime\venv.
-  if not defined FLOWX_NO_PAUSE pause
+  if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 
@@ -230,50 +230,50 @@ if errorlevel 1 (
 echo.
 REM -----------------------------------------------------------
 REM 2a) Distribution: license + skip dev-only frontend rebuild
-REM     Dev tree = server\server.py present (repo) or FLOWX_DEV=1
+REM     Dev tree = server\server.py present (repo) or CIM_DEV=1
 REM -----------------------------------------------------------
-set "FLOWX_DISTRIBUTION=0"
+set "CIM_DISTRIBUTION=0"
 if exist "%ROOT%\server\server.pyc.enc" if not exist "%ROOT%\server\server.py" (
-  set "FLOWX_DISTRIBUTION=1"
+  set "CIM_DISTRIBUTION=1"
 )
-if /I "%FLOWX_DEV%"=="1" set "FLOWX_DISTRIBUTION=0"
-if /I "%FLOWX_DEV%"=="true" set "FLOWX_DISTRIBUTION=0"
-if /I "%FLOWX_DEV%"=="yes" set "FLOWX_DISTRIBUTION=0"
+if /I "%CIM_DEV%"=="1" set "CIM_DISTRIBUTION=0"
+if /I "%CIM_DEV%"=="true" set "CIM_DISTRIBUTION=0"
+if /I "%CIM_DEV%"=="yes" set "CIM_DISTRIBUTION=0"
 
-if "%FLOWX_DISTRIBUTION%"=="1" (
+if "%CIM_DISTRIBUTION%"=="1" (
   echo Distribution build detected ^(encrypted app code^).
-  if not exist "%ROOT%\data\.flowx-license" (
+  if not exist "%ROOT%\data\.cim-license" (
     echo.
-    echo [ERROR] License file missing: data\.flowx-license
+    echo [ERROR] License file missing: data\.cim-license
     echo.
-    if exist "%ROOT%\Repair-FlowXLicense.bat" (
-      echo Double-click:  Repair-FlowXLicense.bat
-      echo Or PowerShell: powershell -ExecutionPolicy Bypass -File "%ROOT%\scripts\Repair-FlowXLicense.ps1"
+    if exist "%ROOT%\Repair-CiMLicense.bat" (
+      echo Double-click:  Repair-CiMLicense.bat
+      echo Or PowerShell: powershell -ExecutionPolicy Bypass -File "%ROOT%\scripts\Repair-CiMLicense.ps1"
       echo Send the machine code to support, then enter the install key they return.
-    ) else if exist "%ROOT%\scripts\Repair-FlowXLicense.ps1" (
-      echo Run: powershell -ExecutionPolicy Bypass -File "%ROOT%\scripts\Repair-FlowXLicense.ps1"
+    ) else if exist "%ROOT%\scripts\Repair-CiMLicense.ps1" (
+      echo Run: powershell -ExecutionPolicy Bypass -File "%ROOT%\scripts\Repair-CiMLicense.ps1"
     ) else (
-      echo Run Install-Client-Update.bat from the FlowX-Update ZIP from support, then repair license.
+      echo Run Install-Client-Update.bat from the CiM-Update ZIP from support, then repair license.
     )
     echo.
-    if not defined FLOWX_NO_PAUSE pause
+    if not defined CIM_NO_PAUSE pause
     exit /b 1
   )
   if exist "%ROOT%\runtime\python\python.exe" (
-    set "FLOWX_LICENSE_SECRET="
-    "%ROOT%\runtime\python\python.exe" -s -c "import os, sys; os.environ.pop('FLOWX_LICENSE_SECRET', None); sys.path.insert(0, r'%ROOT%'); from pathlib import Path; from server.app_code_crypto import license_valid; raise SystemExit(0 if license_valid(Path(r'%ROOT%')) else 1)" >nul 2>&1
+    set "CIM_LICENSE_SECRET="
+    "%ROOT%\runtime\python\python.exe" -s -c "import os, sys; os.environ.pop('CIM_LICENSE_SECRET', None); sys.path.insert(0, r'%ROOT%'); from pathlib import Path; from server.app_code_crypto import license_valid; raise SystemExit(0 if license_valid(Path(r'%ROOT%')) else 1)" >nul 2>&1
     if errorlevel 1 (
       echo.
       echo [ERROR] License file exists but is NOT valid on this PC.
       echo Usually: install key does not match this PC's license profile in config\.
       echo.
-      echo Try auto-repair first:  Repair-FlowXLicense-Auto.bat
-      echo Or: powershell -ExecutionPolicy Bypass -File "%ROOT%\scripts\Repair-FlowXLicense.ps1" -AutoFix
-      if exist "%ROOT%\scripts\Diagnose-FlowXInstall.ps1" (
-        echo Or run: powershell -ExecutionPolicy Bypass -File "%ROOT%\scripts\Diagnose-FlowXInstall.ps1"
+      echo Try auto-repair first:  Repair-CiMLicense-Auto.bat
+      echo Or: powershell -ExecutionPolicy Bypass -File "%ROOT%\scripts\Repair-CiMLicense.ps1" -AutoFix
+      if exist "%ROOT%\scripts\Diagnose-CiMInstall.ps1" (
+        echo Or run: powershell -ExecutionPolicy Bypass -File "%ROOT%\scripts\Diagnose-CiMInstall.ps1"
       )
       echo.
-      if not defined FLOWX_NO_PAUSE pause
+      if not defined CIM_NO_PAUSE pause
       exit /b 1
     )
   )
@@ -290,7 +290,7 @@ REM 2b) Keep frontend\build in sync with frontend\src (needs Node/npm)
 REM -----------------------------------------------------------
 call :EnsureFrontendBuild
 if errorlevel 1 (
-  if not defined FLOWX_NO_PAUSE pause
+  if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 :after_frontend_build_check
@@ -310,7 +310,7 @@ REM -----------------------------------------------------------
 if not exist "%ROOT%\frontend\package.json" (
   echo [ERROR] frontend\package.json not found and no frontend build exists.
   echo This package appears incomplete.
-  if not defined FLOWX_NO_PAUSE pause
+  if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 
@@ -320,7 +320,7 @@ if errorlevel 1 (
   if errorlevel 1 (
     echo [ERROR] Node.js is missing and winget is unavailable.
     echo Install Node.js LTS manually from https://nodejs.org and retry.
-    if not defined FLOWX_NO_PAUSE pause
+    if not defined CIM_NO_PAUSE pause
     exit /b 1
   )
   echo Node.js not found. Installing Node.js LTS...
@@ -330,7 +330,7 @@ if errorlevel 1 (
   if errorlevel 1 (
     echo [ERROR] Node.js installation failed or PATH not updated. Re-run this script as Administrator,
     echo or install Node.js LTS manually from https://nodejs.org  ^(ensure "Add to PATH" is checked^).
-    if not defined FLOWX_NO_PAUSE pause
+    if not defined CIM_NO_PAUSE pause
     exit /b 1
   )
 )
@@ -340,14 +340,14 @@ cd /d "%ROOT%\frontend"
 "%NPM_CMD%" install
 if errorlevel 1 (
   echo [ERROR] npm install failed in frontend.
-  if not defined FLOWX_NO_PAUSE pause
+  if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 cd /d "%ROOT%"
 
-echo Starting FlowX services (backend + frontend dev server)...
-start "FlowX Backend" /D "%ROOT%" "%PYTHON_EXE%" -s -m uvicorn server.server:app --reload --host 127.0.0.1 --port 8000
-start "FlowX Frontend" /D "%ROOT%\frontend" cmd /k call "%NPM_CMD%" start
+echo Starting Charts In Motion services (backend + frontend dev server)...
+start "CiM Backend" /D "%ROOT%" "%PYTHON_EXE%" -s -m uvicorn server.server:app --reload --host 127.0.0.1 --port 8000
+start "Charts In Motion Frontend" /D "%ROOT%\frontend" cmd /k call "%NPM_CMD%" start
 call :FlowxSleep 5
 start "" "http://localhost:3000"
 
@@ -360,17 +360,17 @@ exit /b 0
 echo Found prebuilt frontend. Starting backend service...
 if not exist "%ROOT%\runtime\logs" mkdir "%ROOT%\runtime\logs"
 del /q "%BACKEND_LOG%" "%BACKEND_ERR%" >nul 2>&1
-if defined FLOWX_NO_PAUSE goto :StartPackagedApp_Hidden
-echo Opening FlowX Backend console ^(live scan / fetch logs appear here^)...
-start "FlowX Backend" /D "%ROOT%" cmd /k ""%PYTHON_EXE%" -s -m uvicorn server.flowx_bootstrap:app --host 127.0.0.1 --port 8000"
+if defined CIM_NO_PAUSE goto :StartPackagedApp_Hidden
+echo Opening CiM Backend console ^(live scan / fetch logs appear here^)...
+start "CiM Backend" /D "%ROOT%" cmd /k ""%PYTHON_EXE%" -s -m uvicorn server.cim_bootstrap:app --host 127.0.0.1 --port 8000"
 goto :StartPackagedApp_AfterLaunch
 :StartPackagedApp_Hidden
 powershell -NoProfile -WindowStyle Hidden -Command ^
-  "$root = '%ROOT%'; $py = '%PYTHON_EXE%'; $log = Join-Path $root 'runtime\logs\backend-startup.log'; $err = Join-Path $root 'runtime\logs\backend-startup.err.log'; $pidf = Join-Path $root 'runtime\logs\backend.pid'; New-Item -ItemType Directory -Force -Path (Split-Path -Parent $log) | Out-Null; $p = Start-Process -FilePath $py -ArgumentList @('-s','-m','uvicorn','server.flowx_bootstrap:app','--host','127.0.0.1','--port','8000') -WorkingDirectory $root -PassThru -RedirectStandardOutput $log -RedirectStandardError $err; if ($p) { $p.Id | Out-File -FilePath $pidf -Encoding ascii }"
+  "$root = '%ROOT%'; $py = '%PYTHON_EXE%'; $log = Join-Path $root 'runtime\logs\backend-startup.log'; $err = Join-Path $root 'runtime\logs\backend-startup.err.log'; $pidf = Join-Path $root 'runtime\logs\backend.pid'; New-Item -ItemType Directory -Force -Path (Split-Path -Parent $log) | Out-Null; $p = Start-Process -FilePath $py -ArgumentList @('-s','-m','uvicorn','server.cim_bootstrap:app','--host','127.0.0.1','--port','8000') -WorkingDirectory $root -PassThru -RedirectStandardOutput $log -RedirectStandardError $err; if ($p) { $p.Id | Out-File -FilePath $pidf -Encoding ascii }"
 :StartPackagedApp_AfterLaunch
 if errorlevel 1 (
   echo [ERROR] Failed to launch backend process.
-  if not defined FLOWX_NO_PAUSE pause
+  if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 call :WaitForBackendReady
@@ -379,16 +379,16 @@ if errorlevel 1 (
   echo   "%BACKEND_LOG%"
   echo   "%BACKEND_ERR%"
   call :ShowBackendErrTail
-  if not defined FLOWX_NO_PAUSE pause
+  if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 call :LaunchDesktop
 if errorlevel 1 (
-  if not defined FLOWX_NO_PAUSE pause
+  if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 echo.
-echo Done. FlowX is starting.
+echo Done. Charts In Motion is starting.
 exit /b 0
 
 :ShowBackendErrTail
@@ -425,14 +425,14 @@ if exist "%ROOT%\desktop\desktop\node_modules\electron\dist\electron.exe" if not
 
 if not exist "%DESKTOP_DIR%\package.json" (
   echo [ERROR] Desktop launcher files missing: "%DESKTOP_DIR%\package.json"
-  echo Re-export FlowX and retry.
-  if not defined FLOWX_NO_PAUSE pause
+  echo Re-export Charts In Motion and retry.
+  if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 
 if exist "%ELECTRON_EXE%" (
-  echo Starting FlowX Desktop window...
-  start "FlowX Desktop" /D "%DESKTOP_DIR%" "%ELECTRON_EXE%" --disable-gpu --disable-http-cache .
+  echo Starting Charts In Motion Desktop window...
+  start "Charts In Motion Desktop" /D "%DESKTOP_DIR%" "%ELECTRON_EXE%" --disable-gpu --disable-http-cache .
   cd /d "%ROOT%"
   exit /b 0
 )
@@ -445,7 +445,7 @@ if errorlevel 1 (
     call :PromptBrowserFallback
     exit /b %ERRORLEVEL%
   )
-  echo Node.js not found. Installing Node.js LTS for FlowX Desktop...
+  echo Node.js not found. Installing Node.js LTS for Charts In Motion Desktop...
   call :TryInstallNodeWithWinget
   call :FlowxSleep 3
   call :ResolveNpmCmd
@@ -457,7 +457,7 @@ if errorlevel 1 (
   echo Node.js located successfully.
 )
 
-echo Starting FlowX Desktop window...
+echo Starting Charts In Motion Desktop window...
 cd /d "%DESKTOP_DIR%"
 if not exist "%ELECTRON_EXE%" (
   echo Installing desktop runtime...
@@ -471,13 +471,13 @@ if not exist "%ELECTRON_EXE%" (
 )
 if not exist "%DESKTOP_DIR%\node_modules\electron\dist\electron.exe" (
   echo [ERROR] Electron executable not found: "%DESKTOP_DIR%\node_modules\electron\dist\electron.exe"
-  echo Try deleting desktop\node_modules and re-run start_flowx.bat.
+  echo Try deleting desktop\node_modules and re-run start_cim.bat.
   cd /d "%ROOT%"
   call :PromptBrowserFallback
   exit /b %ERRORLEVEL%
 )
 set "ELECTRON_EXE=%DESKTOP_DIR%\node_modules\electron\dist\electron.exe"
-start "FlowX Desktop" /D "%DESKTOP_DIR%" "%ELECTRON_EXE%" --disable-gpu --disable-http-cache .
+start "Charts In Motion Desktop" /D "%DESKTOP_DIR%" "%ELECTRON_EXE%" --disable-gpu --disable-http-cache .
 cd /d "%ROOT%"
 exit /b 0
 
@@ -524,20 +524,20 @@ exit /b 0
 set "FLOWX_FALLBACK_CHOICE="
 where powershell >nul 2>&1
 if not errorlevel 1 (
-  for /f "usebackq delims=" %%R in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Windows.Forms; $msg='Electron failed to start. Open browser mode instead?'; $title='FlowX Startup'; $btn=[System.Windows.Forms.MessageBoxButtons]::YesNo; $icon=[System.Windows.Forms.MessageBoxIcon]::Warning; $res=[System.Windows.Forms.MessageBox]::Show($msg,$title,$btn,$icon); if($res -eq [System.Windows.Forms.DialogResult]::Yes){'YES'} else {'NO'}" 2^>nul`) do set "FLOWX_FALLBACK_CHOICE=%%R"
+  for /f "usebackq delims=" %%R in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Windows.Forms; $msg='Electron failed to start. Open browser mode instead?'; $title='Charts In Motion Startup'; $btn=[System.Windows.Forms.MessageBoxButtons]::YesNo; $icon=[System.Windows.Forms.MessageBoxIcon]::Warning; $res=[System.Windows.Forms.MessageBox]::Show($msg,$title,$btn,$icon); if($res -eq [System.Windows.Forms.DialogResult]::Yes){'YES'} else {'NO'}" 2^>nul`) do set "FLOWX_FALLBACK_CHOICE=%%R"
 )
 if /I "%FLOWX_FALLBACK_CHOICE%"=="YES" goto :FallbackYes
 if /I "%FLOWX_FALLBACK_CHOICE%"=="NO" goto :FallbackNo
 
 echo.
 echo Electron failed. Open browser mode? ^(Y/N^)
-choice /C YN /N /M "Press Y for browser mode, N to stop FlowX: "
+choice /C YN /N /M "Press Y for browser mode, N to stop Charts In Motion: "
 if errorlevel 2 goto :FallbackNo
 if errorlevel 1 goto :FallbackYes
 
 :FallbackNo
-if exist "%ROOT%\stop_flowx.bat" (
-  call "%ROOT%\stop_flowx.bat" >nul 2>&1
+if exist "%ROOT%\stop_cim.bat" (
+  call "%ROOT%\stop_cim.bat" >nul 2>&1
 )
 exit /b 1
 
@@ -547,16 +547,16 @@ exit /b 0
 
 REM ------------------------------------------------------------------
 REM Rebuild production bundle when sources/config are newer than build,
-REM or when FLOWX_FORCE_FRONTEND_BUILD=1 . Requires npm on PATH.
+REM or when CIM_FORCE_FRONTEND_BUILD=1 . Requires npm on PATH.
 REM ------------------------------------------------------------------
 :EnsureFrontendBuild
-if "%FLOWX_SKIP_FRONTEND_BUILD%"=="1" (
-  echo FLOWX_SKIP_FRONTEND_BUILD=1 — skipping frontend rebuild check.
+if "%CIM_SKIP_FRONTEND_BUILD%"=="1" (
+  echo CIM_SKIP_FRONTEND_BUILD=1 — skipping frontend rebuild check.
   exit /b 0
 )
 
-if "%FLOWX_FORCE_FRONTEND_BUILD%"=="1" (
-  echo FLOWX_FORCE_FRONTEND_BUILD=1 — rebuilding frontend...
+if "%CIM_FORCE_FRONTEND_BUILD%"=="1" (
+  echo CIM_FORCE_FRONTEND_BUILD=1 — rebuilding frontend...
   goto :EnsureFrontendBuild_RunNpm
 )
 

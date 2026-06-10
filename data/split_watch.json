@@ -1,15 +1,15 @@
 {
-  "last_skip_at": "2026-06-05T17:31:53.289974+05:30",
+  "last_skip_at": "2026-06-09T15:34:17.957304+05:30",
   "last_skip_reason": "admin_job_running",
-  "trigger": "scheduled",
+  "trigger": "startup",
   "days_back": 20,
   "symbols_scanned": 2251,
   "pending_new": 0,
   "backfilled_applied": 0,
   "pending_count": 0,
   "failed_count": 0,
-  "applied_count": 5,
+  "applied_count": 6,
   "detected_symbols": [],
-  "last_scan_at": "2026-06-06T18:04:24.376906+05:30",
+  "last_scan_at": "2026-06-09T13:05:49.927282+05:30",
   "last_apply_at": "2026-06-05T13:49:22.809147"
 }

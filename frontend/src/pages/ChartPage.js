@@ -56,8 +56,8 @@ export default function ChartPage({ symbol: initialSymbol, onOpenChart }) {
       setVisiblePanels(prev => (JSON.stringify(prev) === JSON.stringify(e.detail) ? prev : e.detail));
     }
     function onStorage(e) {
-      if (e.key === 'flowx.chart.ema') setEmas(getPersistedEmaSet());
-      if (e.key === 'flowx.chart.volumeVisible') setVolumeVisible(getPersistedVolumeVisible(true));
+      if (e.key === 'cim.chart.ema') setEmas(getPersistedEmaSet());
+      if (e.key === 'cim.chart.volumeVisible') setVolumeVisible(getPersistedVolumeVisible(true));
       if (e.key === PANELS_PREFS_KEY) setVisiblePanels(getPersistedVisiblePanels());
     }
     window.addEventListener(EMA_PREFS_UPDATED_EVENT, onEmaPrefs);
@@ -102,8 +102,8 @@ export default function ChartPage({ symbol: initialSymbol, onOpenChart }) {
       body:    JSON.stringify(currentHeightsRef.current),
     })
       .then(r => r.json())
-      .then(() => window.dispatchEvent(new CustomEvent('flowx-toast', { detail: 'Layout saved successfully.' })))
-      .catch(() => window.dispatchEvent(new CustomEvent('flowx-toast', { detail: 'Failed to save layout.' })));
+      .then(() => window.dispatchEvent(new CustomEvent('cim-toast', { detail: 'Layout saved successfully.' })))
+      .catch(() => window.dispatchEvent(new CustomEvent('cim-toast', { detail: 'Failed to save layout.' })));
   }
 
   return (

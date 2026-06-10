@@ -174,7 +174,7 @@ export default function ExternalFinancialsLinks({
   return (
     <span
       className="chart-toolbar-external-links"
-      data-flowx="external-financials"
+      data-cim="external-financials"
       style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}
     >
       {hasChart && (

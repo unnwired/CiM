@@ -19,6 +19,8 @@ import pandas as pd
 
 IST = ZoneInfo("Asia/Kolkata")
 SESSION_FINAL_IST = dtime(16, 0)
+# screener.price often equals yesterday's close on cold start — treat as stale (use 2-bar hist).
+SCREENER_PRICE_STALE_REL_EPS = 0.0001
 _CALENDAR_PATH = Path(__file__).resolve().parent.parent / "data" / "nse_calendar.json"
 _calendar_cache: Optional[dict[str, set[str]]] = None
 
@@ -203,10 +205,38 @@ def _parse_as_of_date(v: Any) -> Optional[date]:
         return None
 
 
+def screener_price_moved_materially(price: float, reference_close: float) -> bool:
+    """True when screener price differs materially from the prior session close."""
+    px = _finite_or_none(price)
+    ref = _finite_or_none(reference_close)
+    if px is None or ref is None or ref <= 0:
+        return False
+    return abs(px - ref) > ref * SCREENER_PRICE_STALE_REL_EPS
+
+
+def should_apply_live_day_change(
+    existing_chg: Optional[float],
+    live_chg: Optional[float],
+) -> bool:
+    """Avoid clobbering a real historical % with a stale live or screener 0 on startup."""
+    if live_chg is None:
+        return False
+    if existing_chg is None:
+        return True
+    try:
+        ex = float(existing_chg)
+        lv = float(live_chg)
+    except (TypeError, ValueError):
+        return True
+    if abs(lv) < 0.005 and abs(ex) > 0.05:
+        return False
+    return True
+
+
 def apply_session_day_adjustment(df: pd.DataFrame) -> pd.DataFrame:
     """
-    When historical_data's latest bar is before today, use screener price / NSE % vs
-    the last stored close (prior session) so movers match the current session.
+    When historical_data's latest bar is before today, use screener price vs the last
+    stored close only when it differs materially; otherwise keep the two-bar historical %.
     """
     if df.empty or not _session_day_intraday_active():
         return df
@@ -220,18 +250,27 @@ def apply_session_day_adjustment(df: pd.DataFrame) -> pd.DataFrame:
         ref = _finite_or_none(row.get("eod_close"))
         if ref is None or ref <= 0:
             continue
+        hist_chg = _finite_or_none(row.get("change_pct"))
         px = _finite_or_none(row.get("screener_price"))
         chg = _finite_or_none(row.get("screener_change_pct"))
-        if px is not None and px > 0:
+        if px is not None and px > 0 and screener_price_moved_materially(px, ref):
             out.at[idx, "price"] = round(px, 2)
             out.at[idx, "change_pct"] = round((px - ref) / ref * 100.0, 2)
             out.at[idx, "as_of_date"] = today_s
-        elif chg is not None:
+        elif chg is not None and should_apply_live_day_change(hist_chg, chg):
             out.at[idx, "change_pct"] = round(chg, 2)
             if px is not None and px > 0:
                 out.at[idx, "price"] = round(px, 2)
             out.at[idx, "as_of_date"] = today_s
     return out
+
+
+def filter_day_change_by_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
+    """Gainers: strictly positive %; losers: strictly negative % (exclude flat zeros)."""
+    side_n = (side or "gainers").strip().lower()
+    if side_n == "losers":
+        return df[df["change_pct"] < 0]
+    return df[df["change_pct"] > 0]
 
 
 def _apply_mcap_filter(df: pd.DataFrame, min_mcap: Optional[float], max_mcap: Optional[float]) -> pd.DataFrame:
@@ -286,6 +325,7 @@ def query_day_change(
     df = _apply_mcap_filter(df, min_mcap, max_mcap)
     df = _apply_sector_filter(df, allowed_symbols)
     df = df[df["change_pct"].notna()]
+    df = filter_day_change_by_side(df, side)
     ascending = side == "losers"
     df = df.sort_values("change_pct", ascending=ascending, na_position="last")
     top = df.head(limit)

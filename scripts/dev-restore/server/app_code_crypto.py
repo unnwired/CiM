@@ -1,8 +1,8 @@
 """
-FlowX app-code encryption helpers (server bytecode + frontend static JS).
+Charts In Motion app-code encryption helpers (server bytecode + frontend static JS).
 
 Distribution builds encrypt payloads at publish time; runtime decrypts to
-%LOCALAPPDATA%\\FlowX\\app-cache\\{version}\\ after install-key validation.
+%LOCALAPPDATA%\\CiM\\app-cache\\{version}\\ after install-key validation.
 """
 from __future__ import annotations
 
@@ -22,15 +22,15 @@ MAGIC = b"FXAC1\x00"
 NONCE_LEN = 12
 TAG_LEN = 16
 APP_CODE_SALT = b"flowx-app-code-v1"
-LICENSE_FILE = "data/.flowx-license"
+LICENSE_FILE = "data/.cim-license"
 DIST_PROFILE_FILE = "config/.fx-dist.cfg"
 LEGACY_DIST_PROFILE_FILE = "config/.flowx_vendor_secret"
 VERSION_FILE = "version.txt"
-PLAINTEXT_BOOTSTRAP_STEMS = frozenset({"__init__", "app_code_crypto", "flowx_bootstrap"})
+PLAINTEXT_BOOTSTRAP_STEMS = frozenset({"__init__", "app_code_crypto", "cim_bootstrap"})
 
 
 def is_dev_mode() -> bool:
-    return os.getenv("FLOWX_DEV", "").strip().lower() in ("1", "true", "yes")
+    return os.getenv("CIM_DEV", "").strip().lower() in ("1", "true", "yes")
 
 
 def is_development_tree(base_dir: Path) -> bool:
@@ -41,7 +41,7 @@ def is_development_tree(base_dir: Path) -> bool:
 
 
 def _read_vendor_secret_text(secret_path: Path) -> str:
-    """Read vendor secret without BOM/whitespace drift (must match Inno + Show-FlowXInstallKey)."""
+    """Read vendor secret without BOM/whitespace drift (must match Inno + Show-CiMInstallKey)."""
     raw = secret_path.read_text(encoding="utf-8-sig", errors="ignore").strip()
     return raw.lstrip("\ufeff").strip()
 
@@ -58,12 +58,12 @@ def distribution_profile_path(base_dir: Path) -> Path:
 
 
 def distribution_secret(base_dir: Optional[Path] = None) -> bytes:
-    # Installed tree: config file wins over FLOWX_LICENSE_SECRET env (dev shells often set env).
+    # Installed tree: config file wins over CIM_LICENSE_SECRET env (dev shells often set env).
     if base_dir is not None:
         secret_path = distribution_profile_path(base_dir)
         if secret_path.is_file():
             return _read_vendor_secret_text(secret_path).encode("utf-8")
-    raw = os.getenv("FLOWX_LICENSE_SECRET", "").strip()
+    raw = os.getenv("CIM_LICENSE_SECRET", "").strip()
     if not raw:
         raw = "flowx-distribution-change-me"
     return raw.encode("utf-8")
@@ -187,7 +187,7 @@ def app_cache_root(base_dir: Path) -> Path:
     local = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
     version = read_installed_version(base_dir)
     safe_ver = "".join(c if c.isalnum() or c in ".-_" else "_" for c in version)
-    return Path(local) / "FlowX" / "app-cache" / safe_ver
+    return Path(local) / "CiM" / "app-cache" / safe_ver
 
 
 def clear_app_cache(base_dir: Path) -> None:
@@ -293,7 +293,7 @@ def ensure_app_cache(base_dir: Path) -> Path:
         return base_dir
     if not license_valid(base_dir):
         raise RuntimeError(
-            "FlowX license missing or invalid. Re-run the installer or contact support."
+            "Charts In Motion license missing or invalid. Re-run the installer or contact support."
         )
     cache_dir = app_cache_root(base_dir)
     marker = cache_dir / ".ready"
@@ -313,9 +313,9 @@ def ensure_app_cache(base_dir: Path) -> Path:
         shutil.rmtree(cache_dir, ignore_errors=True)
         if exc.__class__.__name__ == "InvalidTag":
             raise RuntimeError(
-                "FlowX could not decrypt app files (secret mismatch). "
-                "Re-run Install-Client-Update.bat from a fresh FlowX-Update ZIP built after "
-                "encrypt_app_code.ps1, or reinstall FlowXSetup. Do not mix encrypted files from "
+                "Charts In Motion could not decrypt app files (secret mismatch). "
+                "Re-run Install-Client-Update.bat from a fresh CiM-Update ZIP built after "
+                "encrypt_app_code.ps1, or reinstall CiMSetup. Do not mix encrypted files from "
                 "different builds."
             ) from exc
         raise

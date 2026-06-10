@@ -60,7 +60,7 @@ function ToolIconButton({ tool, activeTool, onPickTool }) {
         if (!mapped) return;
         const nextTool = isActive ? null : mapped;
         if (typeof onPickTool === 'function') onPickTool(nextTool);
-        window.dispatchEvent(new CustomEvent('flowx-drawing-set-tool', { detail: { tool: nextTool } }));
+        window.dispatchEvent(new CustomEvent('cim-drawing-set-tool', { detail: { tool: nextTool } }));
       }}
       style={{
         width: 30,
@@ -91,8 +91,8 @@ export default function DrawingToolsDesignControl({ panelOffsetX = 0, panelOffse
       const tool = e?.detail?.tool;
       setLocalActiveTool(typeof tool === 'string' ? tool : null);
     };
-    window.addEventListener('flowx-drawing-set-tool', handler);
-    return () => window.removeEventListener('flowx-drawing-set-tool', handler);
+    window.addEventListener('cim-drawing-set-tool', handler);
+    return () => window.removeEventListener('cim-drawing-set-tool', handler);
   }, []);
   const activeTool = dw?.activeTool || localActiveTool || null;
   const [enabled, setEnabled] = useState(false);

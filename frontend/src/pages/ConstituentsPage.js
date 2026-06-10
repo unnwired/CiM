@@ -211,8 +211,8 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
       setVisiblePanels(prev => (JSON.stringify(prev) === JSON.stringify(e.detail) ? prev : e.detail));
     }
     function onStorage(e) {
-      if (e.key === 'flowx.chart.ema') setEmas(getPersistedEmaSet());
-      if (e.key === 'flowx.chart.volumeVisible') setVolumeVisible(getPersistedVolumeVisible(true));
+      if (e.key === 'cim.chart.ema') setEmas(getPersistedEmaSet());
+      if (e.key === 'cim.chart.volumeVisible') setVolumeVisible(getPersistedVolumeVisible(true));
       if (e.key === PANELS_PREFS_KEY) setVisiblePanels(getPersistedVisiblePanels());
     }
     window.addEventListener(EMA_PREFS_UPDATED_EVENT, onEmaPrefs);

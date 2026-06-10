@@ -1,7 +1,7 @@
 {
   "owner": "unnwired",
-  "repo": "flowx-updates",
-  "assetPrefix": "FlowX-Update-",
+  "repo": "CiM-Updates",
+  "assetPrefix": "CiM-Update-",
   "assetSuffix": ".zip",
   "checkIntervalMinutes": 90,
   "backgroundCheckEnabled": true

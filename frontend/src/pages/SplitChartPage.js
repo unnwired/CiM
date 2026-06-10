@@ -208,8 +208,8 @@ export default function SplitChartPage({ symbol: initialSymbol, onOpenChart, onO
       },
     };
     axios.post(`${API}/api/layout`, payload)
-      .then(() => window.dispatchEvent(new CustomEvent('flowx-toast', { detail: 'Layout saved.' })))
-      .catch(() => window.dispatchEvent(new CustomEvent('flowx-toast', { detail: 'Failed to save layout.' })));
+      .then(() => window.dispatchEvent(new CustomEvent('cim-toast', { detail: 'Layout saved.' })))
+      .catch(() => window.dispatchEvent(new CustomEvent('cim-toast', { detail: 'Failed to save layout.' })));
   }
 
   const active = panels[activeIdx] || panels[0];
@@ -245,11 +245,11 @@ export default function SplitChartPage({ symbol: initialSymbol, onOpenChart, onO
       });
     }
     function onStorage(e) {
-      if (e.key === 'flowx.chart.ema') {
+      if (e.key === 'cim.chart.ema') {
         const next = getPersistedEmaSet();
         setPanels(prev => prev.map(p => ({ ...p, emas: next })));
       }
-      if (e.key === 'flowx.chart.volumeVisible') {
+      if (e.key === 'cim.chart.volumeVisible') {
         const next = getPersistedVolumeVisible(true);
         setPanels(prev => prev.map(p => ({ ...p, volumeVisible: next })));
       }

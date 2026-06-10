@@ -1,5 +1,5 @@
 """
-FlowX GitHub Releases update provider (unnwired/flowx-updates).
+Charts In Motion GitHub Releases update provider (unnwired/CiM-Updates).
 """
 from __future__ import annotations
 
@@ -14,12 +14,12 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-USER_AGENT = "FlowX-Update/1.0"
+USER_AGENT = "CiM-Update/1.0"
 GITHUB_API_ACCEPT = "application/vnd.github+json"
 
 DEFAULT_OWNER = "unnwired"
-DEFAULT_REPO = "flowx-updates"
-DEFAULT_ASSET_PREFIX = "FlowX-Update-"
+DEFAULT_REPO = "CiM-Updates"
+DEFAULT_ASSET_PREFIX = "CiM-Update-"
 DEFAULT_ASSET_SUFFIX = ".zip"
 
 _install_root: Optional[Path] = None
@@ -45,7 +45,7 @@ def _config_file() -> Path:
 
 
 def _staging_root() -> Path:
-    return Path(os.getenv("LOCALAPPDATA", "")) / "FlowX" / "update-staging"
+    return Path(os.getenv("LOCALAPPDATA", "")) / "CiM" / "update-staging"
 
 
 def _update_dir() -> Path:
@@ -82,8 +82,8 @@ def load_github_config() -> Dict[str, Any]:
                 cfg.update(raw)
         except Exception:
             pass
-    owner = os.getenv("FLOWX_GITHUB_OWNER", "").strip()
-    repo = os.getenv("FLOWX_GITHUB_REPO", "").strip()
+    owner = os.getenv("CIM_GITHUB_OWNER", "").strip()
+    repo = os.getenv("CIM_GITHUB_REPO", "").strip()
     if owner:
         cfg["owner"] = owner
     if repo:
@@ -110,7 +110,7 @@ def version_from_release(tag_name: str, asset_name: str = "") -> str:
     for src in (asset_name, tag_name):
         if not src:
             continue
-        m = re.search(r"FlowX-Update-(\d+(?:\.\d+)*)", src, re.I)
+        m = re.search(r"CiM-Update-(\d+(?:\.\d+)*)", src, re.I)
         if m:
             return m.group(1)
         m = re.search(r"v?(\d+(?:\.\d+)*)", src, re.I)
@@ -216,11 +216,11 @@ def _download_bytes(url: str, timeout: int = 600) -> bytes:
 
 
 def _normalize_extracted_root(extract_dir: Path, target_dir: Path) -> None:
-    """If ZIP has a single top-level FlowX-Update-* folder, hoist contents to target_dir."""
+    """If ZIP has a single top-level CiM-Update-* folder, hoist contents to target_dir."""
     if not extract_dir.is_dir():
         raise ValueError(f"Extract dir missing: {extract_dir}")
     entries = [p for p in extract_dir.iterdir() if p.name not in (".", "..")]
-    if len(entries) == 1 and entries[0].is_dir() and entries[0].name.startswith("FlowX-Update"):
+    if len(entries) == 1 and entries[0].is_dir() and entries[0].name.startswith("CiM-Update"):
         inner = entries[0]
         target_dir.mkdir(parents=True, exist_ok=True)
         for child in inner.iterdir():
@@ -246,14 +246,14 @@ def _normalize_extracted_root(extract_dir: Path, target_dir: Path) -> None:
 
 
 def download_and_extract_zip(asset_url: str, version: str) -> Path:
-    """Download release ZIP to staging and extract into UPDATE/FlowX-Update-{version}/."""
+    """Download release ZIP to staging and extract into UPDATE/CiM-Update-{version}/."""
     ver = str(version).strip()
     if not ver:
         raise ValueError("version required")
     staging = _staging_root() / ver
     zip_path = staging / "package.zip"
     extract_tmp = staging / "_extract"
-    target_dir = _update_dir() / f"FlowX-Update-{ver}"
+    target_dir = _update_dir() / f"CiM-Update-{ver}"
 
     if staging.exists():
         shutil.rmtree(staging, ignore_errors=True)

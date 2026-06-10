@@ -16,9 +16,9 @@ import { isDistributionProfile } from '../config/exportProfile';
 const API = '';
 const MIN_YEAR = 2024;
 const FILTERS_STORAGE_KEY = isDistributionProfile
-  ? 'flowx.earningsBeats.filters.distribution'
-  : 'flowx.earningsBeats.filters';
-const DIST_FILTERS_DEFAULTS_VERSION_KEY = 'flowx.earningsBeats.filters.distribution.version';
+  ? 'cim.earningsBeats.filters.distribution'
+  : 'cim.earningsBeats.filters';
+const DIST_FILTERS_DEFAULTS_VERSION_KEY = 'cim.earningsBeats.filters.distribution.version';
 const DIST_FILTERS_DEFAULTS_VERSION = 'v1-clean';
 const FILTER_INPUT_CLASS = 'earnings-filter-input';
 const BEAT_HINT = '* Empty = no bound. Min 0 = met or beat estimates (0% included). Values match the table (computed when needed).';

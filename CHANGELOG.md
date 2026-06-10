@@ -1,31 +1,55 @@
-# FlowX Changelog
+# Charts In Motion Changelog
 
-**Updated:** 05 Jun 26
+**Updated:** 07 Jun 26
+
+## 07 Jun 26 (1.0.6 patch — build script + post-update license repair)
+- **Build fix:** Removed Unicode em-dash in `build_distribution_full.ps1` Log line that broke PowerShell 5.1 parsing (`Unexpected token ')'`).
+- **Post-update license:** Updates refresh `config\.fx-dist.cfg` to match encrypted code; old install keys fail until repaired. `CiMApplyUpdate.ps1` and `Install-Client-Update.ps1` now auto-run `Repair-CiMLicense.ps1 -AutoFix` after apply. `data\.cim-license` is protected and never shipped in update packages (`build_update_package.ps1`, `update_apply.PROTECTED_REL`).
+- **Client stuck now:** Run `Repair-CiMLicense-Auto.bat` in the install folder (e.g. `C:\FlowX`).
+- **Vendor rule:** Keep one stable secret in `config\.build_license_secret`; rotating it requires all clients to repair.
+
+## 07 Jun 26 (1.0.6 — blank Electron shell fix + release gate)
+- **Blank Electron shell (critical):** Distribution builds shipped plaintext `server.py` alongside `server.pyc.enc`. That made `is_development_tree()` true on client PCs, skipped JS decryption, and `/static/js/main.*.js` returned `index.html` instead of JavaScript (`Uncaught SyntaxError: Unexpected token '<'`).
+- **Fix — encrypt step:** `encrypt_app_code.ps1` now removes plaintext server `*.py` after encryption (keeps only `app_code_crypto.py`, `cim_bootstrap.py`, `__init__.py`).
+- **Fix — runtime:** `is_development_tree()` treats installs with `config/.fx-dist.cfg` + encrypted code as distribution (not dev). `cim_bootstrap._patch_static_mount_for_cache()` calls `ensure_app_cache()` when only `*.js.enc` exists.
+- **Release gate (mandatory before publish):** New `scripts/Test-CiMPackagedSmoke.ps1` — starts `cim_bootstrap`, verifies main JS bundle is JavaScript (not HTML), and `/api/stocks` returns 2251+ symbols. Wired into `build_distribution_full.ps1` step 6/6 and `Run-CiMFullGate.ps1`.
+- **Shipped in 1.0.6:** `nse_index_history.py` in export/update payload (Nifty India Defence gap repair from prior fix).
+- **Tests:** `server/tests/test_distribution_bootstrap.py` — distribution vs dev tree detection.
+- **Docs:** `USER_REQUIREMENTS.md` — product-owner release workflow (smoke gate mandatory before publish).
+
+## 05 Jun 26 (Nifty India Defence chart history, Git repo hygiene)
+- **Nifty India Defence chart gaps fixed:** NSE `indicesHistory` returns only ~60–70 trading days per request regardless of requested span. Old code used 360-day windows and forward-only incremental updates, leaving a **250-day hole** (Feb–Oct 2025) in `^CNXINDDEF` charts (vertical spike on the chart).
+- **New module `nse_index_history.py`:** NSE session bootstrap, row normalization, **85-day sliding windows** (`NSE_CHUNK_CALENDAR_DAYS`), `find_index_history_gaps()`, and gap-aware `scrape_history_from_nse()` with optional `force_full` retry.
+- **`scrape_indices.py` NSE-only path:** `NSE_ONLY_INDEX_SYMBOLS = {"^CNXINDDEF"}` skips Yahoo (no series exists); `NSE_INDEX_HISTORY_START = {"^CNXINDDEF": "2024-11-11"}` (NSE index launch date); `_nse_history_symbols_to_refresh()` detects interior gaps; `sync_nse_index_history()` repairs on backend startup and after index Update.
+- **11 Nov 2024 start is correct:** NIFTY INDIA DEFENCE launched on NSE that day — not pre-existing history “vanishing.”
+- **Verified repair:** Dev DB went from 220 rows with 1 gap → **387 continuous rows** (2024-11-11 → 2026-06-05), 0 gaps after `sync_nse_index_history()`.
+- **Tests:** `server/tests/test_nse_index_history.py` — parse, 85-day chunking, gap detection, stale Defence refresh target. Run: `python -m unittest server.tests.test_nse_index_history -v`.
+- **Git repo hygiene:** Push failures from `data/nse_data.db` (~1.35 GB) and `electron.exe` in history; fixed `.gitignore` (DB, `runtime/`, `node_modules/`, `installer/output/`, corrected `!OLD/` negation); clean orphan-branch history force-pushed to [unnwired/FlowX_GitHubRepo](https://github.com/unnwired/FlowX_GitHubRepo.git). Source repo is separate from update releases repo `unnwired/cim-updates`.
 
 ## 05 Jun 26 (GitHub Release updates, UPDATE folder fixes)
-- **GitHub Release updates:** FlowX now uses [unnwired/flowx-updates](https://github.com/unnwired/flowx-updates) as the sole remote update source. Latest release asset `FlowX-Update-{version}.zip` is downloaded to `%LOCALAPPDATA%\FlowX\update-staging\`, extracted to `{install}\UPDATE\FlowX-Update-{version}\`, then applied via existing `FlowXApplyUpdate.ps1`. Legacy `config\update_manifest_url.json` HTTPS manifest remote is deprecated.
-- **Update check priority:** Local `{install}\UPDATE\FlowX-Update-*` first; GitHub `releases/latest` second. Same version → local wins.
+- **GitHub Release updates:** Charts In Motion now uses [unnwired/cim-updates](https://github.com/unnwired/cim-updates) as the sole remote update source. Latest release asset `CiM-Update-{version}.zip` is downloaded to `%LOCALAPPDATA%\CiM\update-staging\`, extracted to `{install}\UPDATE\CiM-Update-{version}\`, then applied via existing `CiMApplyUpdate.ps1`. Legacy `config\update_manifest_url.json` HTTPS manifest remote is deprecated.
+- **Update check priority:** Local `{install}\UPDATE\CiM-Update-*` first; GitHub `releases/latest` second. Same version → local wins.
 - **New backend module:** `server\github_updates.py` (Releases API, asset pick, version normalize, ZIP download/extract, logging to `runtime\logs\update-download.log`). Wired through `server\update_apply.py` with `GET /api/update/settings`, `GET /api/update/check` (optional `?background=true`), `POST /api/update/download`, `POST /api/update/apply`.
-- **Config:** `config\github_updates.json` — owner, repo, asset prefix/suffix, `checkIntervalMinutes` (default 90), `backgroundCheckEnabled`. Copied by `export_flowx.ps1`, `Sync-ExportDistributionFixes.ps1`, and update payload. Optional env: `FLOWX_GITHUB_OWNER`, `FLOWX_GITHUB_REPO`.
-- **Frontend (App.js):** Shared `runFlowXUpdateApply()` for cogwheel **Apply update** and background prompt. GitHub flow: confirm → download → apply → quit. Background poll: ~30s after load, then every 90 minutes; dismiss per version via `sessionStorage` (`flowx.dismissedUpdateVersion`).
-- **Build output:** `build_update_package.ps1` now creates `installer\output\FlowX-Update-{version}.zip` for GitHub upload alongside the folder package. Ships `github_updates.py` / encrypted `.pyc.enc` and config in update payload.
-- **UPDATE folder detection:** Fixed install-path resolution when clients place packages under `{install}\UPDATE\FlowX-Update-{version}\` — `FlowXInstallLocator.ps1`, `Install-Client-Update.ps1`, `FlowXUpdatePackage.ps1`, `Apply-LocalUpdate-Entry.ps1`, and `update_apply._local_update_package_roots()`. No manual install path typing for standard layout.
+- **Config:** `config\github_updates.json` — owner, repo, asset prefix/suffix, `checkIntervalMinutes` (default 90), `backgroundCheckEnabled`. Copied by `export_cim.ps1`, `Sync-ExportDistributionFixes.ps1`, and update payload. Optional env: `CIM_GITHUB_OWNER`, `CIM_GITHUB_REPO`.
+- **Frontend (App.js):** Shared `runCiMUpdateApply()` for cogwheel **Apply update** and background prompt. GitHub flow: confirm → download → apply → quit. Background poll: ~30s after load, then every 90 minutes; dismiss per version via `sessionStorage` (`flowx.dismissedUpdateVersion`).
+- **Build output:** `build_update_package.ps1` now creates `installer\output\CiM-Update-{version}.zip` for GitHub upload alongside the folder package. Ships `github_updates.py` / encrypted `.pyc.enc` and config in update payload.
+- **UPDATE folder detection:** Fixed install-path resolution when clients place packages under `{install}\UPDATE\CiM-Update-{version}\` — `CiMInstallLocator.ps1`, `Install-Client-Update.ps1`, `CiMUpdatePackage.ps1`, `Apply-LocalUpdate-Entry.ps1`, and `update_apply._local_update_package_roots()`. No manual install path typing for standard layout.
 - **Docs:** `docs\UPDATE.md`, `docs\CLIENT_UPDATE.md` updated for GitHub + 90-minute prompt + `UPDATE\` workflow.
 - **Tests:** `scripts\test_github_updates.py` — version parse, asset pick, ZIP extract layout (run: `python scripts\test_github_updates.py`).
-- **Build verification:** Full `Build-FlowX.ps1` pipeline completed successfully (export smoke test, 30-file encryption, license chain, Inno Setup, update package + ZIP). Log: `runtime\logs\build-distribution.log`.
+- **Build verification:** Full `Build-CiM.ps1` pipeline completed successfully (export smoke test, 30-file encryption, license chain, Inno Setup, update package + ZIP). Log: `runtime\logs\build-distribution.log`.
 - **Rollout:** Bump `installer\output\version.txt` before shipping to clients on 1.0.3+; publish ZIP to GitHub with tag `v{version}`. Clients need one manual/bat update to receive GitHub code before cogwheel/background remote pull works.
 
-## 05 Jun 26 (FlowX installer, licensing, encrypted runtime, updates)
-- **Windows installer + offline activation:** Added Inno Setup installer (`installer\FlowX.iss`) with machine-code + install-key wizard, silent `/INSTALLKEY=` support, installer output at `installer\output\FlowXSetup-1.0.3.exe`, and no app version bump for the latest fixes (`version.txt` remains `1.0.3`).
-- **Machine-code licensing chain:** Runtime licensing lives in `server\app_code_crypto.py`; support scripts generate/verify keys via `Generate-FlowXInstallKey.ps1`, `Show-FlowXInstallKey.ps1`, `Repair-FlowXLicense.ps1`, and `Verify-FlowXLicenseChain.ps1`. The chain now prefers the shipped config file over stale `FLOWX_LICENSE_SECRET` env values so installer, Repair, and runtime agree.
+## 05 Jun 26 (Charts In Motion installer, licensing, encrypted runtime, updates)
+- **Windows installer + offline activation:** Added Inno Setup installer (`installer\CiM.iss`) with machine-code + install-key wizard, silent `/INSTALLKEY=` support, installer output at `installer\output\CiMSetup-1.0.3.exe`, and no app version bump for the latest fixes (`version.txt` remains `1.0.3`).
+- **Machine-code licensing chain:** Runtime licensing lives in `server\app_code_crypto.py`; support scripts generate/verify keys via `Generate-CiMInstallKey.ps1`, `Show-CiMInstallKey.ps1`, `Repair-CiMLicense.ps1`, and `Verify-CiMLicenseChain.ps1`. The chain now prefers the shipped config file over stale `CIM_LICENSE_SECRET` env values so installer, Repair, and runtime agree.
 - **Discreet distribution profile name:** Replaced client-visible `config\.flowx_vendor_secret` with neutral `config\.fx-dist.cfg`; legacy installs still fall back to the old filename if the new file is missing. Build/export/update scripts now use the new name.
-- **Installer/export layout cleanup:** Distribution export moved from sibling `!Export\FlowX` to `installer\output\FlowX`; generated build artifacts (`FlowXSetup-*.exe`, update folders, `generated_license_secret.pas`, `license_validate.pas`, `version.txt`, docs) are organized under `installer\output\`.
-- **Encrypted app-code runtime:** Distribution builds encrypt server bytecode (`server\*.pyc.enc`) and frontend JS (`frontend\build\static\js\*.js.enc`). `server\flowx_bootstrap.py` decrypts into `%LOCALAPPDATA%\FlowX\app-cache\{version}` after license validation, while data/scripts/frontend assets remain rooted at the install folder.
+- **Installer/export layout cleanup:** Distribution export moved from sibling `!Export\FlowX` to `installer\output\CiM`; generated build artifacts (`CiMSetup-*.exe`, update folders, `generated_license_secret.pas`, `license_validate.pas`, `version.txt`, docs) are organized under `installer\output\`.
+- **Encrypted app-code runtime:** Distribution builds encrypt server bytecode (`server\*.pyc.enc`) and frontend JS (`frontend\build\static\js\*.js.enc`). `server\cim_bootstrap.py` decrypts into `%LOCALAPPDATA%\CiM\app-cache\{version}` after license validation, while data/scripts/frontend assets remain rooted at the install folder.
 - **Blank Electron shell fixed:** `/static/js/main.*.js` was being handled by the SPA fallback and returning `index.html`, causing Electron to throw `Uncaught SyntaxError: Unexpected token '<'` and leave an empty shell. Static route ordering now mounts decrypted `/static` before the catch-all route; cache sync also copies CSS into app-cache.
-- **Visible backend console restored:** Normal `start_flowx.bat` opens a `FlowX Backend` command window with live uvicorn/job output. Automation can still set `FLOWX_NO_PAUSE=1` for hidden/non-interactive runs.
-- **Encrypted runtime install-root path fixes:** Fixed app-cache path leaks where encrypted `server.pyc.__file__` caused jobs to look under `%LOCALAPPDATA%\FlowX\app-cache\1.0.3` instead of the install root. `Update stock split adjustments` now loads `scrape_daily.py` via `SCRAPE_DAILY_PATH` (`C:\FlowX\scrape_daily.py` on client installs), not app-cache. Update scripts/log paths and movers calendar paths are also repointed to the install root.
-- **Update package flow:** `build_update_package.ps1` now writes `installer\output\FlowX-Update-1.0.3`; client update package includes `Install-Client-Update.bat`, manifest, payload, and updated repair/diagnostic scripts.
-- **Full build gate and diagnostics:** Added/updated `Run-FlowXFullGate.ps1`, `Test-FlowXInstallE2E.ps1`, `Sync-ExportDistributionFixes.ps1`, and `build_distribution_full.ps1` to verify export, encryption, installer build, license chain, silent install, backend health, frontend root, Electron presence, and update package creation.
+- **Visible backend console restored:** Normal `start_cim.bat` opens a `CiM Backend` command window with live uvicorn/job output. Automation can still set `CIM_NO_PAUSE=1` for hidden/non-interactive runs.
+- **Encrypted runtime install-root path fixes:** Fixed app-cache path leaks where encrypted `server.pyc.__file__` caused jobs to look under `%LOCALAPPDATA%\CiM\app-cache\1.0.3` instead of the install root. `Update stock split adjustments` now loads `scrape_daily.py` via `SCRAPE_DAILY_PATH` (`C:\FlowX\scrape_daily.py` on client installs), not app-cache. Update scripts/log paths and movers calendar paths are also repointed to the install root.
+- **Update package flow:** `build_update_package.ps1` now writes `installer\output\CiM-Update-1.0.3`; client update package includes `Install-Client-Update.bat`, manifest, payload, and updated repair/diagnostic scripts.
+- **Full build gate and diagnostics:** Added/updated `Run-CiMFullGate.ps1`, `Test-CiMInstallE2E.ps1`, `Sync-ExportDistributionFixes.ps1`, and `build_distribution_full.ps1` to verify export, encryption, installer build, license chain, silent install, backend health, frontend root, Electron presence, and update package creation.
 - **Client network diagnostic clarified:** Yahoo/yfinance failures such as `curl: (7) Failed to connect to fc.yahoo.com port 443` are client network/proxy/firewall issues, not delisted NSE tickers. The backend already backs off after consecutive OHLCV failures.
 
 ## 03 Jun 26 (Market Map)
@@ -39,7 +63,7 @@
 - **Market Map Nifty India Defence:** Added **^CNXINDDEF** to catalog, `scrape_indices.py`, and `nse_constituents.py` (NSE `NIFTY INDIA DEFENCE`, archive `ind_niftyindiadefence_list.csv`; live index level from NSE `allIndices` when Yahoo has no series).
 - **Indices page — Nifty India Defence:** Same **^CNXINDDEF** symbol in `scrape_indices.py`; missing equity rows are inserted on backend startup via `ensure_equity_index_rows()` (NSE live level + session %).
 - **Market Map default layout:** **Grid** is the default view and appears **left** of **Heatmap** in the toolbar.
-- **Export (`distribution -HardenAll`):** Reuses existing `runtime\python` when valid (no re-download each export). Use `-RefreshEmbeddedPython` only when you need a clean embed rebuild; build goes to `python.export-build` so a running FlowX does not lock `runtime\python`.
+- **Export (`distribution -HardenAll`):** Reuses existing `runtime\python` when valid (no re-download each export). Use `-RefreshEmbeddedPython` only when you need a clean embed rebuild; build goes to `python.export-build` so a running Charts In Motion does not lock `runtime\python`.
 - **v1 scope:** Period tabs beyond **1D** and **Sectors** view are visible but disabled; sort/layout/magnitude filters on the detail pane.
 
 ## 03 Jun 26
@@ -51,18 +75,18 @@
 - **Regression tests:** `server/tests/test_indices_alignment.py` — equity index live % vs history, Update summary strings, dashboard live-% guard (`_should_apply_live_day_change`), safe `_log` on Unicode; re-run with `python -m unittest server.tests.test_indices_alignment server.tests.test_earnings_plus`.
 
 ## 27 May 26
-- **Earnings+ (DB-backed quality badge):** Added Screener-derived **Earnings+** rules (OPM, Net Profit, EPS vs prior quarter and year-ago quarter) with results stored in SQLite table `earnings_plus_cache` (`data/nse_data.db`). Consolidated quarterly data is preferred when it qualifies; otherwise standalone is used.
+- **Earnings+ (DB-backed quality badge):** Added Screener-derived **Earnings+** rules (OPM, Net Profit, EPS vs prior quarter and year-ago quarter) with results stored in SQLite table `earnings_plus_cache` (`data/nse_data.db`). Badge basis is **consolidated** when it can be evaluated (`qualified` or `not_qualified`); **standalone** is used only when consolidated data is unavailable (`insufficient_data`).
 - **Earnings+ chart helper:** Gold **Earnings+** label on charts reads from cache via `/api/earnings-chart-events/{symbol}` (no live Screener scrape on chart open).
 - **Reported earnings Earnings+ filter:** Reported Earnings page supports tri-state filter **All** / **Earnings+ only** / **Exclude Earnings+** using cache only (no per-row Screener during filter). Cache summary (`ready`, `qualified`, `missing`, `stale`) is returned on `/api/earnings-beats`.
 - **Earnings+ cache refresh job:** `POST /api/admin/refresh-earnings-plus-cache` warms cache for the selected reported month; progress via existing admin job panel. Triggers from Reported Earnings (**Refresh Earnings+ cache**, **Retry incomplete**, **Force all**) and settings cog (**Refresh Earnings+ Cache (This Month)**).
 - **Incremental Earnings+ refresh:** Refresh processes only symbols that need work (missing row, `insufficient_data`, or release-period mismatch). Stable `qualified` / `not_qualified` rows for the current release are skipped (no redundant DB upsert or Screener scrape).
 - **Earnings+ filter stability fix:** `qualified` / `not_qualified` cache rows are no longer treated as time-stale when `source_fetched_at` ages past 18 hours, so **Earnings+ only** for a month (e.g. May) no longer drops early reporters after a partial refresh.
 - **Earnings+ performance:** Normal refresh uses cached `screener_quarterly` when present (`refresh_stale` only when `force=true`). Symbol refresh runs in parallel (4 workers). **Force all** re-scrapes stale quarterly data and recomputes every reported symbol (confirm dialog in UI).
-- **Earnings+ basis selection fix:** Evaluation loads both consolidated and standalone, then picks the best result (qualified consolidated → qualified standalone → not_qualified → insufficient), fixing symbols stuck on `insufficient_data` when only standalone had usable data (e.g. ENRIN → `not_qualified`).
+- **Earnings+ basis selection fix:** Evaluation loads both consolidated and standalone; consolidated wins when evaluable (`qualified` or `not_qualified`). Standalone is used only when consolidated is `insufficient_data`, so a symbol like FINCABLES no longer shows **Earnings+** from standalone when consolidated fails the rules.
 - **Work-hours background Earnings+ warm:** `server/earnings_plus_scheduler.py` runs incremental warm while the backend is up, **08:00–20:00 IST** only: startup pass after 2–5 min jitter, then every 45–90 min (random). Skips when another admin job is running or a run completed within the last 30 minutes. Scheduled runs are **quiet** (no Update panel toast).
-- **Earnings+ warm status:** Last run persisted to `data/earnings_plus_warm.json`; `GET /api/admin/earnings-plus-warm-status`. Reported Earnings footer shows **Last background warm** (time, trigger, updated/skipped counts). Requires backend running (FlowX desktop or server); UI need not be open.
+- **Earnings+ warm status:** Last run persisted to `data/earnings_plus_warm.json`; `GET /api/admin/earnings-plus-warm-status`. Reported Earnings footer shows **Last background warm** (time, trigger, updated/skipped counts). Requires backend running (Charts In Motion desktop or server); UI need not be open.
 - **Earnings+ API params:** `force` (full recompute + Screener stale refresh), `only_incomplete` (missing / `insufficient_data` only).
-- **Earnings+ tests:** `server/tests/test_earnings_plus.py` — staleness, filter matching, consolidated/standalone pick order.
+- **Earnings+ tests:** `server/tests/test_earnings_plus.py` — staleness, filter matching, consolidated-first basis pick (standalone fallback only on `insufficient_data`).
 - **Dashboard 1D % cold-start fix:** `_apply_live_screener_ohlc` no longer shows **0.00%** for the universe when `screener.price` equals yesterday’s close on session days; uses two-bar historical % until price differs materially. Live movers overlay avoids replacing a real historical % with stale live **0%**. One-shot NSE movers cache warm on backend startup.
 
 ## 25 May 26
@@ -138,7 +162,7 @@
 - Removed commodities section from Market Pulse and excluded Gold/Silver from Indices page listings.
 - Reworked top toolbar: added centered `FlowX` title, `Update` button with progress fill, status panel, and new settings dropdown actions.
 - Implemented feedback flow via Google Forms (Issue/Feature) with auto-prepended context and prefilled form values.
-- Added export modes in `export_flowx.ps1`:
+- Added export modes in `export_cim.ps1`:
   - `standard` (full state/source export)
   - `distribution` (clean state, source omitted, distribution defaults)
 - Distribution profile now defaults to:
@@ -148,8 +172,8 @@
   - empty watchlists, portfolio, and filter presets
   - Earnings page: current month/year, no MCap bounds, Earnings+ = All, surprise fields empty
   - **Potential Swings** tab omitted from distribution builds
-- Replaced legacy naming with FlowX naming across runtime/export scripts and docs:
-  - `start_flowx.bat`, `stop_flowx.bat`, `export_flowx.ps1`
+- Replaced legacy naming with Charts In Motion naming across runtime/export scripts and docs:
+  - `start_cim.bat`, `stop_cim.bat`, `export_cim.ps1`
 - Improved list loading performance with chunked incremental loading (150 rows/page with near-end prefetch).
 - Rebuilt EMA UX:
   - stable period-based colors (no color remap when toggling)

@@ -128,7 +128,7 @@ export default function DrawingOverlay({
     setPointerPoint(null);
     setSelectedId(tool === 'price_range' ? null : def.id);
     if (tool === 'price_range') {
-      window.dispatchEvent(new CustomEvent('flowx-drawing-set-tool', { detail: { tool: null } }));
+      window.dispatchEvent(new CustomEvent('cim-drawing-set-tool', { detail: { tool: null } }));
     }
     onRequestToolbarUpdate?.();
   };
@@ -315,7 +315,7 @@ export default function DrawingOverlay({
         e.preventDefault();
         setDraftPoints([]);
         setPointerPoint(null);
-        window.dispatchEvent(new CustomEvent('flowx-drawing-set-tool', { detail: { tool: null } }));
+        window.dispatchEvent(new CustomEvent('cim-drawing-set-tool', { detail: { tool: null } }));
       } : undefined}
     >
       {allSegs.map((s, i) => {

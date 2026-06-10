@@ -1,15 +1,15 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Encrypt FlowX app code in an export tree (server *.pyc + frontend static JS).
+  Encrypt Charts In Motion app code in an export tree (server *.pyc + frontend static JS).
 
 .DESCRIPTION
-  Run AFTER export_flowx.ps1 succeeds. Does not modify export_flowx.ps1.
-  Set FLOWX_LICENSE_SECRET (or -LicenseSecret) before publishing; same secret
-  is used by Generate-FlowXInstallKey.ps1 and runtime decryption.
+  Run AFTER export_cim.ps1 succeeds. Does not modify export_cim.ps1.
+  Set CIM_LICENSE_SECRET (or -LicenseSecret) before publishing; same secret
+  is used by Generate-CiMInstallKey.ps1 and runtime decryption.
 
 .PARAMETER ExportRoot
-  Default: installer\output\FlowX under the repo.
+  Default: installer\output\CiM under the repo.
 #>
 [CmdletBinding()]
 param(
@@ -19,17 +19,21 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $ScriptDir "Get-FlowXPaths.ps1")
+. (Join-Path $ScriptDir "Get-CiMPaths.ps1")
 $RepoRoot = Split-Path -Parent $ScriptDir
-$fx = Get-FlowXPaths -RepoRoot $RepoRoot
+$fx = Get-CiMPaths -RepoRoot $RepoRoot
 if (-not $ExportRoot) {
     $ExportRoot = $fx.ExportRoot
 }
+if (-not [System.IO.Path]::IsPathRooted($ExportRoot)) {
+    $ExportRoot = Join-Path $RepoRoot $ExportRoot
+}
+$ExportRoot = [System.IO.Path]::GetFullPath($ExportRoot)
 
 function Test-ExportPackageComplete {
     param([string]$Root)
     $required = @(
-        "start_flowx.bat",
+        "start_cim.bat",
         "data\nse_data.db",
         "frontend\build\index.html",
         "runtime\python\python.exe",
@@ -116,30 +120,29 @@ if (Test-Path -LiteralPath $serverSrc) {
 }
 
 if ($LicenseSecret) {
-    $env:FLOWX_LICENSE_SECRET = $LicenseSecret
+    $env:CIM_LICENSE_SECRET = $LicenseSecret
 }
-$existingProfile = Get-FlowXDistProfilePath -InstallRoot $ExportRoot -Paths $fx
-if (-not $env:FLOWX_LICENSE_SECRET -and (Test-Path -LiteralPath $existingProfile)) {
-    $env:FLOWX_LICENSE_SECRET = ([System.IO.File]::ReadAllText($existingProfile)).Trim().Trim([char]0xFEFF)
-    Write-Host "Using FLOWX_LICENSE_SECRET from existing profile: $existingProfile"
+$secretToShip = Get-CiMVendorSecret -LicenseSecret $LicenseSecret -RepoRoot $RepoRoot
+if (-not $secretToShip) {
+    $existingProfile = Get-CiMDistProfilePath -InstallRoot $ExportRoot -Paths $fx
+    if (Test-Path -LiteralPath $existingProfile) {
+        $secretToShip = ([System.IO.File]::ReadAllText($existingProfile)).Trim().Trim([char]0xFEFF)
+        Write-Host "Using secret from export profile (build only): $existingProfile"
+    }
 }
-if (-not $env:FLOWX_LICENSE_SECRET) {
-    Write-Warning "FLOWX_LICENSE_SECRET not set; using default dev secret (change before client release)."
+if (-not $secretToShip) {
+    throw "Set CIM_LICENSE_SECRET or create config\.build_license_secret before encrypt_app_code.ps1."
 }
+$env:CIM_LICENSE_SECRET = $secretToShip
 
-# Write distribution profile first so app_code_key(root) matches what clients will use at runtime.
-$secretToShip = $env:FLOWX_LICENSE_SECRET
-if (-not $secretToShip) { $secretToShip = "flowx-distribution-change-me" }
+# Temporary profile for encrypt helper only — removed after _cim_dist_embedded.py is written.
 $configDir = Join-Path $ExportRoot "config"
 if (-not (Test-Path -LiteralPath $configDir)) {
     New-Item -ItemType Directory -Force -Path $configDir | Out-Null
 }
-# UTF8NoBOM: PowerShell 5.1 UTF8 adds BOM and breaks MD5 install keys vs Inno.
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 $profilePath = Join-Path $configDir ".fx-dist.cfg"
 [System.IO.File]::WriteAllText($profilePath, $secretToShip, $utf8NoBom)
-$legacyProfile = Join-Path $configDir ".flowx_vendor_secret"
-if (Test-Path -LiteralPath $legacyProfile) { Remove-Item -LiteralPath $legacyProfile -Force }
 
 $helper = @"
 import os, sys
@@ -188,6 +191,16 @@ if js_dir.is_dir():
         enc_count += 1
 
 print(f'Encrypted {enc_count} files under {root}')
+
+# Distribution must not ship plaintext server modules alongside *.pyc.enc — that makes
+# is_development_tree() true and breaks /static JS (blank Electron shell).
+keep_server_py = frozenset({'__init__.py', 'app_code_crypto.py', 'cim_bootstrap.py', 'product_config.py', '_cim_dist_embedded.py'})
+for py_path in sorted(server_dir.glob('*.py')):
+    if py_path.name in keep_server_py:
+        continue
+    if (server_dir / (py_path.stem + '.pyc.enc')).is_file() or (server_dir / (py_path.stem + '.pyc')).is_file():
+        py_path.unlink()
+        print(f'Removed plaintext server module (encrypted build): {py_path.name}')
 "@
 
 & $py -c $helper
@@ -197,16 +210,53 @@ $encLeft = @(Get-ChildItem -LiteralPath (Join-Path $ExportRoot "server") -Recurs
 if ($encLeft.Count -eq 0) {
     throw @"
 No encrypted server files under $ExportRoot\server.
-Run export_flowx.ps1 -Mode distribution -HardenAll, then encrypt_app_code.ps1 again with FLOWX_LICENSE_SECRET set.
+Run export_cim.ps1 -Mode distribution -HardenAll, then encrypt_app_code.ps1 again with CIM_LICENSE_SECRET set.
 "@
 }
 
-Write-Host "Wrote config\.fx-dist.cfg (matches encrypt / install keys)."
+function Write-CiMEmbeddedDistSecret {
+    param(
+        [string]$ExportRoot,
+        [string]$Secret
+    )
+    $mask = [System.Text.Encoding]::UTF8.GetBytes("CiM-embed-v1!!")
+    $secretBytes = [System.Text.Encoding]::UTF8.GetBytes($Secret)
+    $obf = New-Object System.Collections.Generic.List[int]
+    for ($i = 0; $i -lt $secretBytes.Length; $i++) {
+        $obf.Add($secretBytes[$i] -bxor $mask[$i % $mask.Length])
+    }
+    $tuple = ($obf | ForEach-Object { "$_" }) -join ", "
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    $embeddedPath = Join-Path $ExportRoot "server\_cim_dist_embedded.py"
+    $content = @"
+# AUTO-GENERATED by encrypt_app_code.ps1 — do not edit.
+"""Build-time embedded distribution secret (not shipped as config/.fx-dist.cfg)."""
+from __future__ import annotations
+
+_OBF = ($tuple)
+_MASK = b"CiM-embed-v1!!"
+
+
+def distribution_secret_bytes() -> bytes:
+    return bytes(_OBF[i] ^ _MASK[i % len(_MASK)] for i in range(len(_OBF)))
+"@
+    [System.IO.File]::WriteAllText($embeddedPath, $content, $utf8)
+    Write-Host "Wrote server\_cim_dist_embedded.py (runtime decrypt + license verify)."
+}
+
+Write-CiMEmbeddedDistSecret -ExportRoot $ExportRoot -Secret $secretToShip
+
+# Phase 1 lockdown: do not ship plaintext vendor secret on client installs.
+if (Test-Path -LiteralPath $profilePath) { Remove-Item -LiteralPath $profilePath -Force }
+$legacyProfile = Join-Path $configDir ".flowx_vendor_secret"
+if (Test-Path -LiteralPath $legacyProfile) { Remove-Item -LiteralPath $legacyProfile -Force }
+Write-Host "Removed config\.fx-dist.cfg from export (vendor secret stays on build machine)."
 
 # Ship plaintext bootstrap modules (copy from repo if export stripped them)
 $plainFiles = @(
     "server\app_code_crypto.py",
-    "server\flowx_bootstrap.py"
+    "server\cim_bootstrap.py",
+    "server\product_config.py"
 )
 foreach ($rel in $plainFiles) {
     $src = Join-Path $RepoRoot $rel
@@ -225,7 +275,7 @@ if (Test-Path -LiteralPath $exportPy) {
     Write-Host "Verified cryptography in export runtime Python."
 }
 
-$verifyChain = Join-Path $ScriptDir "Verify-FlowXLicenseChain.ps1"
+$verifyChain = Join-Path $ScriptDir "Verify-CiMLicenseChain.ps1"
 if (Test-Path -LiteralPath $verifyChain) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $verifyChain `
         -ExportRoot $ExportRoot -RepoRoot $RepoRoot -InstallerOutputDir $fx.InstallerOutputDir

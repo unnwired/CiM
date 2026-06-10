@@ -32,7 +32,7 @@ import { formatMarketCap, formatCompactCount, parseMarketCapInput } from '../uti
 
 const LIMIT_OPTIONS = [20, 50, 100, 200, 400];
 const PAGE_SIZE_OPTIONS = [10, 20, 25, 50];
-const POLL_INTERVAL_KEY = 'flowx.movers.pollIntervalSec';
+const POLL_INTERVAL_KEY = 'cim.movers.pollIntervalSec';
 const POLL_INTERVAL_OPTIONS = [
   { value: 0, label: 'None' },
   { value: 15, label: '15 seconds' },
@@ -90,36 +90,6 @@ function filterRowsByMinMcap(rows, minMcapInr) {
   return rows.filter(r => {
     const m = Number(r.market_cap);
     return Number.isFinite(m) && m >= minMcapInr;
-  });
-}
-
-function sameMoverSymbolSet(prevRows, freshData) {
-  if (!prevRows?.length || !freshData?.length || prevRows.length !== freshData.length) return false;
-  const keys = new Set(prevRows.map(r => String(r.symbol || '').toUpperCase()));
-  return freshData.every(r => keys.has(String(r.symbol || '').toUpperCase()));
-}
-
-/** Update quote fields in place; keep rank/order stable during live background polls. */
-function mergeMoversRowsInPlace(prevRows, freshData) {
-  if (!prevRows?.length) return freshData;
-  const bySym = new Map(
-    freshData.map(r => [String(r.symbol || '').toUpperCase(), r]),
-  );
-  return prevRows.map(row => {
-    const sym = String(row.symbol || '').toUpperCase();
-    const fresh = bySym.get(sym);
-    if (!fresh) return row;
-    return {
-      ...row,
-      price: fresh.price ?? row.price,
-      change_pct: fresh.change_pct ?? row.change_pct,
-      market_cap: fresh.market_cap ?? row.market_cap,
-      volume: fresh.volume ?? row.volume,
-      volume_change_pct: fresh.volume_change_pct ?? row.volume_change_pct,
-      rvol_20d: fresh.rvol_20d ?? row.rvol_20d,
-      live: fresh.live ?? row.live,
-      quote_updated_at: fresh.quote_updated_at ?? row.quote_updated_at,
-    };
   });
 }
 
@@ -367,13 +337,7 @@ export default function MoversPage({ onOpenChart, isActive = false, onContextMen
         }
       }
       let data = filterRowsByMinMcap(listRes.data?.data || [], mcapVal);
-      if (background && rowsRef.current.length > 0 && sameMoverSymbolSet(rowsRef.current, data)) {
-        setRows(prev => mergeMoversRowsInPlace(prev, data));
-        if (useLive) {
-          setChartQuoteTick(t => t + 1);
-          setPollCountdown(appliedPollIntervalSec);
-        }
-      } else if (background && rowsRef.current.length > 0) {
+      if (background && rowsRef.current.length > 0) {
         setRows(data);
         if (useLive) {
           setChartQuoteTick(t => t + 1);
@@ -621,8 +585,8 @@ export default function MoversPage({ onOpenChart, isActive = false, onContextMen
       moversTimeframe3: timeframe3,
     };
     axios.post(`${API}/api/layout`, payload)
-      .then(() => window.dispatchEvent(new CustomEvent('flowx-toast', { detail: 'Layout saved.' })))
-      .catch(() => window.dispatchEvent(new CustomEvent('flowx-toast', { detail: 'Failed to save layout.' })));
+      .then(() => window.dispatchEvent(new CustomEvent('cim-toast', { detail: 'Layout saved.' })))
+      .catch(() => window.dispatchEvent(new CustomEvent('cim-toast', { detail: 'Failed to save layout.' })));
   }
 
   function renderPanel(sym, tf, setTf, onLastChange, cacheKey, hasBorderRight, dayChgOverride = null, chartLive = false) {

@@ -75,6 +75,16 @@ def _load_market_cap_live():
 market_cap_live = _load_market_cap_live()
 _MCAP_SQL = market_cap_live.EFFECTIVE_MCAP_SQL
 
+
+def _load_knowledge_base():
+    return _load_module_from_path(
+        "cim_knowledge_base",
+        _sibling_module_path("knowledge_base"),
+    )
+
+
+knowledge_base = _load_knowledge_base()
+
 # ──────────────────────────────────────────────
 # CONFIGURATION
 # ──────────────────────────────────────────────
@@ -150,7 +160,7 @@ FEEDBACK_SMTP_HOST = os.getenv("NSE_PULSE_SMTP_HOST", "")
 FEEDBACK_SMTP_PORT = int(os.getenv("NSE_PULSE_SMTP_PORT", "587"))
 FEEDBACK_SMTP_USER = os.getenv("NSE_PULSE_SMTP_USER", "")
 FEEDBACK_SMTP_PASS = os.getenv("NSE_PULSE_SMTP_PASS", "")
-FEEDBACK_FROM_EMAIL = os.getenv("NSE_PULSE_FROM_EMAIL", FEEDBACK_SMTP_USER or "noreply@flowx.local")
+FEEDBACK_FROM_EMAIL = os.getenv("NSE_PULSE_FROM_EMAIL", FEEDBACK_SMTP_USER or "noreply@cim.local")
 
 TIMEFRAME_CONFIG = {
     "1D":  {"anchor": "day",   "days": 1},
@@ -185,10 +195,10 @@ TIMEFRAME_CONFIG = {
 app = FastAPI(title="NSE Pulse API", version="1.0.0")
 
 try:
-    from update_apply import router as _flowx_update_router
-    app.include_router(_flowx_update_router)
-except Exception as _flowx_update_err:
-    print(f"[update] routes not loaded: {_flowx_update_err}")
+    from update_apply import router as _cim_update_router
+    app.include_router(_cim_update_router)
+except Exception as _cim_update_err:
+    print(f"[update] routes not loaded: {_cim_update_err}")
 
 FRONTEND_BUILD_DIR = BASE_DIR / "frontend" / "build"
 if FRONTEND_BUILD_DIR.exists():
@@ -345,6 +355,9 @@ def _on_startup():
                 added = mod.ensure_equity_index_rows(conn)
                 if added:
                     print(f"[indices] ensured {added} equity index row(s) from NSE catalog")
+                backfilled = mod.sync_nse_index_history(conn)
+                if backfilled:
+                    print(f"[indices] synced {backfilled} NSE index history row(s)")
             finally:
                 conn.close()
         except Exception as e:
@@ -698,6 +711,7 @@ def _screener_row_value(row: dict | None, index: int) -> float | None:
 
 EARNINGS_PLUS_CACHE_REFRESH_HOURS = 18
 EARNINGS_PLUS_REFRESH_WORKERS = 4
+EARNINGS_PLUS_REFRESH_STALL_SEC = 120
 _earnings_plus_progress_lock = threading.Lock()
 
 
@@ -907,8 +921,8 @@ def _load_earnings_plus_basis_evaluation(
 
 def _pick_best_earnings_plus_entry(sym: str, basis_results: list[tuple[str, dict, str | None, bool]], computed_at: str) -> dict:
     """
-    Prefer consolidated qualified, then standalone qualified, then consolidated not_qualified,
-    then standalone not_qualified; else best insufficient_data row.
+    Use consolidated when it can be evaluated (qualified or not_qualified).
+    Standalone is only used when consolidated data is insufficient_data or missing.
     """
     by_basis = {basis: (ev, err, stale) for basis, ev, err, stale in basis_results}
     last_error = None
@@ -916,24 +930,20 @@ def _pick_best_earnings_plus_entry(sym: str, basis_results: list[tuple[str, dict
         if err:
             last_error = err
 
-    for decision in ("qualified", "not_qualified"):
-        for basis in ("consolidated", "standalone"):
-            row = by_basis.get(basis)
-            if not row:
-                continue
-            ev, err, stale = row
-            if ev.get("decision") == decision:
-                return _earnings_plus_entry_from_evaluation(
-                    sym, ev, computed_at=computed_at, last_error=err or last_error, source_stale=stale,
-                )
+    def _entry_from_basis(basis: str) -> dict:
+        ev, err, stale = by_basis[basis]
+        return _earnings_plus_entry_from_evaluation(
+            sym, ev, computed_at=computed_at, last_error=err or last_error, source_stale=stale,
+        )
 
-    for basis in ("standalone", "consolidated"):
-        row = by_basis.get(basis)
-        if row:
-            ev, err, stale = row
-            return _earnings_plus_entry_from_evaluation(
-                sym, ev, computed_at=computed_at, last_error=err or last_error, source_stale=stale,
-            )
+    consolidated = by_basis.get("consolidated")
+    if consolidated:
+        c_decision = str(consolidated[0].get("decision") or "").strip().lower()
+        if c_decision in ("qualified", "not_qualified"):
+            return _entry_from_basis("consolidated")
+
+    if by_basis.get("standalone"):
+        return _entry_from_basis("standalone")
 
     return {
         "symbol": sym,
@@ -3897,6 +3907,7 @@ def run_fetch_prices():
             module.setup_db(conn2)
             usd_inr = module.get_usd_inr()
             module.update_live_prices(usd_inr, conn2)
+            module.sync_nse_index_history(conn2)
             conn2.close()
         except Exception as ie:
             job_state["message"] = f"Index update warning: {ie}"
@@ -4036,10 +4047,10 @@ def stop_app():
 @app.post("/api/admin/stop-all")
 def stop_all():
     """
-    Full multi-process stop parity (Phase 2 equivalent to stop_flowx.bat).
+    Full multi-process stop parity (Phase 2 equivalent to stop_cim.bat).
     Runs the stop script asynchronously after returning an HTTP response.
     """
-    stop_script = BASE_DIR / "stop_flowx.bat"
+    stop_script = BASE_DIR / "stop_cim.bat"
 
     def _stop_all_async():
         time_module.sleep(0.35)
@@ -4084,7 +4095,7 @@ def submit_feedback(payload: dict = Body(...)):
         )
 
     email_msg = EmailMessage()
-    email_msg["Subject"] = f"[FlowX] {fb_type.title()} - {subject}"
+    email_msg["Subject"] = f"[Charts In Motion] {fb_type.title()} - {subject}"
     email_msg["From"] = FEEDBACK_FROM_EMAIL
     email_msg["To"] = FEEDBACK_TO_EMAIL
     body_lines = [
@@ -4123,7 +4134,7 @@ def run_fetch_ohlcv():
             raise RuntimeError(
                 "Missing dependency: yfinance. "
                 f"Install into this Python runtime ({py_exe}) using "
-                "\"python -m pip install yfinance\" or restart via start_flowx.bat "
+                "\"python -m pip install yfinance\" or restart via start_cim.bat "
                 "to auto-repair runtime packages."
             )
         spec   = importlib.util.spec_from_file_location(
@@ -4163,6 +4174,10 @@ def run_fetch_ohlcv():
             total_idx = 0
             for symbol, name, category in mod2.INDICES:
                 total_idx += mod2.scrape_history(symbol, name, category, usd_inr, conn3)
+            nse_synced = mod2.sync_nse_index_history(conn3)
+            if nse_synced:
+                total_idx += nse_synced
+                on_message(f"NSE-only index history: {nse_synced} bar(s) extended.")
             conn3.close()
             on_message(f"Index OHLCV: {total_idx} new candles added.")
         except Exception as ie:
@@ -4258,6 +4273,7 @@ def run_fetch_ohlcv():
             usd_inr = mod_idx.get_usd_inr()
             mod_idx.update_live_prices(usd_inr, conn9)
             mod_idx.fetch_all_nse_indices(conn9)
+            mod_idx.sync_nse_index_history(conn9)
             mod_idx.recalculate_index_changes(conn9)
             conn9.close()
         except Exception as pie:
@@ -5341,14 +5357,29 @@ def run_refresh_earnings_plus_cache(
         job_state["total"] = len(to_refresh)
         qualified_count = 0
         completed = 0
+        stalled_pending = 0
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        with ThreadPoolExecutor(max_workers=EARNINGS_PLUS_REFRESH_WORKERS) as pool:
+        pool = ThreadPoolExecutor(max_workers=EARNINGS_PLUS_REFRESH_WORKERS)
+        try:
             futures = {
                 pool.submit(_refresh_earnings_plus_symbol_worker, sym, refresh_stale=refresh_stale): sym
                 for sym in to_refresh
             }
-            for fut in as_completed(futures):
+            pending = set(futures.keys())
+            while pending:
+                try:
+                    fut = next(as_completed(pending, timeout=EARNINGS_PLUS_REFRESH_STALL_SEC))
+                except TimeoutError:
+                    stalled_pending = len(pending)
+                    with _earnings_plus_progress_lock:
+                        job_state["message"] = (
+                            f"Earnings+ refresh stalled at {completed}/{len(to_refresh)} "
+                            f"({stalled_pending} pending symbols skipped after "
+                            f"{EARNINGS_PLUS_REFRESH_STALL_SEC}s — often Screener.in slow/rate-limited)"
+                        )
+                    break
+                pending.discard(fut)
                 sym = futures[fut]
                 try:
                     entry = fut.result()
@@ -5363,8 +5394,15 @@ def run_refresh_earnings_plus_cache(
                         f"Refreshing Earnings+ cache {completed}/{len(to_refresh)}: {sym}"
                         + (f" ({skipped} skipped)" if skipped else "")
                     )
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         skip_note = f", {skipped} skipped (already up to date)" if skipped else ""
+        stall_note = (
+            f", {stalled_pending} stalled (skipped after {EARNINGS_PLUS_REFRESH_STALL_SEC}s)"
+            if stalled_pending
+            else ""
+        )
         finish_meta = {
             "year": year,
             "month": month,
@@ -5373,13 +5411,14 @@ def run_refresh_earnings_plus_cache(
             "quiet": quiet,
             "trigger": trigger,
             "total_symbols": len(symbols),
-            "refreshed": len(to_refresh),
+            "refreshed": completed,
             "skipped": skipped,
+            "stalled": stalled_pending,
             "qualified_in_run": qualified_count,
         }
         finish_job(
-            f"Earnings+ cache for {period_label}: refreshed {len(to_refresh)} of {len(symbols)} symbols"
-            f"{skip_note}, {qualified_count} qualified in this run.",
+            f"Earnings+ cache for {period_label}: refreshed {completed} of {len(to_refresh)} symbols"
+            f"{skip_note}{stall_note}, {qualified_count} qualified in this run.",
             meta=finish_meta,
         )
         _record_earnings_plus_warm_run(
@@ -7513,6 +7552,31 @@ def delete_filter_preset(name: str):
     _save_presets(presets)
     return {"status": "deleted", "name": name}
 
+@app.patch("/api/filter-presets/{name}")
+def rename_filter_preset(name: str, payload: dict):
+    old_name = str(name or "").strip()
+    new_name = str(payload.get("new_name") or "").strip()
+    if not old_name:
+        raise HTTPException(status_code=400, detail="Preset name required")
+    if not new_name:
+        raise HTTPException(status_code=400, detail="new_name is required")
+    presets = _load_presets()
+    if any(
+        p["name"].lower() == new_name.lower() and p["name"].lower() != old_name.lower()
+        for p in presets
+    ):
+        raise HTTPException(status_code=409, detail="Preset name already exists")
+    found = False
+    for p in presets:
+        if p["name"] == old_name:
+            p["name"] = new_name
+            found = True
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    _save_presets(presets)
+    return {"status": "renamed", "name": new_name}
+
 
 def _normalize_watchlist_name(name: str) -> str:
     return str(name or "").strip()
@@ -7578,6 +7642,120 @@ def _save_watchlists(watchlists):
     _WATCHLISTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(_WATCHLISTS_PATH, "w", encoding="utf-8") as f:
         json.dump(watchlists, f, indent=2, ensure_ascii=False)
+
+
+def _parse_watchlist_entries(raw_lists) -> list[dict]:
+    """Normalize import payload into [{name, items}] (same shape as _load_watchlists)."""
+    if not isinstance(raw_lists, list):
+        return []
+    cleaned: list[dict] = []
+    seen_lower: set[str] = set()
+    for w in raw_lists:
+        if not isinstance(w, dict):
+            continue
+        nm = _normalize_watchlist_name(w.get("name"))
+        if not nm:
+            continue
+        key = nm.lower()
+        if key in seen_lower:
+            continue
+        seen_lower.add(key)
+        items = w.get("items", [])
+        normalized_items = []
+        if isinstance(items, list):
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                sym = _normalize_symbol(it.get("symbol"))
+                typ = str(it.get("type", "")).strip().lower()
+                if not sym or typ not in ("stock", "index"):
+                    continue
+                normalized_items.append({"symbol": sym, "type": typ})
+        dedup: dict[tuple[str, str], dict] = {}
+        for it in normalized_items:
+            dedup[(it["symbol"], it["type"])] = it
+        cleaned.append({"name": nm, "items": list(dedup.values())})
+    return cleaned
+
+
+def _merge_watchlists_on_import(existing: list[dict], imported: list[dict]) -> list[dict]:
+    by_lower = {w["name"].lower(): dict(w) for w in existing}
+    for imp in imported:
+        key = imp["name"].lower()
+        if key in by_lower:
+            by_lower[key]["name"] = imp["name"]
+            by_lower[key]["items"] = imp["items"]
+        else:
+            by_lower[key] = dict(imp)
+    result: list[dict] = []
+    seen: set[str] = set()
+    for w in existing:
+        key = w["name"].lower()
+        if key in by_lower and key not in seen:
+            result.append(by_lower[key])
+            seen.add(key)
+    for imp in imported:
+        key = imp["name"].lower()
+        if key not in seen:
+            result.append(by_lower[key])
+            seen.add(key)
+    return result
+
+
+def _apply_watchlist_item_order_import(
+    existing_order: dict,
+    imported_order: dict | None,
+    watchlist_names: list[str],
+    *,
+    replace: bool,
+) -> dict:
+    names = [_normalize_watchlist_name(n) for n in watchlist_names if _normalize_watchlist_name(n)]
+    name_by_lower = {n.lower(): n for n in names}
+    if replace:
+        out: dict = {}
+    else:
+        out = {
+            k: v for k, v in (existing_order or {}).items()
+            if _normalize_watchlist_name(k).lower() in name_by_lower
+        }
+    if not isinstance(imported_order, dict):
+        return out
+    for raw_key, raw_val in imported_order.items():
+        canon = name_by_lower.get(_normalize_watchlist_name(raw_key).lower())
+        if not canon or not isinstance(raw_val, list):
+            continue
+        cleaned = [str(x).strip() for x in raw_val if str(x).strip()]
+        if cleaned:
+            out[canon] = cleaned
+    return out
+
+
+def _read_layout_watchlist_item_order() -> dict:
+    if not LAYOUT_PATH.exists():
+        return {}
+    try:
+        with open(LAYOUT_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        order = data.get("watchlistItemOrder") if isinstance(data, dict) else None
+        return order if isinstance(order, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_layout_watchlist_item_order(order: dict) -> None:
+    current: dict = {}
+    if LAYOUT_PATH.exists():
+        try:
+            with open(LAYOUT_PATH, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                current = loaded
+        except Exception:
+            current = {}
+    current["watchlistItemOrder"] = order
+    LAYOUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(LAYOUT_PATH, "w", encoding="utf-8") as f:
+        json.dump(current, f, indent=2, ensure_ascii=False)
 
 
 @app.get("/api/watchlists")
@@ -7706,6 +7884,42 @@ def rename_watchlist(name: str, payload: dict):
             raise HTTPException(status_code=404, detail="Watchlist not found")
         _save_watchlists(watchlists)
     return {"status": "renamed", "name": new_name}
+
+
+@app.post("/api/watchlists/import")
+@app.post("/api/watchlists/import/")
+def import_watchlists(payload: dict):
+    mode = str(payload.get("mode") or "merge").strip().lower()
+    if mode not in ("merge", "replace"):
+        raise HTTPException(status_code=400, detail="mode must be 'merge' or 'replace'")
+    imported = _parse_watchlist_entries(payload.get("watchlists"))
+    if not imported:
+        raise HTTPException(status_code=400, detail="No valid watchlists found in import")
+    imported_order = payload.get("watchlist_item_order")
+    if imported_order is not None and not isinstance(imported_order, dict):
+        raise HTTPException(status_code=400, detail="watchlist_item_order must be an object")
+    with _WATCHLISTS_LOCK:
+        existing = _load_watchlists()
+        if mode == "replace":
+            merged = imported
+        else:
+            merged = _merge_watchlists_on_import(existing, imported)
+        _save_watchlists(merged)
+        names = [w["name"] for w in merged]
+        layout_order = _apply_watchlist_item_order_import(
+            _read_layout_watchlist_item_order(),
+            imported_order,
+            names,
+            replace=(mode == "replace"),
+        )
+        _write_layout_watchlist_item_order(layout_order)
+    return {
+        "status": "imported",
+        "mode": mode,
+        "count": len(merged),
+        "watchlists": merged,
+        "watchlist_item_order": layout_order,
+    }
 
 
 # ──────────────────────────────────────────────
@@ -8064,6 +8278,40 @@ def post_screener_classification(payload: dict):
     conn.close()
     invalidate_stock_df()
     return {"status": "ok", "rows_updated": n}
+
+
+def _require_dev_tree_for_kb_edit():
+    from server import app_code_crypto as _app_code_crypto
+
+    if not _app_code_crypto.is_development_tree(BASE_DIR):
+        raise HTTPException(
+            status_code=403,
+            detail="Knowledge Base editing is only available in the development tree.",
+        )
+
+
+@app.get("/api/knowledge-base/pages")
+def knowledge_base_list_pages():
+    return {"pages": knowledge_base.list_pages_meta()}
+
+
+@app.get("/api/knowledge-base/{guide_id}")
+def knowledge_base_get_page(guide_id: str):
+    try:
+        page = knowledge_base.get_page(DATA_DIR, guide_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return page
+
+
+@app.put("/api/dev/knowledge-base/{guide_id}")
+def knowledge_base_put_page(guide_id: str, payload: dict = Body(...)):
+    _require_dev_tree_for_kb_edit()
+    try:
+        page = knowledge_base.put_page(DATA_DIR, guide_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "saved", "page": page}
 
 
 @app.get("/api/health")

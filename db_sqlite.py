@@ -1,5 +1,5 @@
 """
-Shared SQLite connection settings for FlowX / NSE Pulse.
+Shared SQLite connection settings for Charts In Motion / NSE Pulse.
 
 WAL + busy_timeout let OHLCV writes coexist with API reads (movers live, charts)
 instead of failing immediately with "database is locked".

@@ -1,8 +1,8 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Run from the extracted FlowX-Update-* folder on the CLIENT PC.
-  Primary layout: <FlowX install>\UPDATE\FlowX-Update-*\Install-Client-Update.bat
+  Run from the extracted CiM-Update-* folder on the CLIENT PC.
+  Primary layout: <Charts In Motion install>\UPDATE\CiM-Update-*\Install-Client-Update.bat
 #>
 [CmdletBinding()]
 param(
@@ -31,43 +31,43 @@ $installGuess = Resolve-InstallGuessFromPackage -Path $PackageRoot
 $Locator = $null
 if ($installGuess) {
     foreach ($try in @(
-            (Join-Path $installGuess "scripts\FlowXInstallLocator.ps1")
+            (Join-Path $installGuess "scripts\CiMInstallLocator.ps1")
         )) {
         if (Test-Path -LiteralPath $try) { $Locator = $try; break }
     }
 }
 if (-not $Locator) {
     foreach ($try in @(
-            (Join-Path $PSScriptRoot "scripts\FlowXInstallLocator.ps1"),
-            (Join-Path $PSScriptRoot "FlowXInstallLocator.ps1")
+            (Join-Path $PSScriptRoot "scripts\CiMInstallLocator.ps1"),
+            (Join-Path $PSScriptRoot "CiMInstallLocator.ps1")
         )) {
         if (Test-Path -LiteralPath $try) { $Locator = $try; break }
     }
 }
 if (-not $Locator -and $installGuess) {
-    throw "Missing FlowXInstallLocator.ps1 under $installGuess\scripts\ (run a newer update or copy scripts from support)."
+    throw "Missing CiMInstallLocator.ps1 under $installGuess\scripts\ (run a newer update or copy scripts from support)."
 }
 if (-not $Locator) {
-    throw "Missing FlowXInstallLocator.ps1 (expected in scripts\ next to this file or install\scripts\)."
+    throw "Missing CiMInstallLocator.ps1 (expected in scripts\ next to this file or install\scripts\)."
 }
 . $Locator
 
 $pkgHelper = $null
 if ($installGuess) {
-    $try = Join-Path $installGuess "scripts\FlowXUpdatePackage.ps1"
+    $try = Join-Path $installGuess "scripts\CiMUpdatePackage.ps1"
     if (Test-Path -LiteralPath $try) { $pkgHelper = $try }
 }
 if (-not $pkgHelper) {
-    $pkgHelper = Join-Path $PSScriptRoot "FlowXUpdatePackage.ps1"
+    $pkgHelper = Join-Path $PSScriptRoot "CiMUpdatePackage.ps1"
 }
 if (-not (Test-Path -LiteralPath $pkgHelper) -and $installGuess) {
-    $pkgHelper = Join-Path $installGuess "scripts\FlowXUpdatePackage.ps1"
+    $pkgHelper = Join-Path $installGuess "scripts\CiMUpdatePackage.ps1"
 }
 if (Test-Path -LiteralPath $pkgHelper) { . $pkgHelper }
 
 Write-Host ""
 Write-Host "=========================================="
-Write-Host " FlowX client update installer"
+Write-Host " Charts In Motion client update installer"
 Write-Host "=========================================="
 Write-Host "Update package: $PackageRoot"
 Write-Host ""
@@ -77,8 +77,8 @@ if (-not (Test-Path -LiteralPath $manifestSrc)) {
     throw @"
 This folder is not a valid update package (missing update.manifest.json).
 
-Extract the FlowX-Update ZIP into your FlowX UPDATE folder, e.g.:
-  D:\FlowX\UPDATE\FlowX-Update-1.0.2
+Extract the CiM-Update ZIP into your Charts In Motion UPDATE folder, e.g.:
+  D:\CiM\UPDATE\CiM-Update-1.0.2
 
 Then double-click Install-Client-Update.bat inside that folder.
 "@
@@ -90,8 +90,8 @@ if ($InstallRoot) {
     $install = $installGuess.TrimEnd('\')
 } else {
     $install = $null
-    if (Get-Command Get-FlowXInstallRootFromPath -ErrorAction SilentlyContinue) {
-        $install = Get-FlowXInstallRootFromPath -FromPath $PackageRoot
+    if (Get-Command Get-CiMInstallRootFromPath -ErrorAction SilentlyContinue) {
+        $install = Get-CiMInstallRootFromPath -FromPath $PackageRoot
     }
     if (-not $install) {
         $install = Select-FlowXInstallRoot -FromPath $PackageRoot
@@ -100,18 +100,18 @@ if ($InstallRoot) {
 
 if (-not $install) {
     throw @"
-Could not find FlowX on this PC.
+Could not find Charts In Motion on this PC.
 
-Put the extracted FlowX-Update folder inside your FlowX UPDATE folder, e.g.:
-  D:\FlowX\UPDATE\FlowX-Update-1.0.2
+Put the extracted CiM-Update folder inside your Charts In Motion UPDATE folder, e.g.:
+  D:\CiM\UPDATE\CiM-Update-1.0.2
 
 Then run Install-Client-Update.bat from inside that folder.
 
-Manual override: powershell -File Install-Client-Update.ps1 -InstallRoot "D:\FlowX"
+Manual override: powershell -File Install-Client-Update.ps1 -InstallRoot "D:\CiM"
 "@
 }
 
-Write-Host "Found FlowX install: $install"
+Write-Host "Found Charts In Motion install: $install"
 Write-Host ""
 
 if (Get-Command Copy-UpdatePackageToInstall -ErrorAction SilentlyContinue) {
@@ -122,24 +122,24 @@ if (Get-Command Copy-UpdatePackageToInstall -ErrorAction SilentlyContinue) {
 
 $payload = Join-Path $updateDir "payload"
 if (-not (Test-Path -LiteralPath $payload)) {
-    throw "UPDATE package payload\ missing. Re-run from the FlowX-Update ZIP or contact support."
+    throw "UPDATE package payload\ missing. Re-run from the CiM-Update ZIP or contact support."
 }
 
 Write-Host "Bootstrapping launchers into install root ..."
 $bootstrap = @(
     "Apply-Update.bat",
-    "start_flowx.bat",
-    "stop_flowx.bat",
-    "scripts\FlowXApplyUpdate.ps1",
-    "scripts\FlowXDownloadUpdate.ps1",
-    "scripts\Repair-FlowXLicense.ps1",
+    "start_cim.bat",
+    "stop_cim.bat",
+    "scripts\CiMApplyUpdate.ps1",
+    "scripts\CiMDownloadUpdate.ps1",
+    "scripts\Repair-CiMLicense.ps1",
     "scripts\_Apply-LocalUpdate.ps1",
-    "scripts\FlowXInstallLocator.ps1",
+    "scripts\CiMInstallLocator.ps1",
     "scripts\Install-Client-Update.ps1",
-    "scripts\Diagnose-FlowXInstall.ps1",
+    "scripts\Diagnose-CiMInstall.ps1",
     "scripts\Apply-LocalUpdate-Entry.ps1",
-    "scripts\FlowXUpdatePackage.ps1",
-    "Repair-FlowXLicense.bat"
+    "scripts\CiMUpdatePackage.ps1",
+    "Repair-CiMLicense.bat"
 )
 foreach ($rel in $bootstrap) {
     $src = Join-Path $payload ($rel -replace '/', '\')
@@ -164,7 +164,7 @@ $pendingPath = Join-Path $logDir "update-pending-local.json"
     manifest  = $manifest
 } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pendingPath -Encoding UTF8
 
-$applyScript = Join-Path $install "scripts\FlowXApplyUpdate.ps1"
+$applyScript = Join-Path $install "scripts\CiMApplyUpdate.ps1"
 if (-not (Test-Path -LiteralPath $applyScript)) {
     throw "Missing $applyScript after bootstrap"
 }
@@ -173,18 +173,16 @@ Write-Host ""
 Write-Host "Applying update $($manifest.version) ..."
 & powershell -NoProfile -ExecutionPolicy Bypass -File $applyScript -InstallRoot $install -ManifestPath $pendingPath
 if ($LASTEXITCODE -ne 0) {
-    throw "FlowXApplyUpdate failed. See $logDir\update-apply.log"
+    throw "CiMApplyUpdate failed. See $logDir\update-apply.log"
 }
 
-$licensePath = Join-Path $install "data\.flowx-license"
+$licensePath = Join-Path $install "data\.cim-license"
 if (-not (Test-Path -LiteralPath $licensePath)) {
     Write-Host ""
-    Write-Host "WARNING: data\.flowx-license is still missing."
-    $repair = Join-Path $install "scripts\Repair-FlowXLicense.ps1"
-    Write-Host "Run: powershell -ExecutionPolicy Bypass -File ""$repair"""
+    Write-Host "WARNING: data\.cim-license is still missing. Run Repair-CiMLicense.bat with a support install key."
 } else {
     Write-Host ""
-    Write-Host "Update complete. Start FlowX: $install\start_flowx.bat"
+    Write-Host "Update complete. Start Charts In Motion: $install\start_cim.bat"
 }
 
 $resultFile = Join-Path $install "update-result.txt"
@@ -193,7 +191,7 @@ if (Test-Path -LiteralPath $resultFile) {
     Get-Content -LiteralPath $resultFile
 }
 
-$diag = Join-Path $install "scripts\Diagnose-FlowXInstall.ps1"
+$diag = Join-Path $install "scripts\Diagnose-CiMInstall.ps1"
 if (Test-Path -LiteralPath $diag) {
     Write-Host ""
     Write-Host "Running install diagnostic ..."

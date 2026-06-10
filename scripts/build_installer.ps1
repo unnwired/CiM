@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Build FlowXSetup.exe from an encrypted export tree using Inno Setup.
+  Build CiMSetup.exe from an encrypted export tree using Inno Setup.
 #>
 [CmdletBinding()]
 param(
@@ -13,9 +13,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $ScriptDir "Get-FlowXPaths.ps1")
+. (Join-Path $ScriptDir "Get-CiMPaths.ps1")
 $RepoRoot = Split-Path -Parent $ScriptDir
-$fx = Get-FlowXPaths -RepoRoot $RepoRoot
+$fx = Get-CiMPaths -RepoRoot $RepoRoot
 
 if (-not $ExportRoot) {
     $ExportRoot = $fx.ExportRoot
@@ -31,12 +31,13 @@ if (-not $Version) {
 function Test-ExportPackageComplete {
     param([string]$Root)
     $required = @(
-        "start_flowx.bat",
+        "start_cim.bat",
         "data\nse_data.db",
         "frontend\build\index.html",
         "runtime\python\python.exe",
-        "server\flowx_bootstrap.py",
-        "server\app_code_crypto.py"
+        "server\cim_bootstrap.py",
+        "server\app_code_crypto.py",
+        "server\_cim_dist_embedded.py"
     )
     $missing = @()
     foreach ($rel in $required) {
@@ -54,23 +55,15 @@ function Test-ExportPackageComplete {
 
 Test-ExportPackageComplete -Root $ExportRoot
 
-$vendorFile = Get-FlowXDistProfilePath -InstallRoot $ExportRoot -Paths $fx
-if ($LicenseSecret) {
-    $env:FLOWX_LICENSE_SECRET = $LicenseSecret
-} elseif (-not $env:FLOWX_LICENSE_SECRET -and (Test-Path -LiteralPath $vendorFile)) {
-    $env:FLOWX_LICENSE_SECRET = (Get-Content -LiteralPath $vendorFile -Raw).Trim()
-    Write-Host "Using FLOWX_LICENSE_SECRET from export profile: $vendorFile"
+$secretForInno = Get-CiMVendorSecret -LicenseSecret $LicenseSecret -RepoRoot $RepoRoot
+if ($secretForInno) {
+    $env:CIM_LICENSE_SECRET = $secretForInno
+} elseif (-not $env:CIM_LICENSE_SECRET) {
+    Write-Warning "CIM_LICENSE_SECRET not set; installer will use default secret in CiM.iss (must match encrypt_app_code)."
 }
-if (-not $env:FLOWX_LICENSE_SECRET) {
-    Write-Warning "FLOWX_LICENSE_SECRET not set; installer will use default secret in FlowX.iss (must match encrypt_app_code / config\.fx-dist.cfg)."
-} elseif ((Test-Path -LiteralPath $vendorFile)) {
-    $onDisk = (Get-Content -LiteralPath $vendorFile -Raw).Trim()
-    if ($onDisk -ne $env:FLOWX_LICENSE_SECRET.Trim()) {
-        throw @"
-FLOWX_LICENSE_SECRET env does not match $vendorFile.
-Run encrypt_app_code.ps1 with the same secret, or clear env and let build_installer read the file only.
-"@
-    }
+$vendorFile = Join-Path $ExportRoot $fx.DistProfileRel
+if (Test-Path -LiteralPath $vendorFile) {
+    throw "Phase 1 lockdown: remove config\.fx-dist.cfg from export before building installer."
 }
 
 function Escape-InnoDefineString([string]$Value) {
@@ -123,22 +116,11 @@ if (Test-Path -LiteralPath $updateReadmeSource) {
 }
 
 $payload = (Resolve-Path -LiteralPath $ExportRoot).Path
-$secretForInno = $env:FLOWX_LICENSE_SECRET
-if (-not $secretForInno -and (Test-Path -LiteralPath $vendorFile)) {
-    $secretForInno = (Get-Content -LiteralPath $vendorFile -Raw).Trim()
+$secretForInno = $env:CIM_LICENSE_SECRET
+if (-not $secretForInno) {
+    $secretForInno = Get-CiMVendorSecret -RepoRoot $RepoRoot
 }
 if ($secretForInno) {
-    $configDir = Join-Path $ExportRoot "config"
-    if (-not (Test-Path -LiteralPath $configDir)) {
-        New-Item -ItemType Directory -Force -Path $configDir | Out-Null
-    }
-    $vendorOut = Join-Path $configDir ".fx-dist.cfg"
-    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    [System.IO.File]::WriteAllText($vendorOut, $secretForInno, $utf8NoBom)
-    $legacyVendor = Join-Path $configDir ".flowx_vendor_secret"
-    if (Test-Path -LiteralPath $legacyVendor) { Remove-Item -LiteralPath $legacyVendor -Force }
-    Write-Host "Synced distribution profile to export: $vendorOut"
-
     $pascalSecret = $secretForInno -replace "'", "''"
     $genPas = $fx.GeneratedSecretPas
     @"
@@ -160,11 +142,11 @@ $defines = @(
     "/DSourcePayload=$payload"
 )
 
-$iss = $fx.FlowXIss
+$iss = $fx.CiMIss
 if (-not (Test-Path -LiteralPath $iss)) {
     throw @"
 Missing $iss
-Restore installer\FlowX.iss from repo backup.
+Restore installer\CiM.iss from repo backup.
 "@
 }
 $pas = $fx.LicenseValidatePas
@@ -177,7 +159,7 @@ if (-not (Test-Path -LiteralPath $pas)) {
         Copy-Item -LiteralPath $pasSource -Destination $pas -Force
         Write-Host "Copied license_validate.pas from installer\license_validate.pas"
     } else {
-        throw "Missing $pas and source $pasSource (required by FlowX.iss)."
+        throw "Missing $pas and source $pasSource (required by CiM.iss)."
     }
 } elseif (Test-Path -LiteralPath $pasSource) {
     $srcTime = (Get-Item -LiteralPath $pasSource).LastWriteTimeUtc
@@ -193,14 +175,14 @@ if ($secretForInno -and -not (Test-Path -LiteralPath $fx.GeneratedSecretPas)) {
 $issText = Get-Content -LiteralPath $iss -Raw
 if ($issText -match '\.CopyToClipboard') {
     throw @"
-FlowX.iss still calls .CopyToClipboard (invalid for Inno TNewEdit).
-Save installer\FlowX.iss (clip.exe temp-file copy) and rebuild.
+CiM.iss still calls .CopyToClipboard (invalid for Inno TNewEdit).
+Save installer\CiM.iss (clip.exe temp-file copy) and rebuild.
 "@
 }
 if (-not $secretForInno) {
     throw "Cannot build installer without distribution profile. Run encrypt_app_code.ps1 first."
 }
-$verifyChain = Join-Path $ScriptDir "Verify-FlowXLicenseChain.ps1"
+$verifyChain = Join-Path $ScriptDir "Verify-CiMLicenseChain.ps1"
 if (Test-Path -LiteralPath $verifyChain) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $verifyChain `
         -ExportRoot $ExportRoot -RepoRoot $RepoRoot -InstallerOutputDir $fx.InstallerOutputDir
@@ -211,16 +193,16 @@ Write-Host "Compiling installer (version $Version)..."
 $exit = $LASTEXITCODE
 if ($exit -ne 0) { throw "ISCC failed with exit code $exit" }
 
-$out = Join-Path $fx.SetupOutputDir "FlowXSetup-$Version.exe"
+$out = Join-Path $fx.SetupOutputDir "CiMSetup-$Version.exe"
 if (-not (Test-Path -LiteralPath $out)) {
     throw "Expected output not found: $out"
 }
 Write-Host "Installer built: $out"
 if ($secretForInno) {
-    $showKey = Join-Path $ScriptDir "Show-FlowXInstallKey.ps1"
+    $showKey = Join-Path $ScriptDir "Show-CiMInstallKey.ps1"
     if (Test-Path -LiteralPath $showKey) {
         Write-Host ""
-        Write-Host "=== Install keys (must match the machine code shown in FlowXSetup) ==="
+        Write-Host "=== Install keys (must match the machine code shown in CiMSetup) ==="
         Write-Host "Example for client MC F1927C3F4CCD33A733DD8AECEFDA6469:"
         & powershell -NoProfile -ExecutionPolicy Bypass -File $showKey `
             -MachineCode "F1927C3F4CCD33A733DD8AECEFDA6469" `

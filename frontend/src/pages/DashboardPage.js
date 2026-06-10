@@ -255,6 +255,8 @@ export default function DashboardPage({
   const [saveNameValue,   setSaveNameValue]    = useState('');
   const [activePresetName, setActivePresetName] = useState(null);
   const [presetFiltersBaseline, setPresetFiltersBaseline] = useState([]);
+  const [renamingPresetName, setRenamingPresetName] = useState(null);
+  const [renamePresetValue, setRenamePresetValue] = useState('');
   const presetsRef                             = useRef(null);
   const filterMenuRef                          = useRef(null);
   const importFileRef                          = useRef(null);
@@ -275,6 +277,13 @@ export default function DashboardPage({
   useEffect(() => {
     if (!activePresetName) setPresetFiltersBaseline([]);
   }, [activePresetName]);
+
+  useEffect(() => {
+    if (!presetsOpen) {
+      setRenamingPresetName(null);
+      setRenamePresetValue('');
+    }
+  }, [presetsOpen]);
 
   const [paneWidth, setPaneWidth]   = useState(320);
   const draggingRef                 = useRef(false);
@@ -519,11 +528,35 @@ export default function DashboardPage({
     setActiveFilters(withLabels);
   }
 
+  function cancelRenamePreset() {
+    setRenamingPresetName(null);
+    setRenamePresetValue('');
+  }
+
+  async function renamePreset() {
+    const oldNm = renamingPresetName;
+    if (!oldNm) return;
+    const name = renamePresetValue.trim();
+    if (!name || name === oldNm) {
+      cancelRenamePreset();
+      return;
+    }
+    try {
+      await axios.patch(`${API}/api/filter-presets/${encodeURIComponent(oldNm)}`, { new_name: name });
+      cancelRenamePreset();
+      if (activePresetName === oldNm) setActivePresetName(name);
+      await loadPresets();
+    } catch (e) {
+      alert(e.response?.data?.detail || e.message);
+    }
+  }
+
   async function deletePreset(name, e) {
     e.stopPropagation();
     try {
       await axios.delete(`${API}/api/filter-presets/${encodeURIComponent(name)}`);
       if (name === activePresetName) setActivePresetName(null);
+      if (renamingPresetName === name) cancelRenamePreset();
       loadPresets();
     } catch {}
   }
@@ -675,8 +708,8 @@ export default function DashboardPage({
       setVisiblePanels(prev => (JSON.stringify(prev) === JSON.stringify(e.detail) ? prev : e.detail));
     }
     function onStorage(e) {
-      if (e.key === 'flowx.chart.ema') setEmas(getPersistedEmaSet());
-      if (e.key === 'flowx.chart.volumeVisible') setVolumeVisible(getPersistedVolumeVisible(true));
+      if (e.key === 'cim.chart.ema') setEmas(getPersistedEmaSet());
+      if (e.key === 'cim.chart.volumeVisible') setVolumeVisible(getPersistedVolumeVisible(true));
       if (e.key === PANELS_PREFS_KEY) setVisiblePanels(getPersistedVisiblePanels());
     }
     window.addEventListener(EMA_PREFS_UPDATED_EVENT, onEmaPrefs);
@@ -983,8 +1016,8 @@ export default function DashboardPage({
         })();
       }
     }
-    window.addEventListener('flowx-global-search-select', onGlobalPick);
-    return () => window.removeEventListener('flowx-global-search-select', onGlobalPick);
+    window.addEventListener('cim-global-search-select', onGlobalPick);
+    return () => window.removeEventListener('cim-global-search-select', onGlobalPick);
   }, [pageMode, stocks]);
 
   async function handleAddPickToPortfolio(symbol, type) {
@@ -1136,7 +1169,7 @@ export default function DashboardPage({
       ...(portfolioRowOrder?.length
         ? { portfolioRowOrder, portfolioUseCustomRowOrder: portfolioUseCustomRowOrder }
         : {}),
-    }).then(() => window.dispatchEvent(new CustomEvent('flowx-toast', { detail: 'Layout saved.' }))).catch(() => window.dispatchEvent(new CustomEvent('flowx-toast', { detail: 'Failed to save layout.' })));
+    }).then(() => window.dispatchEvent(new CustomEvent('cim-toast', { detail: 'Layout saved.' }))).catch(() => window.dispatchEvent(new CustomEvent('cim-toast', { detail: 'Failed to save layout.' })));
   }
 
   function handleTogglePanel(key) { setVisiblePanels(p => ({ ...p, [key]: !p[key] })); }
@@ -1197,11 +1230,14 @@ export default function DashboardPage({
 
   useEffect(() => {
     if (displayStocks.length === 0) return;
-    if (!selectedSymbol) {
+    const inList = displayStocks.some((s) => s.Symbol === selectedSymbol);
+    if (!selectedSymbol || !inList) {
       const firstRow = displayStocks[0];
       setSelectedSymbol(firstRow.Symbol);
       setSelectedSymbols(new Set([firstRow.Symbol]));
       setSelectedKind(firstRow.instrumentType === 'index' ? 'index' : 'stock');
+      setLastCandleChange(null);
+      setLastCandlePrice(null);
     }
   }, [displayStocks, selectedSymbol]);
 
@@ -1405,17 +1441,23 @@ export default function DashboardPage({
           </div>
         </div>
 
-        {selectedStock && (
+        {selectedSymbol && (
           <>
             <div style={{ display:'flex', flexDirection:'column', justifyContent:'center', flexShrink:0, minWidth:52 }}>
               <span style={{ fontFamily:'var(--font-mono)', fontWeight:700, fontSize:14, color:'var(--text-primary)', lineHeight:1.1 }}>
-                {selectedKind === 'index' ? (selectedStock.indexName || selectedStock.Symbol) : selectedStock.Symbol}
+                {selectedKind === 'index'
+                  ? (selectedStock?.indexName || selectedSymbol)
+                  : selectedSymbol}
               </span>
-              <span style={{ fontSize:9, color:'var(--text-muted)', maxWidth:160, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', marginTop:2 }} title={selectedStock['Market Sector'] || ''}>
-                {selectedStock['Market Sector'] || '—'}
+              <span style={{ fontSize:9, color:'var(--text-muted)', maxWidth:160, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', marginTop:2 }} title={selectedStock?.['Market Sector'] || ''}>
+                {selectedStock?.['Market Sector'] || '—'}
               </span>
             </div>
-            <span style={{ fontFamily:'var(--font-mono)', fontSize:13, color:'var(--text-primary)', flexShrink:0 }}>₹{(lastCandlePrice ?? selectedStock?.Price)?.toLocaleString('en-IN', { minimumFractionDigits:2 })}</span>
+            {(lastCandlePrice != null || selectedStock?.Price != null) && (
+              <span style={{ fontFamily:'var(--font-mono)', fontSize:13, color:'var(--text-primary)', flexShrink:0 }}>
+                ₹{(lastCandlePrice ?? selectedStock?.Price)?.toLocaleString('en-IN', { minimumFractionDigits:2 })}
+              </span>
+            )}
             {lastCandleChange !== null && (
               <span style={{ fontFamily:'var(--font-mono)', fontSize:11, fontWeight:600, flexShrink:0, color: lastCandleChange>=0?'var(--accent-green)':'var(--accent-red)', backgroundColor: lastCandleChange>=0?'rgba(63,185,80,0.12)':'rgba(248,81,73,0.12)', border:`1px solid ${lastCandleChange>=0?'#3fb95044':'#f8514944'}`, borderRadius:4, padding:'1px 6px' }}>
                 {lastCandleChange>=0?'+':''}{lastCandleChange.toFixed(2)}%
@@ -1427,57 +1469,60 @@ export default function DashboardPage({
               <span style={{ fontSize:11, color:'var(--text-secondary)', fontWeight:500 }}>Vol</span>
             </div>
             <EMAControls emas={emas} onChange={setEmas} />
-            <div ref={sectorRef} style={{ position:'relative', flexShrink:0 }}>
-              <button
-                type="button"
-                title={selectedMarketSectors.length ? selectedMarketSectors.join(' · ') : 'Filter table & technical scans by market sector'}
-                onClick={() => { setSectorOpen(o => !o); setIndOpen(false); setViewOpen(false); }}
-                style={{
-                  display:'flex', alignItems:'center', gap:6, backgroundColor: sectorOpen ? 'var(--bg-active)' : 'var(--bg-tertiary)',
-                  border:`1px solid ${selectedMarketSectors.length ? 'var(--accent-blue)' : 'var(--border)'}`, borderRadius:5, padding:'0 10px 0 12px', height:28,
-                  color: selectedMarketSectors.length ? 'var(--accent-blue)' : 'var(--text-secondary)', fontSize:12, fontWeight:600, cursor:'pointer', whiteSpace:'nowrap',
-                }}
-              >
-                <span style={{ fontFamily: 'system-ui, sans-serif' }}>Sector</span>
-                <SectorCountBadge n={selectedMarketSectors.length} />
-                <svg width="10" height="6" viewBox="0 0 10 6" fill="currentColor" style={{ opacity: 0.65, flexShrink: 0 }}><path d="M0 0l5 6 5-6z" /></svg>
-              </button>
-              {sectorOpen && sectorDropdownRect && (
-                <div style={{
-                  position:'fixed', top: sectorDropdownRect.top, left: sectorDropdownRect.left, width: sectorDropdownRect.width,
-                  maxHeight:'min(72vh, 360px)', overflowY:'auto', zIndex: CHART_TOOLBAR_OVERLAY_Z,
-                  backgroundColor:'var(--bg-secondary)', border:'1px solid var(--border)', borderRadius:6, boxShadow:'0 8px 24px rgba(0,0,0,0.6)', padding:'8px 0',
-                }}>
-                  <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, padding:'2px 12px 8px' }}>
-                    <div style={{ fontSize:10, fontWeight:700, color:'var(--text-muted)', textTransform:'uppercase', letterSpacing:'0.06em' }}>Market sectors (multi)</div>
-                    <button type="button" onClick={() => setSelectedMarketSectors([])} style={{ fontSize:11, background:'none', border:'1px solid var(--border)', borderRadius:4, padding:'2px 8px', color:'var(--text-secondary)', cursor:'pointer' }}>Clear</button>
-                  </div>
-                  {(canonicalMarketSectors.length ? canonicalMarketSectors : []).map(name => (
-                    <label key={name} style={{ display:'flex', alignItems:'center', gap:8, padding:'5px 12px', cursor:'pointer', fontSize:12, color:'var(--text-primary)' }}
-                      onMouseEnter={e => { e.currentTarget.style.backgroundColor = 'var(--bg-hover)'; }}
-                      onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'transparent'; }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={selectedMarketSectors.includes(name)}
-                        onChange={() => {
-                          setSelectedMarketSectors(prev => (
-                            prev.includes(name) ? prev.filter(x => x !== name) : [...prev, name]
-                          ));
-                        }}
-                      />
-                      <span style={{ flex:1 }}>{name}</span>
-                    </label>
-                  ))}
-                  <div style={{ borderTop:'1px solid var(--border)', marginTop:6, padding:'8px 12px', display:'flex', justifyContent:'flex-start', alignItems:'center', gap:8 }}>
-                    <span style={{ fontSize:10, color:'var(--text-muted)' }}>⚙ Edit mapping in Data Management</span>
-                  </div>
-                </div>
-              )}
-            </div>
-            <ExternalFinancialsLinks symbol={selectedSymbol} instrumentType={selectedKind} />
+            {selectedKind === 'stock' && (
+              <ExternalFinancialsLinks symbol={selectedSymbol} instrumentType={selectedKind} />
+            )}
           </>
         )}
+
+        <div ref={sectorRef} style={{ position:'relative', flexShrink:0 }}>
+          <button
+            type="button"
+            title={selectedMarketSectors.length ? selectedMarketSectors.join(' · ') : 'Filter table & technical scans by market sector'}
+            onClick={() => { setSectorOpen(o => !o); setIndOpen(false); setViewOpen(false); }}
+            style={{
+              display:'flex', alignItems:'center', gap:6, backgroundColor: sectorOpen ? 'var(--bg-active)' : 'var(--bg-tertiary)',
+              border:`1px solid ${selectedMarketSectors.length ? 'var(--accent-blue)' : 'var(--border)'}`, borderRadius:5, padding:'0 10px 0 12px', height:28,
+              color: selectedMarketSectors.length ? 'var(--accent-blue)' : 'var(--text-secondary)', fontSize:12, fontWeight:600, cursor:'pointer', whiteSpace:'nowrap',
+            }}
+          >
+            <span style={{ fontFamily: 'system-ui, sans-serif' }}>Sector</span>
+            <SectorCountBadge n={selectedMarketSectors.length} />
+            <svg width="10" height="6" viewBox="0 0 10 6" fill="currentColor" style={{ opacity: 0.65, flexShrink: 0 }}><path d="M0 0l5 6 5-6z" /></svg>
+          </button>
+          {sectorOpen && sectorDropdownRect && (
+            <div style={{
+              position:'fixed', top: sectorDropdownRect.top, left: sectorDropdownRect.left, width: sectorDropdownRect.width,
+              maxHeight:'min(72vh, 360px)', overflowY:'auto', zIndex: CHART_TOOLBAR_OVERLAY_Z,
+              backgroundColor:'var(--bg-secondary)', border:'1px solid var(--border)', borderRadius:6, boxShadow:'0 8px 24px rgba(0,0,0,0.6)', padding:'8px 0',
+            }}>
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, padding:'2px 12px 8px' }}>
+                <div style={{ fontSize:10, fontWeight:700, color:'var(--text-muted)', textTransform:'uppercase', letterSpacing:'0.06em' }}>Market sectors (multi)</div>
+                <button type="button" onClick={() => setSelectedMarketSectors([])} style={{ fontSize:11, background:'none', border:'1px solid var(--border)', borderRadius:4, padding:'2px 8px', color:'var(--text-secondary)', cursor:'pointer' }}>Clear</button>
+              </div>
+              {(canonicalMarketSectors.length ? canonicalMarketSectors : []).map(name => (
+                <label key={name} style={{ display:'flex', alignItems:'center', gap:8, padding:'5px 12px', cursor:'pointer', fontSize:12, color:'var(--text-primary)' }}
+                  onMouseEnter={e => { e.currentTarget.style.backgroundColor = 'var(--bg-hover)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedMarketSectors.includes(name)}
+                    onChange={() => {
+                      setSelectedMarketSectors(prev => (
+                        prev.includes(name) ? prev.filter(x => x !== name) : [...prev, name]
+                      ));
+                    }}
+                  />
+                  <span style={{ flex:1 }}>{name}</span>
+                </label>
+              ))}
+              <div style={{ borderTop:'1px solid var(--border)', marginTop:6, padding:'8px 12px', display:'flex', justifyContent:'flex-start', alignItems:'center', gap:8 }}>
+                <span style={{ fontSize:10, color:'var(--text-muted)' }}>⚙ Edit mapping in Data Management</span>
+              </div>
+            </div>
+          )}
+        </div>
 
         <div style={{ flex:1, minWidth:8 }} />
 
@@ -1617,7 +1662,7 @@ export default function DashboardPage({
             {presetsOpen && (
               <div style={{
                 position:'absolute', top:'calc(100% + 4px)', left:0, zIndex: CHART_TOOLBAR_OVERLAY_Z,
-                minWidth:220, maxWidth:'min(480px, calc(100vw - 16px))',
+                width:280, minWidth:280, maxWidth:'min(480px, calc(100vw - 16px))',
                 backgroundColor:'var(--bg-secondary)', border:'1px solid var(--border)', borderRadius:6,
                 boxShadow:'0 8px 24px rgba(0,0,0,0.6)', overflow:'hidden', overflowX:'hidden',
               }}>
@@ -1629,30 +1674,82 @@ export default function DashboardPage({
                   ) : (
                     presets.map(p => {
                       const rowActive = p.name === activePresetName;
+                      const isRenaming = renamingPresetName === p.name;
                       return (
                       <div key={p.name}
-                        onClick={() => loadPreset(p)}
-                        style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:8, padding:'8px 14px', cursor:'pointer', fontSize:12, color:'var(--text-primary)', backgroundColor: rowActive ? 'rgba(56,139,253,0.14)' : 'transparent', borderLeft: rowActive ? '3px solid var(--accent-blue)' : '3px solid transparent' }}
-                        onMouseEnter={e => { if (!rowActive) e.currentTarget.style.backgroundColor='var(--bg-hover)'; }}
+                        onClick={isRenaming ? undefined : () => loadPreset(p)}
+                        style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:8, padding:'8px 14px', cursor: isRenaming ? 'default' : 'pointer', fontSize:12, color:'var(--text-primary)', backgroundColor: rowActive ? 'rgba(56,139,253,0.14)' : 'transparent', borderLeft: rowActive ? '3px solid var(--accent-blue)' : '3px solid transparent' }}
+                        onMouseEnter={e => { if (!rowActive && !isRenaming) e.currentTarget.style.backgroundColor='var(--bg-hover)'; }}
                         onMouseLeave={e => { e.currentTarget.style.backgroundColor = rowActive ? 'rgba(56,139,253,0.14)' : 'transparent'; }}
                       >
-                        <span
-                          title={p.name}
-                          style={{
-                            flex:1, minWidth:0, marginRight:4,
-                            whiteSpace:'normal', wordBreak:'break-word', lineHeight:1.35,
-                          }}
-                        >{p.name}</span>
-                        <div style={{ display:'flex', alignItems:'flex-start', gap:6, flexShrink:0 }}>
-                          <span style={{ fontSize:10, color:'var(--text-muted)', whiteSpace:'nowrap', paddingTop:2 }}>{p.filters.length} filter{p.filters.length !== 1 ? 's' : ''}</span>
-                          <button
-                            type="button"
-                            onClick={e => deletePreset(p.name, e)}
-                            style={{ background:'none', border:'none', color:'var(--text-muted)', fontSize:13, cursor:'pointer', padding:0, lineHeight:1, flexShrink:0 }}
-                            onMouseEnter={e => { e.currentTarget.style.color='var(--accent-red)'; }}
-                            onMouseLeave={e => { e.currentTarget.style.color='var(--text-muted)'; }}
-                          >×</button>
-                        </div>
+                        {isRenaming ? (
+                          <div style={{ display:'flex', alignItems:'center', gap:6, flex:1, minWidth:0 }}>
+                            <input
+                              value={renamePresetValue}
+                              onChange={e => setRenamePresetValue(e.target.value)}
+                              onClick={e => e.stopPropagation()}
+                              onKeyDown={e => {
+                                e.stopPropagation();
+                                if (e.key === 'Enter') renamePreset();
+                                if (e.key === 'Escape') cancelRenamePreset();
+                              }}
+                              autoFocus
+                              title={`${p.filters.length} filter${p.filters.length !== 1 ? 's' : ''}`}
+                              style={{ flex:1, minWidth:0, height:24, background:'var(--bg-tertiary)', color:'var(--text-primary)', border:'1px solid var(--border)', borderRadius:4, padding:'0 6px', fontSize:12 }}
+                            />
+                            <button
+                              type="button"
+                              title="Save rename"
+                              onClick={e => { e.stopPropagation(); renamePreset(); }}
+                              style={{ display:'flex', alignItems:'center', justifyContent:'center', width:22, height:22, flexShrink:0, border:'1px solid var(--border)', borderRadius:4, background:'var(--bg-tertiary)', cursor:'pointer', padding:0, color:'var(--accent-blue)', fontSize:12 }}
+                            >
+                              ✓
+                            </button>
+                            <button
+                              type="button"
+                              title="Cancel rename"
+                              onClick={e => { e.stopPropagation(); cancelRenamePreset(); }}
+                              style={{ display:'flex', alignItems:'center', justifyContent:'center', width:22, height:22, flexShrink:0, border:'1px solid var(--border)', borderRadius:4, background:'var(--bg-tertiary)', cursor:'pointer', padding:0, color:'var(--text-muted)', fontSize:13 }}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <span
+                              title={p.name}
+                              style={{
+                                flex:1, minWidth:0, marginRight:4,
+                                whiteSpace:'normal', wordBreak:'break-word', lineHeight:1.35,
+                              }}
+                            >{p.name}</span>
+                            <div style={{ display:'flex', alignItems:'flex-start', gap:6, flexShrink:0 }}>
+                              <span style={{ fontSize:10, color:'var(--text-muted)', whiteSpace:'nowrap', paddingTop:2 }}>{p.filters.length} filter{p.filters.length !== 1 ? 's' : ''}</span>
+                              <button
+                                type="button"
+                                className="cim-row-edit-btn"
+                                title="Rename preset"
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  setRenamingPresetName(p.name);
+                                  setRenamePresetValue(p.name);
+                                }}
+                              >
+                                <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                  <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61-3.447 1.148 1.148-3.447 8.61-8.61z" />
+                                </svg>
+                              </button>
+                              <button
+                                type="button"
+                                title="Delete preset"
+                                onClick={e => deletePreset(p.name, e)}
+                                style={{ background:'none', border:'none', color:'var(--text-muted)', fontSize:13, cursor:'pointer', padding:0, lineHeight:1, flexShrink:0 }}
+                                onMouseEnter={e => { e.currentTarget.style.color='var(--accent-red)'; }}
+                                onMouseLeave={e => { e.currentTarget.style.color='var(--text-muted)'; }}
+                              >×</button>
+                            </div>
+                          </>
+                        )}
                       </div>
                       );
                     })
