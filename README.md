@@ -128,7 +128,6 @@ See [.gitignore](.gitignore). In short:
 
 - `data\nse_data.db` and user `data\*.json`
 - `runtime\`, `node_modules\`, `frontend\build\`, `installer\output\`
-- License secrets: `config\.build_license_secret`, `config\.fx-dist.cfg`, `data\.cim-license`
 
 ---
 
