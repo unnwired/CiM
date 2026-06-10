@@ -7,6 +7,7 @@ config/.build_license_secret
 **/config/.build_license_secret
 config/build_license_secret
 config/build_license_secret.txt
+config/build_license_secret.example
 data/.cim-license
 **/data/.cim-license
 
