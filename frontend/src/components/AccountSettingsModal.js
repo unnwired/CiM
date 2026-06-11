@@ -9,7 +9,26 @@ import {
   totpEnroll,
 } from '../api/auth';
 
-export default function AccountSettingsModal({ open, onClose, licenseStatus, onSignedOut }) {
+const PREVIEW_MOCK_ENROLL = {
+  otpauth_uri: 'otpauth://totp/ChartsInMotion:preview%40chartsinmotion.dev?secret=JBSWY3DPEHPK3PXP&issuer=ChartsInMotion&digits=6&period=30',
+  secret_base32: 'JBSWY3DPEHPK3PXP',
+};
+
+const PREVIEW_MOCK_RECOVERY_CODES = [
+  'a1b2-c3d4-e5f6',
+  'g7h8-i9j0-k1l2',
+  'm3n4-o5p6-q7r8',
+  's9t0-u1v2-w3x4',
+  'y5z6-a7b8-c9d0',
+];
+
+export default function AccountSettingsModal({
+  open,
+  onClose,
+  licenseStatus,
+  previewMode = false,
+  onSignedOut,
+}) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [enroll, setEnroll] = useState(null);
@@ -17,13 +36,35 @@ export default function AccountSettingsModal({ open, onClose, licenseStatus, onS
   const [password, setPassword] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [recoveryCodes, setRecoveryCodes] = useState(null);
+  const [previewOffline, setPreviewOffline] = useState(false);
 
   if (!open) return null;
 
-  const email = licenseStatus?.email || '—';
-  const offline = licenseStatus?.offline_cached;
+  const effectiveStatus = previewMode
+    ? { ...licenseStatus, offline_cached: previewOffline }
+    : licenseStatus;
+  const email = effectiveStatus?.email || '—';
+  const offline = effectiveStatus?.offline_cached;
+
+  async function runPreviewAction(action) {
+    setBusy(true);
+    setMessage('');
+    await new Promise((r) => setTimeout(r, 350));
+    try {
+      action();
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function handleEnroll() {
+    if (previewMode) {
+      await runPreviewAction(() => {
+        setEnroll(PREVIEW_MOCK_ENROLL);
+        setMessage('');
+      });
+      return;
+    }
     setBusy(true);
     setMessage('');
     try {
@@ -37,6 +78,14 @@ export default function AccountSettingsModal({ open, onClose, licenseStatus, onS
   }
 
   async function handleConfirmTotp() {
+    if (previewMode) {
+      await runPreviewAction(() => {
+        setEnroll(null);
+        setConfirmCode('');
+        setMessage('Two-factor authentication enabled. (preview)');
+      });
+      return;
+    }
     setBusy(true);
     setMessage('');
     try {
@@ -53,6 +102,14 @@ export default function AccountSettingsModal({ open, onClose, licenseStatus, onS
   }
 
   async function handleDisableTotp() {
+    if (previewMode) {
+      await runPreviewAction(() => {
+        setPassword('');
+        setTotpCode('');
+        setMessage('Two-factor authentication disabled. (preview)');
+      });
+      return;
+    }
     setBusy(true);
     setMessage('');
     try {
@@ -68,6 +125,15 @@ export default function AccountSettingsModal({ open, onClose, licenseStatus, onS
   }
 
   async function handleRegenCodes() {
+    if (previewMode) {
+      await runPreviewAction(() => {
+        setRecoveryCodes(PREVIEW_MOCK_RECOVERY_CODES);
+        setPassword('');
+        setTotpCode('');
+        setMessage('');
+      });
+      return;
+    }
     setBusy(true);
     setMessage('');
     try {
@@ -83,6 +149,12 @@ export default function AccountSettingsModal({ open, onClose, licenseStatus, onS
   }
 
   async function handleSignOut() {
+    if (previewMode) {
+      setMessage('Signed out. (preview — app not reloaded)');
+      onSignedOut?.();
+      onClose();
+      return;
+    }
     setBusy(true);
     try {
       await logout();
@@ -115,14 +187,48 @@ export default function AccountSettingsModal({ open, onClose, licenseStatus, onS
         }}
         onClick={(e) => e.stopPropagation()}
       >
+        {previewMode && (
+          <div
+            style={{
+              marginBottom: 14,
+              padding: '8px 10px',
+              borderRadius: 6,
+              background: '#1a2332',
+              border: '1px solid #30363d',
+              fontSize: 11,
+              color: 'var(--text-muted)',
+            }}
+          >
+            <strong style={{ color: '#58a6ff' }}>Development preview</strong>
+            {' — mock account data; actions are simulated (no API calls).'}
+            <label
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                marginTop: 8,
+                cursor: 'pointer',
+                color: 'var(--text-primary)',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={previewOffline}
+                onChange={(e) => setPreviewOffline(e.target.checked)}
+              />
+              Simulate offline mode (cached session)
+            </label>
+          </div>
+        )}
+
         <h2 style={{ margin: '0 0 8px', fontSize: 16 }}>Account</h2>
         <p style={{ margin: '0 0 16px', fontSize: 12, color: 'var(--text-muted)' }}>
           Signed in as <strong style={{ color: 'var(--text-primary)' }}>{email}</strong>
           {offline ? ' · offline mode (cached session)' : ''}
         </p>
-        {licenseStatus?.offline_grace_until && (
+        {effectiveStatus?.offline_grace_until && (
           <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12 }}>
-            Offline grace until {String(licenseStatus.offline_grace_until).slice(0, 19).replace('T', ' ')}
+            Offline grace until {String(effectiveStatus.offline_grace_until).slice(0, 19).replace('T', ' ')}
           </p>
         )}
 
@@ -132,19 +238,27 @@ export default function AccountSettingsModal({ open, onClose, licenseStatus, onS
           </button>
         ) : (
           <div style={{ marginBottom: 12, fontSize: 12 }}>
-            <p style={{ margin: '0 0 10px' }}>Scan this QR code in Google Authenticator (or similar):</p>
+            <p style={{ margin: '0 0 10px', textAlign: 'center' }}>
+              Scan this QR code in Google Authenticator (or similar):
+            </p>
             {enroll.otpauth_uri ? (
               <div
                 style={{
-                  display: 'inline-block',
-                  padding: 12,
-                  borderRadius: 8,
-                  background: '#fff',
-                  border: '1px solid var(--border)',
+                  display: 'flex',
+                  justifyContent: 'center',
                   marginBottom: 10,
                 }}
               >
-                <QRCodeSVG value={enroll.otpauth_uri} size={180} level="M" includeMargin={false} />
+                <div
+                  style={{
+                    padding: 12,
+                    borderRadius: 8,
+                    background: '#fff',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  <QRCodeSVG value={enroll.otpauth_uri} size={180} level="M" includeMargin={false} />
+                </div>
               </div>
             ) : (
               <p style={{ color: 'var(--text-muted)' }}>QR data unavailable. Use manual key below.</p>

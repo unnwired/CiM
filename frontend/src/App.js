@@ -10,7 +10,7 @@ import IndexChartPage from './pages/IndexChartPage';
 import ConstituentsPage from './pages/ConstituentsPage';
 import WatchlistPage from './pages/WatchlistPage';
 import AdminPanel     from './components/AdminPanel';
-import { isDistributionProfile } from './config/exportProfile';
+import { isDistributionProfile, isDevAccountPreview, DEV_ACCOUNT_PREVIEW } from './config/exportProfile';
 import { dispatchChartDataUpdated, CHART_DATA_UPDATED_EVENT, MARKET_PULSE_REFRESH_EVENT, MOVERS_REFRESH_EVENT } from './chartEvents';
 import useAdminJobStatus from './hooks/useAdminJobStatus';
 import { searchUniverse } from './api/client';
@@ -1320,7 +1320,7 @@ function App() {
             onReorderChartTabs={reorderChartTabs}
             onOpenSectors={() => { setAdminOpen(true); setSettingsOpen(false); }}
             onOpenSettings={() => setSettingsOpen(v => !v)}
-            onOpenAccount={isDistributionProfile ? () => { setSettingsOpen(false); setAccountOpen(true); } : undefined}
+            onOpenAccount={(isDistributionProfile || isDevAccountPreview) ? () => { setSettingsOpen(false); setAccountOpen(true); } : undefined}
             onOpenKnowledgeBaseEditor={!isDistributionProfile ? () => {
               setSettingsOpen(false);
               setKnowledgeBaseEditorOpen(true);
@@ -1361,6 +1361,7 @@ function App() {
             productName={productName}
             onRefresh={handleGlobalRefresh}
             knowledgeBaseOpen={knowledgeBaseOpen}
+            previewAccountMenu={isDevAccountPreview}
           />
 
           <div
@@ -1614,11 +1615,12 @@ function App() {
           {licenseStatus.offline_grace_until ? ` (until ${String(licenseStatus.offline_grace_until).slice(0, 10)})` : ''}
         </div>
       )}
-      {accountOpen && isDistributionProfile && (
+      {accountOpen && (isDistributionProfile || isDevAccountPreview) && (
         <AccountSettingsModal
           open={accountOpen}
           onClose={() => setAccountOpen(false)}
-          licenseStatus={licenseStatus}
+          licenseStatus={isDistributionProfile ? licenseStatus : DEV_ACCOUNT_PREVIEW}
+          previewMode={isDevAccountPreview}
           onSignedOut={() => setAccountOpen(false)}
         />
       )}
@@ -2080,6 +2082,7 @@ function TabBar({
   onApplyCiMUpdate, cimUpdateBusy, appVersion, productName,
   onRefresh,
   knowledgeBaseOpen,
+  previewAccountMenu = false,
 }) {
   const dragIdx     = useRef(null);
   const dragType    = useRef(null);
@@ -2539,6 +2542,39 @@ function TabBar({
             zIndex: 200000,
             overflow: 'hidden',
           }}>
+            {onOpenAccount && (
+              <MenuItem
+                icon="👤"
+                label={previewAccountMenu ? 'Account (preview)' : 'Account'}
+                onClick={onOpenAccount}
+              />
+            )}
+            <div
+              style={{
+                padding: '8px 12px',
+                borderBottom: '1px solid var(--border-light)',
+                fontSize: 12,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+              }}
+            >
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ width: 16, textAlign: 'center' }}>📈</span>
+                Max Chart Tabs
+              </span>
+              <select
+                value={maxChartTabs}
+                onChange={e => onUpdateMaxChartTabs(Number(e.target.value))}
+                disabled={cacheBusy}
+                style={{ fontSize: 12 }}
+              >
+                {[3, 5, 8, 10, 15].map(n => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </div>
             <button
               type="button"
               onClick={onToggleAggressiveCache}
@@ -2589,56 +2625,27 @@ function TabBar({
               </span>
             </button>
             <MenuItem icon="🧹" label="Clear Cache Now" onClick={onClearCacheNow} disabled={cacheBusy} />
-            <div
-              style={{
-                padding: '8px 12px',
-                borderBottom: '1px solid var(--border-light)',
-                fontSize: 12,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 8,
-              }}
-            >
-              <span>Max chart tabs</span>
-              <select
-                value={maxChartTabs}
-                onChange={e => onUpdateMaxChartTabs(Number(e.target.value))}
-                disabled={cacheBusy}
-                style={{ fontSize: 12 }}
-              >
-                {[3, 5, 8, 10, 15].map(n => (
-                  <option key={n} value={n}>{n}</option>
-                ))}
-              </select>
-            </div>
             <MenuItem
               icon="✨"
-              label={earningsPlusRefreshRunning ? 'Refreshing Earnings+ Cache…' : 'Refresh Earnings+ Cache (This Month)'}
+              label={earningsPlusRefreshRunning ? 'Refreshing Earnings + Cache…' : 'Refresh Earnings + Cache (this month)'}
               onClick={onRefreshEarningsPlusCache}
               disabled={cacheBusy || earningsPlusRefreshRunning}
             />
             <MenuItem
               icon="🧱"
-              label={rebuildSnapshotsBusy ? "Rebuilding Indicator Snapshots…" : "Rebuild Indicator Snapshots (may take time)"}
+              label={rebuildSnapshotsBusy ? 'Rebuilding Indicator Snapshots…' : 'Rebuild Indicator Snapshots (may take time)'}
               onClick={onRebuildIndicatorSnapshots}
               disabled={cacheBusy || rebuildSnapshotsBusy || updateRunning}
             />
             {desktopCanRestartBackend && desktopCanReloadFrontend && (
               <MenuItem
                 icon="🔁"
-                label={(restartBackendBusy || reloadFrontendBusy) ? 'Restarting Backend + Frontend (Dev)…' : 'Restart Backend + Frontend (Dev)'}
+                label={(restartBackendBusy || reloadFrontendBusy) ? 'Restarting Backend & Frontend (Dev)…' : 'Restart Backend & Frontend (Dev)'}
                 onClick={onRestartBackendAndFrontendDev}
                 disabled={restartBackendBusy || reloadFrontendBusy || updateRunning}
               />
             )}
             <MenuItem icon="🗂" label="Data Management" onClick={onOpenSectors} />
-            {onOpenAccount && (
-              <MenuItem icon="👤" label="Account" onClick={onOpenAccount} />
-            )}
-            {onOpenKnowledgeBaseEditor && (
-              <MenuItem icon="📖" label="Edit Knowledge Base" onClick={onOpenKnowledgeBaseEditor} />
-            )}
             <MenuItem icon="🐞" label="Report Issue" onClick={onOpenIssue} />
             <MenuItem icon="💡" label="Feature Request" onClick={onOpenFeature} />
             <MenuItem
@@ -2648,7 +2655,10 @@ function TabBar({
               disabled={cacheBusy || cimUpdateBusy || updateRunning}
             />
             <MenuItem icon="❤" label="Support the Development" onClick={onOpenSupport} />
-            <MenuItem icon="ℹ" label="About Charts In Motion" onClick={onOpenAbout} />
+            <MenuItem icon="ℹ" label="About Charts in Motion" onClick={onOpenAbout} />
+            {onOpenKnowledgeBaseEditor && (
+              <MenuItem icon="📖" label="Edit Knowledge Base" onClick={onOpenKnowledgeBaseEditor} />
+            )}
           </div>
         )}
       </div>
