@@ -14,7 +14,7 @@ _PRODUCT_JSON = _REPO_ROOT / "config" / "product.json"
 @lru_cache(maxsize=1)
 def load_product_config() -> dict[str, Any]:
     if _PRODUCT_JSON.is_file():
-        with open(_PRODUCT_JSON, encoding="utf-8") as f:
+        with open(_PRODUCT_JSON, encoding="utf-8-sig") as f:
             return json.load(f)
     return {
         "displayName": "Charts In Motion",
@@ -44,6 +44,32 @@ def license_file_rel() -> str:
     return str(load_product_config().get("licenseFile") or "data/.cim-license")
 
 
+def session_file_rel() -> str:
+    return str(load_product_config().get("sessionFile") or "data/.cim-session.json")
+
+
+def license_api_url() -> str:
+    return os.getenv("CIM_LICENSE_API_URL", "").strip() or str(
+        load_product_config().get("licenseApiUrl") or "https://chartsinmotion.chartsinmotion.workers.dev"
+    )
+
+
+def offline_grace_days() -> int:
+    raw = load_product_config().get("offlineGraceDays", 7)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 7
+
+
+def max_devices_per_account() -> int:
+    raw = load_product_config().get("maxDevicesPerAccount", 2)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 2
+
+
 def update_zip_prefix() -> str:
     return str(load_product_config().get("updateZipPrefix") or "CiM-Update-")
 
@@ -62,3 +88,15 @@ def env_flag(name: str) -> bool:
 
 def is_dev_env() -> bool:
     return env_flag("CIM_DEV")
+
+
+def require_online_auth() -> bool:
+    """When set, dev trees use the sign-in shell until a valid online session exists."""
+    return env_flag("CIM_REQUIRE_ONLINE_AUTH")
+
+
+def online_only_activation() -> bool:
+    """When true, distribution installs skip vendor install keys (online session only)."""
+    if env_flag("CIM_ONLINE_ONLY"):
+        return True
+    return bool(load_product_config().get("onlineOnlyActivation"))

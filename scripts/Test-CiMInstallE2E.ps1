@@ -15,7 +15,7 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir
 . (Join-Path $ScriptDir "Get-CiMPaths.ps1")
-$fx = Get-CiMPaths -RepoRoot $RepoRoot
+$fx = Get-CiMPaths -RepoRoot $RepoRoot -DistributionKind Encrypted
 $ExportRoot = $fx.ExportRoot
 $VendorFile = Get-CiMDistProfilePath -InstallRoot $ExportRoot -Paths $fx
 
@@ -47,7 +47,7 @@ if (-not $SkipRebuild) {
     Write-Host "[1-2/6] SkipRebuild (using existing export + installer)"
 }
 
-$setupExe = Join-Path $RepoRoot "installer\output\CiMSetup-$Version.exe"
+$setupExe = Join-Path $fx.SetupOutputDir "CiMSetup-$Version.exe"
 if (-not (Test-Path -LiteralPath $setupExe)) {
     throw "Installer not found: $setupExe"
 }

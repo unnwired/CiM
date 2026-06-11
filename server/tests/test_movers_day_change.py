@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 
 import pandas as pd
@@ -78,6 +79,25 @@ class MoversDayChangeTests(unittest.TestCase):
         self.assertEqual(list(gainers["symbol"]), ["A"])
         losers = md.filter_day_change_by_side(df, "losers")
         self.assertEqual(list(losers["symbol"]), ["C"])
+
+    def test_session_adjustment_refreshes_when_todays_bar_exists_and_screener_moved(self):
+        today_s = datetime.now(md.IST).strftime("%Y-%m-%d")
+        df = pd.DataFrame([
+            _row(
+                "TCIFINANCE",
+                change_pct=10.0,
+                eod_close=23.0,
+                screener_price=24.5,
+                screener_change_pct=10.0,
+                as_of_date=today_s,
+            ),
+        ])
+        df["eod_prev_close"] = 20.91
+        with patch.object(md, "_session_day_intraday_active", return_value=True):
+            out = md.apply_session_day_adjustment(df)
+        chg = float(out.loc[0, "change_pct"])
+        self.assertGreater(chg, 10.0)
+        self.assertAlmostEqual(float(out.loc[0, "price"]), 24.5, places=2)
 
     def test_gainers_top_list_has_no_zero_after_session_adjustment(self):
         df = pd.DataFrame([

@@ -16,7 +16,6 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "Get-CiMPaths.ps1")
 $RepoRoot = Split-Path -Parent $ScriptDir
-$fx = Get-CiMPaths -RepoRoot $RepoRoot
 
 function Test-PowerShellScriptSyntax {
     param([Parameter(Mandatory)][string[]]$Paths)
@@ -48,7 +47,11 @@ function Copy-ClientPowerShellScript {
 }
 
 if (-not $ExportRoot) {
+    $fx = Get-CiMPaths -RepoRoot $RepoRoot -DistributionKind Encrypted
     $ExportRoot = $fx.ExportRoot
+} else {
+    $fx = Resolve-CiMPathsForExportRoot -ExportRoot $ExportRoot -RepoRoot $RepoRoot
+    $ExportRoot = [System.IO.Path]::GetFullPath($ExportRoot)
 }
 if (-not $Version) {
     $Version = if (Test-Path -LiteralPath $fx.VersionFile) { (Get-Content -LiteralPath $fx.VersionFile -Raw).Trim() } else { "1.0.0" }

@@ -1,11 +1,15 @@
-; Charts In Motion installer — unsigned, LZMA2, machine-code + install-key gate
+; Charts In Motion installer — unsigned, LZMA2
+; OnlineOnlyActivation=1: no vendor install key (user signs in after install)
 #define MyAppName "Charts In Motion"
 ; AppVersion and SourcePayload passed by build_installer.ps1 (/DAppVersion=...)
 #ifndef AppVersion
   #define AppVersion "1.0.0"
 #endif
 #ifndef SourcePayload
-  #define SourcePayload "output\CiM"
+  #define SourcePayload "Encrypted\CiM"
+#endif
+#ifndef InstallerOutputDir
+  #define InstallerOutputDir "Encrypted"
 #endif
 ; License secret: build_installer.ps1 writes generated_license_secret.pas (never use #define — # in secret breaks ISPP).
 
@@ -16,7 +20,7 @@ AppVersion={#AppVersion}
 AppVerName={#MyAppName} {#AppVersion}
 DefaultDirName={autopf}\CiM
 DefaultGroupName=Charts In Motion
-OutputDir=output
+OutputDir={#InstallerOutputDir}
 OutputBaseFilename=CiMSetup-{#AppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -41,7 +45,7 @@ Source: "{#SourcePayload}\data\layout.json"; DestDir: "{app}\data"; Flags: ignor
 Source: "{#SourcePayload}\data\saved_filters.json"; DestDir: "{app}\data"; Flags: ignoreversion onlyifdoesntexist skipifsourcedoesntexist
 Source: "{#SourcePayload}\data\screener_session.json"; DestDir: "{app}\data"; Flags: ignoreversion onlyifdoesntexist skipifsourcedoesntexist
 Source: "{#SourcePayload}\data\screener_profile\*"; DestDir: "{app}\data\screener_profile"; Flags: ignoreversion onlyifdoesntexist recursesubdirs createallsubdirs skipifsourcedoesntexist
-Source: "output\version.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#InstallerOutputDir}\version.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\scripts\CiMApplyUpdate.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "..\scripts\CiMDownloadUpdate.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "..\scripts\Repair-CiMLicense.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
@@ -50,7 +54,7 @@ Source: "..\Repair-CiMLicense-Auto.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Apply-Update.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\scripts\_Apply-LocalUpdate.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "..\scripts\Apply-LocalUpdate-Entry.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
-Source: "output\UPDATE_README.txt"; DestDir: "{app}\UPDATE"; DestName: "README.txt"; Flags: ignoreversion onlyifdoesntexist skipifsourcedoesntexist
+Source: "{#InstallerOutputDir}\UPDATE_README.txt"; DestDir: "{app}\UPDATE"; DestName: "README.txt"; Flags: ignoreversion onlyifdoesntexist skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\Charts In Motion"; Filename: "{app}\start_cim.bat"; WorkingDir: "{app}"
@@ -60,6 +64,18 @@ Name: "{autodesktop}\Charts In Motion"; Filename: "{app}\start_cim.bat"; Working
 Filename: "{app}\start_cim.bat"; Description: "Launch Charts In Motion"; Flags: nowait postinstall skipifsilent
 
 [Code]
+#ifdef OnlineOnlyActivation
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+  begin
+    SaveStringToFile(ExpandConstant('{app}\version.txt'), '{#AppVersion}', False);
+  end;
+end;
+
+#else
+
 var
   LicenseMachinePage, LicenseKeyPage: TWizardPage;
   MachineCodeEdit, KeyEdit: TNewEdit;
@@ -67,8 +83,8 @@ var
   MachineInstrLabel, KeyInstrLabel, KeyFormatLabel: TNewStaticText;
   StoredMachineCode, StoredInstallKey: String;
 
-#include "output\generated_license_secret.pas"
-#include "output\license_validate.pas"
+#include "{#InstallerOutputDir}\generated_license_secret.pas"
+#include "{#InstallerOutputDir}\license_validate.pas"
 
 procedure CopyMachineCodeClick(Sender: TObject);
 var
@@ -260,3 +276,5 @@ begin
       mbError,
       MB_OK);
 end;
+
+#endif

@@ -25,9 +25,19 @@ APP_CODE_SALT = b"flowx-app-code-v1"
 LICENSE_FILE = "data/.cim-license"
 DIST_PROFILE_FILE = "config/.fx-dist.cfg"
 LEGACY_DIST_PROFILE_FILE = "config/.flowx_vendor_secret"
+PLAINTEXT_DIST_MARKER = "config/.cim-plaintext-dist"
+ONLINE_ONLY_MARKER = "config/.cim-online-only"
 VERSION_FILE = "version.txt"
 PLAINTEXT_BOOTSTRAP_STEMS = frozenset(
-    {"__init__", "app_code_crypto", "cim_bootstrap", "product_config", "_cim_dist_embedded"}
+    {
+        "__init__",
+        "app_code_crypto",
+        "cim_bootstrap",
+        "product_config",
+        "_cim_dist_embedded",
+        "license_client",
+        "license_routes",
+    }
 )
 
 
@@ -40,11 +50,27 @@ def has_embedded_distribution_secret(base_dir: Path) -> bool:
     return (base_dir / "server" / "_cim_dist_embedded.py").is_file()
 
 
+def is_plaintext_distribution(base_dir: Path) -> bool:
+    """Client install built with Build-CiM-Plaintext (readable source, online auth gate)."""
+    return (base_dir / PLAINTEXT_DIST_MARKER).is_file() and has_embedded_distribution_secret(base_dir)
+
+
+def is_online_only_distribution(base_dir: Path) -> bool:
+    """Shipped install activates only via online sign-in (no vendor install key)."""
+    if (base_dir / ONLINE_ONLY_MARKER).is_file():
+        return True
+    from server.product_config import online_only_activation
+
+    return online_only_activation()
+
+
 def is_development_tree(base_dir: Path) -> bool:
     """Repo / dev working copy — not a client-only distribution install."""
     server_py = base_dir / "server" / "server.py"
     profile = distribution_profile_path(base_dir)
     has_embedded = has_embedded_distribution_secret(base_dir)
+    if is_plaintext_distribution(base_dir):
+        return False
     is_distribution = (
         (profile.is_file() or has_embedded)
         and (has_encrypted_server(base_dir) or has_encrypted_js(base_dir))
@@ -185,7 +211,9 @@ def current_machine_code() -> str:
 
 
 def license_valid(base_dir: Path) -> bool:
-    if is_development_tree(base_dir):
+    from server.product_config import require_online_auth
+
+    if is_development_tree(base_dir) and not require_online_auth():
         return True
     machine, key = read_license(base_dir)
     if not machine or not key:
@@ -194,6 +222,23 @@ def license_valid(base_dir: Path) -> bool:
         return False
     live = current_machine_code()
     return hmac.compare_digest(machine.strip().upper(), live.strip().upper())
+
+
+def access_granted(base_dir: Path) -> bool:
+    """Online-only distribution: valid session. Legacy: offline key OR online session."""
+    from server.product_config import require_online_auth
+
+    if is_development_tree(base_dir) and not require_online_auth():
+        return True
+    if is_online_only_distribution(base_dir):
+        from server.license_client import online_session_valid
+
+        return online_session_valid(base_dir)
+    if license_valid(base_dir):
+        return True
+    from server.license_client import online_session_valid
+
+    return online_session_valid(base_dir)
 
 
 def encrypt_bytes(plaintext: bytes, key: Optional[bytes] = None, base_dir: Optional[Path] = None) -> bytes:
@@ -260,6 +305,13 @@ def needs_encrypted_bootstrap(base_dir: Path) -> bool:
     return has_encrypted_server(base_dir) or has_encrypted_js(base_dir)
 
 
+def needs_distribution_bootstrap(base_dir: Path) -> bool:
+    """Encrypted or plaintext distribution — use cim_bootstrap (auth gate + full app)."""
+    if is_development_tree(base_dir):
+        return False
+    return needs_encrypted_bootstrap(base_dir) or is_plaintext_distribution(base_dir)
+
+
 def iter_server_encrypt_targets(server_dir: Path) -> Iterable[Path]:
     for path in sorted(server_dir.rglob("*.pyc")):
         if path.stem in PLAINTEXT_BOOTSTRAP_STEMS:
@@ -285,6 +337,19 @@ def decrypt_server_to_cache(base_dir: Path, cache_dir: Path, key: Optional[bytes
         out_path = cache_server / rel.with_suffix("")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(decrypt_bytes(enc_path.read_bytes(), key))
+    for plain_path in sorted(server_dir.rglob("*")):
+        if not plain_path.is_file():
+            continue
+        if plain_path.suffix == ".enc":
+            continue
+        if plain_path.suffix not in {".py", ".pyc"}:
+            continue
+        rel = plain_path.relative_to(server_dir)
+        out_path = cache_server / rel
+        if out_path.exists():
+            continue
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(plain_path, out_path)
     init_src = server_dir / "__init__.py"
     if init_src.exists():
         dst = cache_server / "__init__.py"
@@ -382,9 +447,9 @@ def cache_static_ready(cache_dir: Path) -> bool:
 def ensure_app_cache(base_dir: Path) -> Path:
     if is_development_tree(base_dir) or not needs_encrypted_bootstrap(base_dir):
         return base_dir
-    if not license_valid(base_dir):
+    if not access_granted(base_dir):
         raise RuntimeError(
-            "Charts In Motion license missing or invalid. Re-run the installer or contact support."
+            "Charts In Motion license missing or invalid. Sign in or re-run the installer."
         )
     cache_dir = app_cache_root(base_dir)
     if cache_is_current(base_dir, cache_dir):

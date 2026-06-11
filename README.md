@@ -62,12 +62,12 @@ More detail: [README_START_STOP.md](README_START_STOP.md)
 .\Build-CiM.ps1
 ```
 
-Outputs are written locally under `installer\output\` (gitignored): export tree, Windows installer, and update ZIP.
+Outputs are written locally under `installer\Plaintext\` or `installer\Encrypted\` (gitignored): export tree (`CiM\`), Windows installer (`CiMSetup-*.exe`), and update package (`CiM-Update-*`).
 
 **Smoke test** (on the export tree):
 
 ```powershell
-.\scripts\Test-CiMPackagedSmoke.ps1 -InstallRoot "installer\output\CiM"
+.\scripts\Test-CiMPackagedSmoke.ps1 -InstallRoot "installer\Encrypted\CiM"
 ```
 
 Publish client updates to [CiM-Updates Releases](https://github.com/unnwired/CiM-Updates/releases) with tag `v{version}`.

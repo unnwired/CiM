@@ -99,7 +99,7 @@ foreach ($line in $missing) {
 }
 Write-Host ""
 Write-Host "Fix these before running Build-CiM.ps1. Installer sources belong in installer\ and must be" -ForegroundColor Yellow
-Write-Host "committed to git (only installer\output\ is gitignored). If files were deleted locally," -ForegroundColor Yellow
+Write-Host "committed to git (installer\Plaintext\ and installer\Encrypted\ are gitignored). If files were deleted locally," -ForegroundColor Yellow
 Write-Host "restore installer\CiM.iss, installer\license_validate.pas, and installer\UPDATE_README.txt" -ForegroundColor Yellow
 Write-Host "from version control - not from backups_full unless git is unavailable." -ForegroundColor Yellow
 Write-Host ""

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Charts In Motion — Sign in</title>
+  <link rel="stylesheet" href="/auth-static/auth.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Charts In Motion</h1>
+      <p class="sub">Sign in or create an account to continue</p>
+    </header>
+
+    <nav class="tabs">
+      <button type="button" class="tab active" data-tab="signin">Sign in</button>
+      <button type="button" class="tab" data-tab="signup">Sign up</button>
+      <button type="button" class="tab" data-tab="reset">Reset password</button>
+    </nav>
+
+    <section id="panel-signin" class="panel active">
+      <form id="form-signin">
+        <label>Email<input type="email" name="email" required autocomplete="username" /></label>
+        <label>Password<input type="password" name="password" required autocomplete="current-password" /></label>
+        <label id="totp-wrap" class="hidden">Authenticator code<input type="text" name="totp_code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="6 digits" /></label>
+        <button type="submit" class="primary">Sign in</button>
+      </form>
+    </section>
+
+    <section id="panel-signup" class="panel">
+      <form id="form-signup">
+        <label>Email<input type="email" name="email" required autocomplete="username" /></label>
+        <label>Password<input type="password" name="password" required minlength="8" autocomplete="new-password" /></label>
+        <label>Confirm password<input type="password" name="confirm" required minlength="8" autocomplete="new-password" /></label>
+        <button type="submit" class="primary">Create account</button>
+      </form>
+    </section>
+
+    <section id="panel-reset" class="panel">
+      <form id="form-reset">
+        <label>Email<input type="email" name="email" required /></label>
+        <label>Recovery code<input type="text" name="recovery_code" required placeholder="XXXX-XXXX-XXXX" /></label>
+        <label>New password<input type="password" name="new_password" required minlength="8" /></label>
+        <button type="submit" class="primary">Reset password</button>
+      </form>
+    </section>
+
+    <p id="message" class="message" role="alert"></p>
+  </div>
+
+  <dialog id="recovery-dialog">
+    <h2>Save your recovery codes</h2>
+    <p>Store these in a safe place. They are shown <strong>once</strong> and are required to reset your password.</p>
+    <pre id="recovery-codes"></pre>
+    <label class="recovery-ack" for="recovery-saved">
+      <input type="checkbox" id="recovery-saved" />
+      <span>I have saved these recovery codes</span>
+    </label>
+    <button type="button" id="recovery-continue" class="primary" disabled>Continue to sign in</button>
+  </dialog>
+
+  <script src="/auth-static/auth.js"></script>
+</body>
+</html>

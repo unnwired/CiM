@@ -13,6 +13,10 @@ import importlib.util
 import smtplib
 import pandas as pd
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from fastapi import FastAPI, Query, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -92,7 +96,8 @@ knowledge_base = _load_knowledge_base()
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 CSV_PATH = DATA_DIR / "nse_dataset.csv"
-DB_PATH  = DATA_DIR / "nse_data.db"
+_db_override = os.getenv("CIM_DB_PATH", "").strip()
+DB_PATH = Path(_db_override) if _db_override else DATA_DIR / "nse_data.db"
 
 import sys as _sys
 if str(BASE_DIR) not in _sys.path:
@@ -111,6 +116,13 @@ from tradingview_earnings import (  # noqa: E402
     fetch_earnings_calendar,
     fetch_upcoming_estimates_for_symbols,
 )
+from server.core.cache import (
+    CACHE_PROFILE_AGGRESSIVE,
+    CACHE_PROFILE_NORMAL,
+    CHART_CACHE_SCHEMA as _CHART_CACHE_SCHEMA,
+    caches as _app_caches,
+)
+from server.core.migrations import run_startup_migrations
 import screener_quarters  # noqa: E402
 from screener_symbol_slug import SCREENER_COMPANY_SLUG_ALIASES  # noqa: E402
 SCRAPE_INDICES_PATH = BASE_DIR / "scrape_indices.py"
@@ -200,6 +212,23 @@ try:
 except Exception as _cim_update_err:
     print(f"[update] routes not loaded: {_cim_update_err}")
 
+try:
+    from server.license_routes import configure_base_dir as _license_configure_base_dir
+    from server.license_routes import router as _license_router
+
+    _license_configure_base_dir(BASE_DIR)
+    app.include_router(_license_router)
+except Exception as _license_err:
+    print(f"[license] routes not loaded: {_license_err}")
+
+try:
+    from server.routers import settings as _settings_router
+
+    _settings_router.configure_layout(DATA_DIR)
+    app.include_router(_settings_router.router)
+except Exception as _settings_err:
+    print(f"[settings] routes not loaded: {_settings_err}")
+
 FRONTEND_BUILD_DIR = BASE_DIR / "frontend" / "build"
 if FRONTEND_BUILD_DIR.exists():
     static_dir = FRONTEND_BUILD_DIR / "static"
@@ -208,10 +237,17 @@ if FRONTEND_BUILD_DIR.exists():
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        o.strip()
+        for o in os.getenv(
+            "CIM_ALLOWED_ORIGINS",
+            "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000",
+        ).split(",")
+        if o.strip()
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 
@@ -220,6 +256,7 @@ def _on_startup():
     if DB_PATH.exists():
         mode = _ensure_wal_mode(DB_PATH)
         print(f"[db] journal_mode={mode}")
+        run_startup_migrations(DB_PATH)
     market_sectors.ensure_screener_sector_columns(DB_PATH)
     market_sectors.ensure_screener_isin_column(DB_PATH)
     screener_quarters.ensure_screener_quarterly_table(DB_PATH)
@@ -1505,29 +1542,11 @@ def _read_symbol_earnings_chart_events(conn: sqlite3.Connection, symbol: str) ->
 # ──────────────────────────────────────────────
 
 _stock_df: Optional[pd.DataFrame] = None
-_chart_cache: dict = {}
-# Cache key version: bump when chart JSON shape / indicator semantics change.
-_CHART_CACHE_SCHEMA = 3
-CHART_CACHE_TTL: int = 300  # 5 minutes
-CHART_CACHE_MAX_ENTRIES: int = 300
-_filter_cache: dict = {}
-_snapshot_filter_coverage_cache: dict = {}
-FILTER_CACHE_TTL: int = 120  # 2 minutes
-FILTER_CACHE_MAX_ENTRIES: int = 500
-
-CACHE_PROFILE_NORMAL = {
-    "chart_ttl": 300,
-    "chart_max_entries": 300,
-    "filter_ttl": 120,
-    "filter_max_entries": 500,
-}
-CACHE_PROFILE_AGGRESSIVE = {
-    "chart_ttl": 1800,
-    "chart_max_entries": 1200,
-    "filter_ttl": 600,
-    "filter_max_entries": 2000,
-}
-AGGRESSIVE_CACHE_RAM = False
+CHART_CACHE_TTL: int = _app_caches.chart_ttl
+CHART_CACHE_MAX_ENTRIES: int = _app_caches.chart_max_entries
+FILTER_CACHE_TTL: int = _app_caches.filter_ttl
+FILTER_CACHE_MAX_ENTRIES: int = _app_caches.filter_max_entries
+AGGRESSIVE_CACHE_RAM: bool = _app_caches.aggressive
 
 
 def _load_layout_file() -> dict:
@@ -1551,46 +1570,31 @@ def _save_layout_merge(extra: dict):
 
 def set_cache_mode(enabled: bool):
     global AGGRESSIVE_CACHE_RAM, CHART_CACHE_TTL, CHART_CACHE_MAX_ENTRIES, FILTER_CACHE_TTL, FILTER_CACHE_MAX_ENTRIES
-    AGGRESSIVE_CACHE_RAM = bool(enabled)
-    profile = CACHE_PROFILE_AGGRESSIVE if AGGRESSIVE_CACHE_RAM else CACHE_PROFILE_NORMAL
-    CHART_CACHE_TTL = int(profile["chart_ttl"])
-    CHART_CACHE_MAX_ENTRIES = int(profile["chart_max_entries"])
-    FILTER_CACHE_TTL = int(profile["filter_ttl"])
-    FILTER_CACHE_MAX_ENTRIES = int(profile["filter_max_entries"])
+    _app_caches.set_mode(enabled)
+    AGGRESSIVE_CACHE_RAM = _app_caches.aggressive
+    CHART_CACHE_TTL = _app_caches.chart_ttl
+    CHART_CACHE_MAX_ENTRIES = _app_caches.chart_max_entries
+    FILTER_CACHE_TTL = _app_caches.filter_ttl
+    FILTER_CACHE_MAX_ENTRIES = _app_caches.filter_max_entries
+
 
 def get_chart_cache(symbol, timeframe, ema_periods):
-    key  = (symbol.upper(), timeframe, tuple(sorted(ema_periods)), _CHART_CACHE_SCHEMA)
-    item = _chart_cache.get(key)
-    if item is None:
-        return None
-    if time_module.time() - item["ts"] > CHART_CACHE_TTL:
-        del _chart_cache[key]
-        return None
-    return item["data"]
+    return _app_caches.get_chart(symbol, timeframe, ema_periods)
 
 
 def set_chart_cache(symbol, timeframe, ema_periods, data):
-    key = (symbol.upper(), timeframe, tuple(sorted(ema_periods)), _CHART_CACHE_SCHEMA)
-    if CHART_CACHE_MAX_ENTRIES > 0 and key not in _chart_cache and len(_chart_cache) >= CHART_CACHE_MAX_ENTRIES:
-        oldest_key = min(_chart_cache, key=lambda k: _chart_cache[k].get("ts", 0))
-        _chart_cache.pop(oldest_key, None)
-    _chart_cache[key] = {"data": data, "ts": time_module.time()}
+    _app_caches.set_chart(symbol, timeframe, ema_periods, data)
+
 
 def invalidate_chart_cache(symbol=None):
-    global _chart_cache
-    if symbol is None:
-        _chart_cache = {}
-        try:
+    _app_caches.invalidate_chart(symbol)
+    try:
+        if symbol is None:
             market_map.invalidate_cache()
-        except Exception:
-            pass
-    else:
-        sym_u = symbol.upper()
-        _chart_cache = {k: v for k, v in _chart_cache.items() if not (isinstance(k, tuple) and len(k) > 0 and k[0] == sym_u)}
-        try:
+        else:
             market_map.invalidate_cache(symbol)
-        except Exception:
-            pass
+    except Exception:
+        pass
     invalidate_filter_cache()
 
 
@@ -1921,28 +1925,15 @@ def _normalize_filter_body(body: dict) -> dict:
 
 
 def get_filter_cache(endpoint: str, body: dict):
-    key = (endpoint, json.dumps(_normalize_filter_body(body), sort_keys=True, separators=(",", ":")))
-    item = _filter_cache.get(key)
-    if item is None:
-        return None
-    if time_module.time() - item["ts"] > FILTER_CACHE_TTL:
-        del _filter_cache[key]
-        return None
-    return item["data"]
+    return _app_caches.get_filter(endpoint, body)
 
 
 def set_filter_cache(endpoint: str, body: dict, data: dict):
-    key = (endpoint, json.dumps(_normalize_filter_body(body), sort_keys=True, separators=(",", ":")))
-    if FILTER_CACHE_MAX_ENTRIES > 0 and key not in _filter_cache and len(_filter_cache) >= FILTER_CACHE_MAX_ENTRIES:
-        oldest_key = min(_filter_cache, key=lambda k: _filter_cache[k].get("ts", 0))
-        _filter_cache.pop(oldest_key, None)
-    _filter_cache[key] = {"data": data, "ts": time_module.time()}
+    _app_caches.set_filter(endpoint, body, data)
 
 
 def invalidate_filter_cache():
-    global _filter_cache, _snapshot_filter_coverage_cache
-    _filter_cache = {}
-    _snapshot_filter_coverage_cache = {}
+    _app_caches.invalidate_filters()
 
 
 def _sector_allowed_symbols(body: dict) -> Optional[Set[str]]:
@@ -2359,9 +2350,8 @@ def _indicator_snapshots_cover_universe(timeframe: str) -> bool:
     Return True only if indicator_snapshots has enough rows for this timeframe to drive
     filter/screener logic. A tiny partial rebuild (e.g. a few symbols) must not cap results.
     """
-    global _snapshot_filter_coverage_cache
     now = time_module.time()
-    cached = _snapshot_filter_coverage_cache.get(timeframe)
+    cached = _app_caches.get_snapshot_coverage(timeframe)
     if cached and (now - cached.get("ts", 0)) <= _SNAPSHOT_COVERAGE_CACHE_TTL_SEC:
         return bool(cached.get("ok"))
     ok = False
@@ -2379,7 +2369,7 @@ def _indicator_snapshots_cover_universe(timeframe: str) -> bool:
             ok = n_scr > 0 and (n_snap / n_scr) >= SNAPSHOT_FILTER_MIN_COVERAGE
         finally:
             conn.close()
-    _snapshot_filter_coverage_cache[timeframe] = {"ts": now, "ok": ok}
+    _app_caches.set_snapshot_coverage(timeframe, ok)
     return ok
 
 
@@ -3462,7 +3452,7 @@ def get_timeframes():
 
 
 # ──────────────────────────────────────────────
-# LAYOUT PERSISTENCE
+# LAYOUT PERSISTENCE (legacy handlers — prefer server/routers/settings.py)
 # ──────────────────────────────────────────────
 
 LAYOUT_PATH = DATA_DIR / "layout.json"
@@ -3471,37 +3461,10 @@ DEFAULT_LAYOUT = {
     "stochrsi":           130,
     "macd":               130,
     "dashboardPaneWidth": 320,
+    "maxChartTabs":       5,
 }
 
-@app.get("/api/layout")
-def get_layout():
-    if LAYOUT_PATH.exists():
-        try:
-            with open(LAYOUT_PATH, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return DEFAULT_LAYOUT
-
-@app.post("/api/layout")
-def save_layout(payload: dict):
-    try:
-        LAYOUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        current = {}
-        if LAYOUT_PATH.exists():
-            try:
-                with open(LAYOUT_PATH, "r") as f:
-                    current = json.load(f)
-                    if not isinstance(current, dict):
-                        current = {}
-            except Exception:
-                current = {}
-        merged = {**current, **payload}
-        with open(LAYOUT_PATH, "w") as f:
-            json.dump(merged, f, indent=2)
-        return {"status": "saved"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# Routes moved to server/routers/settings.py
 
 
 _INSTRUMENT_NOTE_TYPES = frozenset({"stock", "index"})
@@ -3993,8 +3956,8 @@ def get_cache_settings():
         "chartCacheMaxEntries": CHART_CACHE_MAX_ENTRIES,
         "filterCacheTtlSec": FILTER_CACHE_TTL,
         "filterCacheMaxEntries": FILTER_CACHE_MAX_ENTRIES,
-        "chartCacheEntries": len(_chart_cache),
-        "filterCacheEntries": len(_filter_cache),
+        "chartCacheEntries": _app_caches.chart_entries,
+        "filterCacheEntries": _app_caches.filter_entries,
     }
 
 
@@ -4022,8 +3985,8 @@ def clear_cache():
     invalidate_chart_cache()
     return {
         "status": "cleared",
-        "chartCacheEntries": len(_chart_cache),
-        "filterCacheEntries": len(_filter_cache),
+        "chartCacheEntries": _app_caches.chart_entries,
+        "filterCacheEntries": _app_caches.filter_entries,
     }
 
 
@@ -4089,10 +4052,30 @@ def submit_feedback(payload: dict = Body(...)):
         raise HTTPException(status_code=400, detail="Message should be at least 10 characters")
 
     if not FEEDBACK_SMTP_HOST:
-        raise HTTPException(
-            status_code=503,
-            detail="Feedback email is not configured. Set NSE_PULSE_SMTP_HOST and SMTP credentials.",
+        feedback_path = DATA_DIR / "feedback.json"
+        feedback_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = []
+        if feedback_path.exists():
+            try:
+                with open(feedback_path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+                if not isinstance(existing, list):
+                    existing = []
+            except Exception:
+                existing = []
+        existing.append(
+            {
+                "type": fb_type,
+                "subject": subject,
+                "message": message,
+                "contact_email": contact_email,
+                "app_context": app_context,
+                "saved_at": datetime.utcnow().isoformat() + "Z",
+            }
         )
+        with open(feedback_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+        return {"status": "saved_local", "path": str(feedback_path)}
 
     email_msg = EmailMessage()
     email_msg["Subject"] = f"[Charts In Motion] {fb_type.title()} - {subject}"

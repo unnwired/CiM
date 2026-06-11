@@ -9,7 +9,7 @@
   is used by Generate-CiMInstallKey.ps1 and runtime decryption.
 
 .PARAMETER ExportRoot
-  Default: installer\output\CiM under the repo.
+  Default: installer\Encrypted\CiM under the repo.
 #>
 [CmdletBinding()]
 param(
@@ -21,14 +21,16 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "Get-CiMPaths.ps1")
 $RepoRoot = Split-Path -Parent $ScriptDir
-$fx = Get-CiMPaths -RepoRoot $RepoRoot
 if (-not $ExportRoot) {
+    $fx = Get-CiMPaths -RepoRoot $RepoRoot -DistributionKind Encrypted
     $ExportRoot = $fx.ExportRoot
+} else {
+    if (-not [System.IO.Path]::IsPathRooted($ExportRoot)) {
+        $ExportRoot = Join-Path $RepoRoot $ExportRoot
+    }
+    $ExportRoot = [System.IO.Path]::GetFullPath($ExportRoot)
+    $fx = Resolve-CiMPathsForExportRoot -ExportRoot $ExportRoot -RepoRoot $RepoRoot -DefaultKind Encrypted
 }
-if (-not [System.IO.Path]::IsPathRooted($ExportRoot)) {
-    $ExportRoot = Join-Path $RepoRoot $ExportRoot
-}
-$ExportRoot = [System.IO.Path]::GetFullPath($ExportRoot)
 
 function Test-ExportPackageComplete {
     param([string]$Root)
@@ -194,7 +196,10 @@ print(f'Encrypted {enc_count} files under {root}')
 
 # Distribution must not ship plaintext server modules alongside *.pyc.enc — that makes
 # is_development_tree() true and breaks /static JS (blank Electron shell).
-keep_server_py = frozenset({'__init__.py', 'app_code_crypto.py', 'cim_bootstrap.py', 'product_config.py', '_cim_dist_embedded.py'})
+keep_server_py = frozenset({
+    '__init__.py', 'app_code_crypto.py', 'cim_bootstrap.py', 'product_config.py',
+    '_cim_dist_embedded.py', 'license_client.py', 'license_routes.py',
+})
 for py_path in sorted(server_dir.glob('*.py')):
     if py_path.name in keep_server_py:
         continue
@@ -256,7 +261,9 @@ Write-Host "Removed config\.fx-dist.cfg from export (vendor secret stays on buil
 $plainFiles = @(
     "server\app_code_crypto.py",
     "server\cim_bootstrap.py",
-    "server\product_config.py"
+    "server\product_config.py",
+    "server\license_client.py",
+    "server\license_routes.py"
 )
 foreach ($rel in $plainFiles) {
     $src = Join-Path $RepoRoot $rel

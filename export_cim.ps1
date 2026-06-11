@@ -12,6 +12,7 @@ param(
     [switch]$ObfuscateFrontend,
     [switch]$ObfuscatePython,
     [switch]$HardenAll,
+    [switch]$PlaintextDistribution,
     [ValidateSet("none","bytecode","pyarmor")]
     [string]$PythonHardening = "none"
 )
@@ -19,7 +20,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not $ExportRoot) {
-    $ExportRoot = Join-Path $SourceRoot "installer\output\CiM"
+    $ExportRoot = Join-Path $SourceRoot "installer\Encrypted\CiM"
 }
 
 function Ensure-Dir {
@@ -393,7 +394,10 @@ print('OK')
 }
 
 function Test-ExportPackageComplete {
-    param([string]$ExportRoot)
+    param(
+        [string]$ExportRoot,
+        [switch]$AllowPlaintextServer
+    )
     $required = @(
         "start_cim.bat",
         "db_sqlite.py",
@@ -401,7 +405,6 @@ function Test-ExportPackageComplete {
         "frontend\build\index.html",
         "runtime\python\python.exe",
         "runtime\wheelhouse",
-        "server\server.pyc",
         "server\__init__.py",
         "desktop\package.json",
         "desktop\main.js"
@@ -411,6 +414,28 @@ function Test-ExportPackageComplete {
         $full = Join-Path $ExportRoot $rel
         if (-not (Test-Path -LiteralPath $full)) {
             $missing += $rel
+        }
+    }
+    $serverPyc = Join-Path $ExportRoot "server\server.pyc"
+    $serverPy = Join-Path $ExportRoot "server\server.py"
+    if (-not (Test-Path -LiteralPath $serverPyc)) {
+        if (-not ($AllowPlaintextServer -and (Test-Path -LiteralPath $serverPy))) {
+            $missing += "server\server.pyc or server\server.py"
+        }
+    }
+    $coreCachePy = Join-Path $ExportRoot "server\core\cache.py"
+    $coreCachePyc = Join-Path $ExportRoot "server\core\cache.pyc"
+    if (-not (Test-Path -LiteralPath $coreCachePy) -and -not (Test-Path -LiteralPath $coreCachePyc)) {
+        $missing += "server\core\cache.py or server\core\cache.pyc"
+    }
+    if ($AllowPlaintextServer) {
+        $authShell = Join-Path $ExportRoot "frontend\auth\index.html"
+        if (-not (Test-Path -LiteralPath $authShell)) {
+            $missing += "frontend\auth\index.html"
+        }
+        $productJson = Join-Path $ExportRoot "config\product.json"
+        if (-not (Test-Path -LiteralPath $productJson)) {
+            $missing += "config\product.json"
         }
     }
     if ($missing.Count -gt 0) {
@@ -524,8 +549,11 @@ Write-Host "Staging: $StagingExportRoot"
 Write-Host "Mode:   $Mode"
 
 $isDistribution = $Mode -eq "distribution"
-$effectiveObfuscateFrontend = $HardenAll -or $ObfuscateFrontend -or ($Obfuscate -and $isDistribution)
-$effectiveObfuscatePython = $HardenAll -or $ObfuscatePython -or ($Obfuscate -and $isDistribution)
+if ($PlaintextDistribution -and -not $isDistribution) {
+    throw "-PlaintextDistribution requires -Mode distribution"
+}
+$effectiveObfuscateFrontend = (-not $PlaintextDistribution) -and ($HardenAll -or $ObfuscateFrontend -or ($Obfuscate -and $isDistribution))
+$effectiveObfuscatePython = (-not $PlaintextDistribution) -and ($HardenAll -or $ObfuscatePython -or ($Obfuscate -and $isDistribution))
 $effectivePythonHardening = $PythonHardening
 $useDefaultHardening = $effectiveObfuscatePython -and $effectivePythonHardening -eq "none"
 if ($useDefaultHardening) {
@@ -643,29 +671,30 @@ if (-not $SkipWheelhouse) {
 
     $reqFile = Join-Path $SourceRoot "requirements_runtime.txt"
     Write-Host "Preparing offline wheelhouse..."
+    $wheelExit = 0
     if (Test-Path -LiteralPath $embeddedPy) {
         if (Test-Path -LiteralPath $reqFile) {
-            & $embeddedPy -m pip download -r $reqFile -d $wheelhouse
+            $wheelExit = Invoke-NativeQuiet { & $embeddedPy -m pip download -r $reqFile -d $wheelhouse 2>&1 | Out-Null }
         } else {
-            & $embeddedPy -m pip download fastapi uvicorn pandas yfinance -d $wheelhouse
+            $wheelExit = Invoke-NativeQuiet { & $embeddedPy -m pip download fastapi uvicorn pandas yfinance -d $wheelhouse 2>&1 | Out-Null }
         }
     } else {
         $pythonCommand = Resolve-PythonExe
         if (Test-Path -LiteralPath $reqFile) {
             if ($pythonCommand -eq "py -3") {
-                & py -3 -m pip download -r $reqFile -d $wheelhouse
+                $wheelExit = Invoke-NativeQuiet { & py -3 -m pip download -r $reqFile -d $wheelhouse 2>&1 | Out-Null }
             } else {
-                & python -m pip download -r $reqFile -d $wheelhouse
+                $wheelExit = Invoke-NativeQuiet { & python -m pip download -r $reqFile -d $wheelhouse 2>&1 | Out-Null }
             }
         } else {
             if ($pythonCommand -eq "py -3") {
-                & py -3 -m pip download fastapi uvicorn pandas yfinance -d $wheelhouse
+                $wheelExit = Invoke-NativeQuiet { & py -3 -m pip download fastapi uvicorn pandas yfinance -d $wheelhouse 2>&1 | Out-Null }
             } else {
-                & python -m pip download fastapi uvicorn pandas yfinance -d $wheelhouse
+                $wheelExit = Invoke-NativeQuiet { & python -m pip download fastapi uvicorn pandas yfinance -d $wheelhouse 2>&1 | Out-Null }
             }
         }
     }
-    if ($LASTEXITCODE -ne 0) {
+    if ($wheelExit -ne 0) {
         throw "Offline wheelhouse preparation failed."
     }
 }
@@ -730,6 +759,8 @@ Copy-IfExists     -From (Join-Path $SourceRoot "frontend\package.json")      -To
 Copy-IfExists     -From (Join-Path $SourceRoot "frontend\package-lock.json") -To (Join-Path $ExportRoot "frontend\package-lock.json")
 Copy-IfExists     -From (Join-Path $SourceRoot "frontend\yarn.lock")         -To (Join-Path $ExportRoot "frontend\yarn.lock")
 Copy-TreeIfExists -From (Join-Path $SourceRoot "frontend\public")            -To (Join-Path $ExportRoot "frontend\public")
+# Plaintext sign-in shell (not encrypted) — required before online session unlocks app code.
+Copy-TreeIfExists -From (Join-Path $SourceRoot "frontend\auth")              -To (Join-Path $ExportRoot "frontend\auth")
 if (-not $isDistribution) {
     # Standard mode keeps source for easier local development/troubleshooting.
     Copy-TreeIfExists -From (Join-Path $SourceRoot "frontend\src")           -To (Join-Path $ExportRoot "frontend\src")
@@ -800,11 +831,15 @@ if ($effectiveObfuscatePython -and $pythonObfInfo) {
         }
     }
 } else {
-    # Copy all python files in server directory (portable and safe)
-    $serverPyFiles = Get-ChildItem -LiteralPath (Join-Path $SourceRoot "server") -File -Filter "*.py" -ErrorAction SilentlyContinue
-    foreach ($file in $serverPyFiles) {
-        Copy-IfExists -From $file.FullName -To (Join-Path $ExportRoot ("server\" + $file.Name))
+    # Plaintext: copy full server package tree (server.core, server.routers, etc.)
+    $serverSrc = Join-Path $SourceRoot "server"
+    $serverDst = Join-Path $ExportRoot "server"
+    Ensure-Dir -Path $serverDst
+    Get-ChildItem -LiteralPath $serverSrc -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $serverDst $_.Name) -Recurse -Force
     }
+    Get-ChildItem -LiteralPath $serverDst -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 # ------------------------------------------------------------
@@ -916,7 +951,7 @@ Get-ChildItem -LiteralPath $ExportRoot -Recurse -Force |
     Set-Content -LiteralPath $manifestPath -Encoding UTF8
 
 Test-ExportBackendImport -ExportRoot $ExportRoot
-Test-ExportPackageComplete -ExportRoot $ExportRoot
+Test-ExportPackageComplete -ExportRoot $ExportRoot -AllowPlaintextServer:$PlaintextDistribution
 
 Commit-ExportStaging -StagingRoot $ExportRoot -FinalRoot $FinalExportRoot
 $ExportRoot = $FinalExportRoot

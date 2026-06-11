@@ -1,17 +1,14 @@
 import axios from 'axios';
-import React, { useState, useEffect, useCallback, useRef, useLayoutEffect, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useLayoutEffect, useMemo, Suspense, lazy } from 'react';
 import DashboardPage  from './pages/DashboardPage';
 import ChartPage      from './pages/ChartPage';
 import SplitChartPage from './pages/SplitChartPage';
 import IndicesPage    from './pages/IndicesPage';
 import MarketPulsePage from './pages/MarketPulsePage';
 import MoversPage from './pages/MoversPage';
-import MarketMapPage from './pages/MarketMapPage';
 import IndexChartPage from './pages/IndexChartPage';
 import ConstituentsPage from './pages/ConstituentsPage';
 import WatchlistPage from './pages/WatchlistPage';
-import PotentialSwingsPage from './pages/PotentialSwingsPage';
-import EarningsBeatsPage from './pages/EarningsBeatsPage';
 import AdminPanel     from './components/AdminPanel';
 import { isDistributionProfile } from './config/exportProfile';
 import { dispatchChartDataUpdated, CHART_DATA_UPDATED_EVENT, MARKET_PULSE_REFRESH_EVENT, MOVERS_REFRESH_EVENT } from './chartEvents';
@@ -22,8 +19,14 @@ import AboutCiMModalBody from './components/AboutCiMModalBody';
 import CiMKnowledgeBase from './components/CiMKnowledgeBase';
 import KnowledgeBaseEditor from './components/KnowledgeBaseEditor';
 import { resolveKnowledgeBaseGuideId } from './content/knowledgeBasePages';
+import AccountSettingsModal from './components/AccountSettingsModal';
+import ConfirmDialog, { askConfirm } from './components/ConfirmDialog';
+import { ToastProvider } from './context/ToastContext';
+import { fetchLicenseStatus, licenseHeartbeat } from './api/auth';
 
-const MAX_CHART_TABS = 5;
+const MarketMapPage = lazy(() => import('./pages/MarketMapPage'));
+const PotentialSwingsPage = lazy(() => import('./pages/PotentialSwingsPage'));
+const EarningsBeatsPage = lazy(() => import('./pages/EarningsBeatsPage'));
 const API = '';
 const ISSUE_FORM_BASE = 'https://docs.google.com/forms/d/e/1FAIpQLScLR6u8TeQCvaWA82FhEZhm6-T7WT-LoU5RPJtvzZRIy99X0g/viewform';
 const FEATURE_FORM_BASE = 'https://docs.google.com/forms/d/e/1FAIpQLScgADzeVq17F_gNe1O5tiJhkhuxlrntWuaq56A0r3UvkIbnxw/viewform';
@@ -41,11 +44,17 @@ function watchlistContainsSymbol(w, symbol, itemType) {
 }
 
 export default function AppWrapper() {
-  return <App />;
+  return (
+    <ToastProvider>
+      <App />
+    </ToastProvider>
+  );
 }
 
 function App() {
   const [view, setView]                 = useState('dashboard');
+  const [maxChartTabs, setMaxChartTabs] = useState(5);
+  const [confirmState, setConfirmState] = useState(null);
   const [chartTabs, setChartTabs]       = useState([]);
   const [activeTabIdx, setActiveTabIdx] = useState(null);
   const [indexTabs, setIndexTabs]       = useState([]);
@@ -96,6 +105,8 @@ function App() {
   const [knowledgeBaseEditorOpen, setKnowledgeBaseEditorOpen] = useState(false);
   const [knowledgeBaseContentRevision, setKnowledgeBaseContentRevision] = useState(0);
   const [knowledgeBasePreview, setKnowledgeBasePreview] = useState(null);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [licenseStatus, setLicenseStatus] = useState(null);
   const mainColumnRef = useRef(null);
   const updateRequestedRef = useRef(false);
   const globalSearchInputRef = useRef(null);
@@ -117,6 +128,25 @@ function App() {
   useEffect(() => {
     viewRef.current = view;
   }, [view]);
+
+  useEffect(() => {
+    if (!isDistributionProfile) return undefined;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const status = await fetchLicenseStatus();
+        if (!cancelled) setLicenseStatus(status);
+        if (status?.valid && status?.mode === 'online') {
+          try { await licenseHeartbeat(); } catch { /* offline grace */ }
+        }
+      } catch {
+        if (!cancelled) setLicenseStatus({ valid: false });
+      }
+    };
+    refresh();
+    const id = setInterval(refresh, 24 * 60 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
   const {
     status: jobStatus,
     isRunning: updateRunning,
@@ -233,10 +263,15 @@ function App() {
   }, []);
 
   const onRebuildIndicatorSnapshots = useCallback(async () => {
-    if (!window.confirm(
-      'Clear cached indicator snapshots and rebuild from historical data for the full universe?\n\n'
-      + 'This can take several minutes. Technical filters will use the new data after it completes.'
-    )) return;
+    const ok = await askConfirm(setConfirmState, {
+      title: 'Rebuild Indicator Snapshots',
+      message:
+        'Clear cached indicator snapshots and rebuild from historical data for the full universe?\n\n'
+        + 'This can take several minutes. Technical filters will use the new data after it completes.',
+      confirmLabel: 'Rebuild',
+      danger: true,
+    });
+    if (!ok) return;
 
     try {
       setRebuildSnapshotsBusy(true);
@@ -326,7 +361,7 @@ function App() {
       }
       let next;
       const tab = { symbol, id: `${symbol}-${Date.now()}`, returnView: originView };
-      if (prev.length < MAX_CHART_TABS) {
+      if (prev.length < maxChartTabs) {
         next = [...prev, tab];
         setActiveTabIdx(next.length - 1);
       } else {
@@ -341,7 +376,7 @@ function App() {
       setView('chart');
       return next;
     });
-  }, []);
+  }, [maxChartTabs]);
 
   const closeChart = useCallback((idx) => {
     setChartTabs(prev => {
@@ -534,6 +569,13 @@ function App() {
         setAggressiveCacheRam(!!r.data?.aggressiveCacheRam);
       })
       .catch(() => {});
+    axios.get(`${API}/api/layout`)
+      .then((r) => {
+        if (!active) return;
+        const n = Number(r.data?.maxChartTabs);
+        if (Number.isFinite(n) && n >= 1 && n <= 20) setMaxChartTabs(n);
+      })
+      .catch(() => {});
     return () => { active = false; };
   }, []);
 
@@ -673,9 +715,13 @@ function App() {
       only_incomplete: !!options.onlyIncomplete,
     };
     if (options.force) {
-      const ok = window.confirm(
-        'Force refresh recomputes every reported symbol for this month and may re-scrape Screener data. This can take a long time. Continue?'
-      );
+      const ok = await askConfirm(setConfirmState, {
+        title: 'Force Earnings+ Refresh',
+        message:
+          'Force refresh recomputes every reported symbol for this month and may re-scrape Screener data. This can take a long time. Continue?',
+        confirmLabel: 'Continue',
+        danger: true,
+      });
       if (!ok) return;
     }
     setSettingsOpen(false);
@@ -768,6 +814,17 @@ function App() {
     setCacheBusy(false);
   }, []);
 
+  const handleUpdateMaxChartTabs = useCallback(async (value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 1 || n > 20) return;
+    setMaxChartTabs(n);
+    try {
+      await axios.post(`${API}/api/layout`, { maxChartTabs: n });
+    } catch {
+      setToastMessage('Failed to save max chart tabs setting.');
+    }
+  }, []);
+
   const [cimUpdateBusy, setCimUpdateBusy] = useState(false);
   const [appVersion, setAppVersion] = useState('');
   const [productName, setProductName] = useState('CiM');
@@ -796,9 +853,11 @@ function App() {
           : 'update source';
       const count = u.fileCount ?? '?';
       if (!skipConfirm) {
-        const ok = window.confirm(
-          `Apply Charts In Motion update ${u.version} from ${sourceLabel}${count !== '?' ? ` (${count} files)` : ''}?\n\nCharts In Motion will close to apply the update.`,
-        );
+        const ok = await askConfirm(setConfirmState, {
+          title: 'Apply Update',
+          message: `Apply Charts In Motion update ${u.version} from ${sourceLabel}${count !== '?' ? ` (${count} files)` : ''}?\n\nCharts In Motion will close to apply the update.`,
+          confirmLabel: 'Update',
+        });
         if (!ok) return false;
       }
       const { data: fullCheck } = await axios.get(`${API}/api/update/check`);
@@ -869,9 +928,11 @@ function App() {
         const sourceName = u.source === 'github'
           ? `GitHub (${data.githubRepo || 'unnwired/cim-updates'})`
           : 'your UPDATE folder';
-        const ok = window.confirm(
-          `Charts In Motion update ${ver} is available from ${sourceName}.\n\nWould you like to update now? Charts In Motion will close to apply the update.`,
-        );
+        const ok = await askConfirm(setConfirmState, {
+          title: 'Update Available',
+          message: `Charts In Motion update ${ver} is available from ${sourceName}.\n\nWould you like to update now? Charts In Motion will close to apply the update.`,
+          confirmLabel: 'Update now',
+        });
         if (!ok) {
           rememberDismiss(ver);
           return;
@@ -924,7 +985,11 @@ function App() {
       setToastMessage('Restart backend + frontend is not available in this build.');
       return;
     }
-    if (!window.confirm('Restart backend and frontend now?\n\nThis is a development-only action and may take a few seconds.')) {
+    if (!(await askConfirm(setConfirmState, {
+      title: 'Restart Dev Servers',
+      message: 'Restart backend and frontend now?\n\nThis is a development-only action and may take a few seconds.',
+      confirmLabel: 'Restart',
+    }))) {
       return;
     }
     setSettingsOpen(false);
@@ -1202,6 +1267,12 @@ function App() {
 
       if (!canOpenGlobalSearch) return;
       if (isTypingTarget(e.target)) return;
+      if (key === '/' && !globalSearchOpen) {
+        consume();
+        setGlobalSearchOpen(true);
+        setGlobalSearchQuery('');
+        return;
+      }
       if (key === 'Escape') return;
       if (key.length === 1 && !/\s/.test(key)) {
         consume();
@@ -1249,6 +1320,7 @@ function App() {
             onReorderChartTabs={reorderChartTabs}
             onOpenSectors={() => { setAdminOpen(true); setSettingsOpen(false); }}
             onOpenSettings={() => setSettingsOpen(v => !v)}
+            onOpenAccount={isDistributionProfile ? () => { setSettingsOpen(false); setAccountOpen(true); } : undefined}
             onOpenKnowledgeBaseEditor={!isDistributionProfile ? () => {
               setSettingsOpen(false);
               setKnowledgeBaseEditorOpen(true);
@@ -1258,6 +1330,8 @@ function App() {
             onOpenSupport={openSupport}
             onOpenAbout={openAbout}
             aggressiveCacheRam={aggressiveCacheRam}
+            maxChartTabs={maxChartTabs}
+            onUpdateMaxChartTabs={handleUpdateMaxChartTabs}
             cacheBusy={cacheBusy}
             onToggleAggressiveCache={handleToggleAggressiveCache}
             onClearCacheNow={handleClearCacheNow}
@@ -1310,21 +1384,25 @@ function App() {
 
         {/* Market Map — index breadth + constituent heatmap */}
         <div style={{ display: view === 'market-map' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-          <MarketMapPage
-            onOpenChart={openChart}
-            isActive={view === 'market-map'}
-          />
+          <Suspense fallback={<div style={{ padding: 16, color: 'var(--text-muted)' }}>Loading Market Map…</div>}>
+            <MarketMapPage
+              onOpenChart={openChart}
+              isActive={view === 'market-map'}
+            />
+          </Suspense>
         </div>
 
         {/* Earnings beats (TradingView screener) */}
         <div style={{ display: view === 'earnings-beats' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-          <EarningsBeatsPage
-            onOpenChart={openChart}
-            isActive={view === 'earnings-beats'}
-            onContextMenuRequest={handleContextMenuRequest}
-            onRefreshEarningsPlusCache={handleRefreshEarningsPlusCache}
-            earningsPlusRefreshRunning={earningsPlusRefreshPending || (updateRunning && jobStatus?.job === 'earnings_plus_cache')}
-          />
+          <Suspense fallback={<div style={{ padding: 16, color: 'var(--text-muted)' }}>Loading Earnings…</div>}>
+            <EarningsBeatsPage
+              onOpenChart={openChart}
+              isActive={view === 'earnings-beats'}
+              onContextMenuRequest={handleContextMenuRequest}
+              onRefreshEarningsPlusCache={handleRefreshEarningsPlusCache}
+              earningsPlusRefreshRunning={earningsPlusRefreshPending || (updateRunning && jobStatus?.job === 'earnings_plus_cache')}
+            />
+          </Suspense>
         </div>
 
         {/* Dashboard */}
@@ -1350,12 +1428,14 @@ function App() {
         </div>
         <div style={{ display: view === 'potential-swings' && !isDistributionProfile ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
           {!isDistributionProfile && (
-          <PotentialSwingsPage
-            onOpenChart={openChart}
-            watchlists={watchlists}
-            onGoToWatchlist={goToWatchlist}
-            onAddStocksToWatchlist={handleDashboardAddToWatchlist}
-          />
+          <Suspense fallback={<div style={{ padding: 16, color: 'var(--text-muted)' }}>Loading Potential Swings…</div>}>
+            <PotentialSwingsPage
+              onOpenChart={openChart}
+              watchlists={watchlists}
+              onGoToWatchlist={goToWatchlist}
+              onAddStocksToWatchlist={handleDashboardAddToWatchlist}
+            />
+          </Suspense>
           )}
         </div>
         <div style={{ display: view === 'watchlist' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
@@ -1523,6 +1603,23 @@ function App() {
           initialGuideId={resolveKnowledgeBaseGuideId(view)}
           onSaved={handleKnowledgeBaseSaved}
           onPreview={handleKnowledgeBasePreview}
+        />
+      )}
+      {isDistributionProfile && licenseStatus?.offline_cached && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, zIndex: 250000,
+          background: '#3d2e00', color: '#f0c040', fontSize: 11, textAlign: 'center', padding: '6px 12px',
+        }}>
+          Offline mode — sign in when online before grace expires
+          {licenseStatus.offline_grace_until ? ` (until ${String(licenseStatus.offline_grace_until).slice(0, 10)})` : ''}
+        </div>
+      )}
+      {accountOpen && isDistributionProfile && (
+        <AccountSettingsModal
+          open={accountOpen}
+          onClose={() => setAccountOpen(false)}
+          licenseStatus={licenseStatus}
+          onSignedOut={() => setAccountOpen(false)}
         />
       )}
       {contextMenuState.visible && (
@@ -1956,6 +2053,15 @@ function App() {
           </div>
         </div>
       )}
+      <ConfirmDialog
+        open={!!confirmState}
+        title={confirmState?.title}
+        message={confirmState?.message}
+        confirmLabel={confirmState?.confirmLabel}
+        danger={confirmState?.danger}
+        onConfirm={confirmState?.onConfirm}
+        onCancel={confirmState?.onCancel}
+      />
     </div>
   );
 }
@@ -1964,8 +2070,8 @@ function TabBar({
   view, chartTabs, activeTabIdx, indexTabs, activeIndexTab,
   constituentsTabs, onDashboard, onIndices, onWatchlist, onPortfolio, onPotentialSwings, onMarketPulse, onMarketMovers, onMarketMap, onEarningsBeats, onSwitchChart, onCloseChart,
   onSwitchIndex, onCloseIndex, onSwitchConstituents, onCloseConstituents,
-  onReorderChartTabs, onOpenSectors, onOpenSettings, onOpenKnowledgeBaseEditor, onOpenIssue, onOpenFeature, onOpenAbout, onOpenSupport,
-  aggressiveCacheRam, cacheBusy, onToggleAggressiveCache, onClearCacheNow,
+  onReorderChartTabs, onOpenSectors, onOpenSettings, onOpenAccount, onOpenKnowledgeBaseEditor, onOpenIssue, onOpenFeature, onOpenAbout, onOpenSupport,
+  aggressiveCacheRam, maxChartTabs, onUpdateMaxChartTabs, cacheBusy, onToggleAggressiveCache, onClearCacheNow,
   onUpdatePriceVolume, onUpdateIndicatorSnapshots, onUpdateSplitAdjustments, onSplitCatchupScan, splitPendingCount, onRefreshShareCounts, onRefreshEarningsPlusCache, onToggleUpdateProgress, updateRunning, updatePercent, settingsOpen, settingsRef,
   rebuildSnapshotsBusy, onRebuildIndicatorSnapshots,
   earningsPlusRefreshRunning,
@@ -2483,6 +2589,29 @@ function TabBar({
               </span>
             </button>
             <MenuItem icon="🧹" label="Clear Cache Now" onClick={onClearCacheNow} disabled={cacheBusy} />
+            <div
+              style={{
+                padding: '8px 12px',
+                borderBottom: '1px solid var(--border-light)',
+                fontSize: 12,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+              }}
+            >
+              <span>Max chart tabs</span>
+              <select
+                value={maxChartTabs}
+                onChange={e => onUpdateMaxChartTabs(Number(e.target.value))}
+                disabled={cacheBusy}
+                style={{ fontSize: 12 }}
+              >
+                {[3, 5, 8, 10, 15].map(n => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </div>
             <MenuItem
               icon="✨"
               label={earningsPlusRefreshRunning ? 'Refreshing Earnings+ Cache…' : 'Refresh Earnings+ Cache (This Month)'}
@@ -2504,6 +2633,9 @@ function TabBar({
               />
             )}
             <MenuItem icon="🗂" label="Data Management" onClick={onOpenSectors} />
+            {onOpenAccount && (
+              <MenuItem icon="👤" label="Account" onClick={onOpenAccount} />
+            )}
             {onOpenKnowledgeBaseEditor && (
               <MenuItem icon="📖" label="Edit Knowledge Base" onClick={onOpenKnowledgeBaseEditor} />
             )}

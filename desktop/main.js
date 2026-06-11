@@ -96,6 +96,12 @@ function resolvePythonExe() {
 
 function resolveUvicornApp() {
   const serverPy = path.join(ROOT_DIR, 'server', 'server.py');
+  const plaintextDist = fs.existsSync(path.join(ROOT_DIR, 'config', '.cim-plaintext-dist'));
+  const encryptedDist = fs.existsSync(path.join(ROOT_DIR, 'server', 'server.pyc.enc')) && !fs.existsSync(serverPy);
+  const requireAuth = String(process.env.CIM_REQUIRE_ONLINE_AUTH || '').trim() === '1';
+  if (plaintextDist || encryptedDist || requireAuth) {
+    return 'server.cim_bootstrap:app';
+  }
   if (fs.existsSync(serverPy)) {
     return 'server.server:app';
   }
@@ -104,6 +110,7 @@ function resolveUvicornApp() {
 
 function startBackendProcess() {
   const pythonExe = resolvePythonExe();
+  const env = { ...process.env };
   const child = spawn(
     pythonExe,
     ['-s', '-m', 'uvicorn', resolveUvicornApp(), '--host', '127.0.0.1', '--port', '8000'],
@@ -112,6 +119,7 @@ function startBackendProcess() {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
+      env,
     },
   );
   child.unref();
@@ -485,8 +493,9 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('cim-can-restart-backend', async () => devToolsEnabled());
-  ipcMain.handle('cim-restart-backend', async () => {
-    if (!devToolsEnabled()) {
+  ipcMain.handle('cim-restart-backend', async (_event, options) => {
+    const forAuth = options && options.forAuth === true;
+    if (!devToolsEnabled() && !forAuth) {
       throw new Error('Restart backend is disabled outside development mode');
     }
     await restartBackendNow();

@@ -5,3 +5,5 @@ yfinance
 tradingview-screener
 requests
 cryptography
+cachetools
+python-dotenv

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Copy distribution-fix files from dev repo into installer\output\CiM (no export_cim.ps1 run).
+  Copy distribution-fix files from dev repo into the export tree (installer\Plaintext\CiM or installer\Encrypted\CiM).
 #>
 [CmdletBinding()]
 param(
@@ -35,6 +35,8 @@ $copyMap = @(
     "server\app_code_crypto.py",
     "server\cim_bootstrap.py",
     "server\product_config.py",
+    "server\license_client.py",
+    "server\license_routes.py",
     "config\product.json",
     "config\github_updates.json",
     "scripts\CiMApplyUpdate.ps1",
@@ -63,6 +65,15 @@ if (Test-Path -LiteralPath (Join-Path $frontendBuildSrc "index.html")) {
         Copy-Item -LiteralPath $manifestSrc -Destination (Join-Path $frontendBuildDst "manifest.json") -Force
     }
     Write-Host "Synced frontend\build (production bundle)"
+}
+$authSrc = Join-Path $RepoRoot "frontend\auth"
+$authDst = Join-Path $ExportRoot "frontend\auth"
+if (Test-Path -LiteralPath $authSrc) {
+    if (-not (Test-Path -LiteralPath $authDst)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $authDst) | Out-Null
+    }
+    Copy-Item -LiteralPath $authSrc -Destination $authDst -Recurse -Force
+    Write-Host "Synced frontend\auth"
 }
 foreach ($rel in $copyMap) {
     $src = Join-Path $RepoRoot $rel

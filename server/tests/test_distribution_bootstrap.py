@@ -70,6 +70,21 @@ class DistributionTreeDetectionTest(unittest.TestCase):
             (root / "server" / "server.py").write_text("# dev", encoding="utf-8")
             self.assertTrue(crypto.is_development_tree(root))
 
+    def test_plaintext_distribution_with_server_py_is_not_dev_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config").mkdir()
+            (root / "server").mkdir()
+            (root / "server" / "server.py").write_text("# dist", encoding="utf-8")
+            (root / "server" / "_cim_dist_embedded.py").write_text(
+                'def distribution_secret_bytes() -> bytes:\n    return b"test-secret"\n',
+                encoding="utf-8",
+            )
+            (root / "config" / ".cim-plaintext-dist").write_text("plaintext\n", encoding="utf-8")
+            self.assertTrue(crypto.is_plaintext_distribution(root))
+            self.assertFalse(crypto.is_development_tree(root))
+            self.assertTrue(crypto.needs_distribution_bootstrap(root))
+
     def test_product_display_name_dev_vs_distribution(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

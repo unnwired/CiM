@@ -99,6 +99,40 @@ function Clear-AppCacheForInstall {
     }
 }
 
+function Test-InstallUsesOnlineOnly {
+    param([string]$Root)
+    if (Test-Path -LiteralPath (Join-Path $Root "config\.cim-online-only")) { return $true }
+    $prodPath = Join-Path $Root "config\product.json"
+    if (-not (Test-Path -LiteralPath $prodPath)) { return $false }
+    try {
+        $prod = Get-Content -LiteralPath $prodPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        return [bool]$prod.onlineOnlyActivation
+    } catch {
+        return $false
+    }
+}
+
+function Invoke-OnlineSmokeActivation {
+    param([string]$Root, [int]$ListenPort)
+    $testEmail = "cim-smoke-{0}@example.com" -f ([Guid]::NewGuid().ToString("N").Substring(0, 10))
+    $testPassword = "CiM-Smoke-Password-123!"
+    Write-Host "Online-only smoke: signup $testEmail"
+    Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:$ListenPort/api/auth/signup" `
+        -ContentType "application/json" `
+        -Body (@{ email = $testEmail; password = $testPassword } | ConvertTo-Json) | Out-Null
+    $before = Invoke-RestMethod -Uri "http://127.0.0.1:$ListenPort/api/license/status" -TimeoutSec 15
+    if ($before.valid) {
+        throw "License must stay invalid after signup until sign-in (mode=$($before.mode))"
+    }
+    Write-Host "Online-only smoke: login $testEmail"
+    Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:$ListenPort/api/auth/login" `
+        -ContentType "application/json" `
+        -Body (@{ email = $testEmail; password = $testPassword } | ConvertTo-Json) | Out-Null
+    $st = Invoke-RestMethod -Uri "http://127.0.0.1:$ListenPort/api/license/status" -TimeoutSec 15
+    if (-not $st.valid) { throw "Online activation failed after login (mode=$($st.mode))" }
+    Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:$ListenPort/api/auth/complete" -TimeoutSec 15 | Out-Null
+}
+
 $root = (Resolve-Path -LiteralPath $InstallRoot).Path
 if (-not (Test-Path -LiteralPath (Join-Path $root "server\cim_bootstrap.py"))) {
     throw "Not a Charts In Motion install/export root: $root"
@@ -106,10 +140,22 @@ if (-not (Test-Path -LiteralPath (Join-Path $root "server\cim_bootstrap.py"))) {
 if (-not (Test-Path -LiteralPath (Join-Path $root "data\nse_data.db"))) {
     throw "Missing data\nse_data.db under $root"
 }
+$authShell = Join-Path $root "frontend\auth\index.html"
+if (-not (Test-Path -LiteralPath $authShell)) {
+    throw "Missing plaintext auth shell: frontend\auth\index.html (required for online licensing)"
+}
 
 $licensePath = Join-Path $root "data\.cim-license"
+$sessionPath = Join-Path $root "data\.cim-session.json"
+$onlineOnly = Test-InstallUsesOnlineOnly -Root $root
 $hadLicenseBefore = Test-Path -LiteralPath $licensePath
-Ensure-TestLicense -Root $root
+$hadSessionBefore = Test-Path -LiteralPath $sessionPath
+if ($onlineOnly) {
+    if (Test-Path -LiteralPath $licensePath) { Remove-Item -LiteralPath $licensePath -Force }
+    if (Test-Path -LiteralPath $sessionPath) { Remove-Item -LiteralPath $sessionPath -Force }
+} else {
+    Ensure-TestLicense -Root $root
+}
 Clear-AppCacheForInstall -Root $root
 Stop-SmokeBackend -Root $root -ListenPort $Port
 
@@ -142,6 +188,28 @@ try {
             Get-Content -LiteralPath $errLog -Tail 40 | ForEach-Object { Write-Host $_ }
         }
         throw "Backend did not become healthy within ${StartupTimeoutSec}s"
+    }
+
+    if ($onlineOnly) {
+        $h = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 10
+        if ($h.mode -eq "auth_only") {
+            Invoke-OnlineSmokeActivation -Root $root -ListenPort $Port
+            if ($proc -and -not $proc.HasExited) {
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            }
+            Stop-SmokeBackend -Root $root -ListenPort $Port
+            Start-Sleep -Seconds 2
+            $proc = Start-Process -FilePath $py `
+                -ArgumentList @("-s", "-m", "uvicorn", "server.cim_bootstrap:app", "--host", "127.0.0.1", "--port", "$Port") `
+                -WorkingDirectory $root `
+                -RedirectStandardOutput $outLog `
+                -RedirectStandardError $errLog `
+                -PassThru `
+                -WindowStyle Hidden
+            if (-not (Wait-Health -ListenPort $Port -TimeoutSec $StartupTimeoutSec)) {
+                throw "Backend did not restart after online activation"
+            }
+        }
     }
 
     $index = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -UseBasicParsing -TimeoutSec 15
@@ -182,6 +250,11 @@ try {
         throw "/api/stocks page returned only $pageRows rows (expected pageSize batch)"
     }
 
+    $license = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/license/status" -TimeoutSec 15
+    if (-not $license.valid) {
+        throw "/api/license/status valid=false (mode=$($license.mode))"
+    }
+
     $chart = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/chart-data/RELIANCE?timeframe=1D" -UseBasicParsing -TimeoutSec 60
     if ($chart.StatusCode -lt 200 -or $chart.StatusCode -ge 300) {
         throw "/api/chart-data/RELIANCE returned $($chart.StatusCode)"
@@ -195,6 +268,8 @@ try {
     Write-Host "  index.html : OK (root div present)"
     Write-Host "  $jsPath : OK ($($jsBody.Length) bytes, JavaScript)"
     Write-Host "  /api/stocks: OK (total=$total, page=$pageRows)"
+    Write-Host "  /api/license/status: OK (mode=$($license.mode))"
+    Write-Host "  frontend/auth: OK"
     Write-Host "  /api/chart-data/RELIANCE: OK ($($chart.Content.Length) bytes)"
     exit 0
 }
@@ -210,5 +285,8 @@ finally {
     Stop-SmokeBackend -Root $root -ListenPort $Port
     if (-not $hadLicenseBefore -and (Test-Path -LiteralPath $licensePath)) {
         Remove-Item -LiteralPath $licensePath -Force -ErrorAction SilentlyContinue
+    }
+    if ($onlineOnly -and -not $hadSessionBefore -and (Test-Path -LiteralPath $sessionPath)) {
+        Remove-Item -LiteralPath $sessionPath -Force -ErrorAction SilentlyContinue
     }
 }

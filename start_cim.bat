@@ -9,6 +9,7 @@ REM
 REM Optional environment variables (set before running, or in System):
 REM   CIM_SKIP_FRONTEND_BUILD=1  — never run npm run build (uses existing build)
 REM   CIM_FORCE_FRONTEND_BUILD=1   — always run npm run build before start
+REM   CIM_REQUIRE_ONLINE_AUTH=1  — show sign-in / sign-up (dev auth test; or use start_cim_auth_test.bat)
 REM
 REM Manual start without this file ^(developers^):
 REM   cd /d "<project folder>"
@@ -233,6 +234,9 @@ REM 2a) Distribution: license + skip dev-only frontend rebuild
 REM     Dev tree = server\server.py present (repo) or CIM_DEV=1
 REM -----------------------------------------------------------
 set "CIM_DISTRIBUTION=0"
+if exist "%ROOT%\config\.cim-plaintext-dist" (
+  set "CIM_DISTRIBUTION=1"
+)
 if exist "%ROOT%\server\server.pyc.enc" if not exist "%ROOT%\server\server.py" (
   set "CIM_DISTRIBUTION=1"
 )
@@ -241,43 +245,26 @@ if /I "%CIM_DEV%"=="true" set "CIM_DISTRIBUTION=0"
 if /I "%CIM_DEV%"=="yes" set "CIM_DISTRIBUTION=0"
 
 if "%CIM_DISTRIBUTION%"=="1" (
-  echo Distribution build detected ^(encrypted app code^).
-  if not exist "%ROOT%\data\.cim-license" (
-    echo.
-    echo [ERROR] License file missing: data\.cim-license
-    echo.
-    if exist "%ROOT%\Repair-CiMLicense.bat" (
-      echo Double-click:  Repair-CiMLicense.bat
-      echo Or PowerShell: powershell -ExecutionPolicy Bypass -File "%ROOT%\scripts\Repair-CiMLicense.ps1"
-      echo Send the machine code to support, then enter the install key they return.
-    ) else if exist "%ROOT%\scripts\Repair-CiMLicense.ps1" (
-      echo Run: powershell -ExecutionPolicy Bypass -File "%ROOT%\scripts\Repair-CiMLicense.ps1"
-    ) else (
-      echo Run Install-Client-Update.bat from the CiM-Update ZIP from support, then repair license.
-    )
-    echo.
-    if not defined CIM_NO_PAUSE pause
-    exit /b 1
+  if exist "%ROOT%\config\.cim-plaintext-dist" (
+    echo Distribution build detected ^(plaintext — readable source, online auth^).
+  ) else (
+    echo Distribution build detected ^(encrypted app code^).
   )
   if exist "%ROOT%\runtime\python\python.exe" (
     set "CIM_LICENSE_SECRET="
-    "%ROOT%\runtime\python\python.exe" -s -c "import os, sys; os.environ.pop('CIM_LICENSE_SECRET', None); sys.path.insert(0, r'%ROOT%'); from pathlib import Path; from server.app_code_crypto import license_valid; raise SystemExit(0 if license_valid(Path(r'%ROOT%')) else 1)" >nul 2>&1
+    "%ROOT%\runtime\python\python.exe" -s -c "import os, sys; os.environ.pop('CIM_LICENSE_SECRET', None); sys.path.insert(0, r'%ROOT%'); from pathlib import Path; from server.app_code_crypto import access_granted; raise SystemExit(0 if access_granted(Path(r'%ROOT%')) else 1)" >nul 2>&1
     if errorlevel 1 (
-      echo.
-      echo [ERROR] License file exists but is NOT valid on this PC.
-      echo This install is bound to one machine. Contact support with your machine code.
-      echo.
-      echo Run:  Repair-CiMLicense.bat
-      echo Enter the install key support sent you ^(auto-repair is disabled^).
-      if exist "%ROOT%\scripts\Diagnose-CiMInstall.ps1" (
-        echo Or run: powershell -ExecutionPolicy Bypass -File "%ROOT%\scripts\Diagnose-CiMInstall.ps1"
-      )
-      echo.
-      if not defined CIM_NO_PAUSE pause
-      exit /b 1
+      echo No offline license or online session — sign-in screen will open first.
+    ) else (
+      echo License OK ^(offline key or online session^).
     )
   )
   goto :after_frontend_build_check
+)
+
+if /I "%CIM_REQUIRE_ONLINE_AUTH%"=="1" (
+  echo Online auth required ^(CIM_REQUIRE_ONLINE_AUTH=1^) — sign-in before full app.
+  echo.
 )
 
 if exist "%ROOT%\server\server.py" if exist "%ROOT%\server\server.pyc.enc" (
@@ -361,9 +348,15 @@ echo Found prebuilt frontend. Starting backend service...
 if not exist "%ROOT%\runtime\logs" mkdir "%ROOT%\runtime\logs"
 del /q "%BACKEND_LOG%" "%BACKEND_ERR%" >nul 2>&1
 set "CIM_UVICORN_APP=server.cim_bootstrap:app"
-if exist "%ROOT%\server\server.py" (
-  set "CIM_UVICORN_APP=server.server:app"
-  echo Development backend ^(server.server:app — no license required^).
+if exist "%ROOT%\config\.cim-plaintext-dist" (
+  echo Plaintext distribution backend ^(cim_bootstrap — online auth gate^).
+) else if exist "%ROOT%\server\server.py" (
+  if /I "%CIM_REQUIRE_ONLINE_AUTH%"=="1" (
+    echo Development backend with online auth gate ^(cim_bootstrap — sign-in required^).
+  ) else (
+    set "CIM_UVICORN_APP=server.server:app"
+    echo Development backend ^(server.server:app — no license required^).
+  )
 ) else (
   echo Distribution backend ^(encrypted app code^).
 )

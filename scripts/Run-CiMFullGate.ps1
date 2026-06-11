@@ -16,7 +16,7 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "Get-CiMPaths.ps1")
 $RepoRoot = Split-Path -Parent $ScriptDir
-$fx = Get-CiMPaths -RepoRoot $RepoRoot
+$fx = Get-CiMPaths -RepoRoot $RepoRoot -DistributionKind Encrypted
 $ExportRoot = $fx.ExportRoot
 $IsccPath = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
 
@@ -117,7 +117,7 @@ while ($attempt -lt $MaxAttempts) {
         & (Join-Path $ScriptDir "build_installer.ps1") -ExportRoot $ExportRoot -Version $Version -LicenseSecret $secret -IsccPath $IsccPath
     }
 
-    $setupExe = Join-Path $RepoRoot "installer\output\CiMSetup-$Version.exe"
+    $setupExe = Join-Path $fx.SetupOutputDir "CiMSetup-$Version.exe"
     if (-not (Test-Path -LiteralPath $setupExe)) { throw "Missing installer $setupExe" }
 
     $py = Join-Path $ExportRoot "runtime\python\python.exe"

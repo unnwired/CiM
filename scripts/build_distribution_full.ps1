@@ -11,17 +11,21 @@ param(
     [string]$LicenseSecret = "",
     [switch]$SkipExport,
     [switch]$SkipEncrypt,
-    [switch]$SkipUpdatePackage
+    [switch]$SkipUpdatePackage,
+    [switch]$PlaintextExport
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "Get-CiMPaths.ps1")
 $RepoRoot = Split-Path -Parent $ScriptDir
-$fx = Get-CiMPaths -RepoRoot $RepoRoot
+$distKind = if ($PlaintextExport) { "Plaintext" } else { "Encrypted" }
+$fx = Get-CiMPaths -RepoRoot $RepoRoot -DistributionKind $distKind
 if (-not $SourceRoot) { $SourceRoot = $RepoRoot }
 if (-not $ExportRoot) {
     $ExportRoot = $fx.ExportRoot
+} elseif (-not [System.IO.Path]::IsPathRooted($ExportRoot)) {
+    $ExportRoot = Join-Path $RepoRoot $ExportRoot
 }
 if (-not $Version) {
     $Version = if (Test-Path -LiteralPath $fx.VersionFile) { (Get-Content -LiteralPath $fx.VersionFile -Raw).Trim() } else { "1.0.2" }
@@ -69,16 +73,21 @@ if (-not $LicenseSecret) {
         Write-Host "Keep the secret only in config\.build_license_secret (example file is not for production secrets)."
     }
 }
-if (-not $LicenseSecret -and (Test-Path -LiteralPath $fx.GeneratedSecretPas)) {
-    $pasText = Get-Content -LiteralPath $fx.GeneratedSecretPas -Raw
-    if ($pasText -match "Result := '([^']*(?:''[^']*)*)'") {
-        $LicenseSecret = $Matches[1].Replace("''", "'")
-        Write-Host "Using license secret from existing installer output."
+if (-not $LicenseSecret) {
+    foreach ($kind in @($distKind, $(if ($distKind -eq "Plaintext") { "Encrypted" } else { "Plaintext" }))) {
+        $pasPath = (Get-CiMPaths -RepoRoot $RepoRoot -DistributionKind $kind).GeneratedSecretPas
+        if (-not (Test-Path -LiteralPath $pasPath)) { continue }
+        $pasText = Get-Content -LiteralPath $pasPath -Raw
+        if ($pasText -match "Result := '([^']*(?:''[^']*)*)'") {
+            $LicenseSecret = $Matches[1].Replace("''", "'")
+            Write-Host "Using license secret from installer\$kind output."
+            break
+        }
     }
 }
 if ($LicenseSecret) {
     $env:CIM_LICENSE_SECRET = $LicenseSecret
-} elseif (-not $SkipEncrypt) {
+} elseif ($PlaintextExport -or -not $SkipEncrypt) {
     throw @"
 CIM_LICENSE_SECRET is not set.
 
@@ -108,7 +117,9 @@ function Log([string]$Msg) {
     Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8
 }
 
-Log "=== Charts In Motion distribution build (version $Version) ==="
+$buildKind = if ($PlaintextExport) { "plaintext (readable source + online auth)" } else { "encrypted distribution" }
+Log "=== Charts In Motion $buildKind build (version $Version) ==="
+Log "Output folder: $($fx.InstallerOutputDir)"
 Log "ExportRoot: $ExportRoot"
 
 function Write-FlowXVersionFiles {
@@ -137,14 +148,19 @@ function Write-FlowXVersionFiles {
 Write-FlowXVersionFiles -Ver $Version
 
 Log "Step 0/6: Verify-CiMBuildPrerequisites.ps1"
-& (Join-Path $ScriptDir "Verify-CiMBuildPrerequisites.ps1") -RepoRoot $RepoRoot -SkipEncrypt:$SkipEncrypt
+& (Join-Path $ScriptDir "Verify-CiMBuildPrerequisites.ps1") -RepoRoot $RepoRoot -SkipEncrypt:($SkipEncrypt -or $PlaintextExport)
 if ($LASTEXITCODE -ne 0) {
     throw "Build prerequisites check failed. Fix missing files/tools before export (see messages above)."
 }
 
 if (-not $SkipExport) {
-    Log "Step 1/6: export_cim.ps1 -Mode distribution -HardenAll"
-    & (Join-Path $RepoRoot "export_cim.ps1") -SourceRoot $SourceRoot -ExportRoot $ExportRoot -Mode distribution -HardenAll
+    if ($PlaintextExport) {
+        Log "Step 1/6: export_cim.ps1 -Mode distribution -PlaintextDistribution (no obfuscation)"
+        & (Join-Path $RepoRoot "export_cim.ps1") -SourceRoot $SourceRoot -ExportRoot $ExportRoot -Mode distribution -PlaintextDistribution
+    } else {
+        Log "Step 1/6: export_cim.ps1 -Mode distribution -HardenAll"
+        & (Join-Path $RepoRoot "export_cim.ps1") -SourceRoot $SourceRoot -ExportRoot $ExportRoot -Mode distribution -HardenAll
+    }
     if ($LASTEXITCODE -ne 0) { throw "export_cim failed (exit $LASTEXITCODE)" }
     Write-FlowXVersionFiles -Ver $Version
 } else {
@@ -154,10 +170,17 @@ if (-not $SkipExport) {
 Log "Step 2/6: Sync-ExportDistributionFixes.ps1"
 & (Join-Path $ScriptDir "Sync-ExportDistributionFixes.ps1") -RepoRoot $RepoRoot -ExportRoot $ExportRoot
 
-if (-not $SkipEncrypt) {
+if ($PlaintextExport) {
+    Log "Step 3/6: Prepare-CiMPlaintextExport.ps1 (license embed + online auth, no encryption)"
+    & (Join-Path $ScriptDir "Prepare-CiMPlaintextExport.ps1") -ExportRoot $ExportRoot -RepoRoot $RepoRoot -LicenseSecret $LicenseSecret
+    if ($LASTEXITCODE -ne 0) { throw "Prepare-CiMPlaintextExport failed (exit $LASTEXITCODE)" }
+} elseif (-not $SkipEncrypt) {
     Log "Step 3/6: encrypt_app_code.ps1"
     & (Join-Path $ScriptDir "encrypt_app_code.ps1") -ExportRoot $ExportRoot -LicenseSecret $LicenseSecret
     if ($LASTEXITCODE -ne 0) { throw "encrypt_app_code failed (exit $LASTEXITCODE)" }
+    Log "Step 3b/6: Prepare-CiMOnlineDistribution.ps1 (online auth, no install key wizard)"
+    & (Join-Path $ScriptDir "Prepare-CiMOnlineDistribution.ps1") -ExportRoot $ExportRoot -RepoRoot $RepoRoot
+    if ($LASTEXITCODE -ne 0) { throw "Prepare-CiMOnlineDistribution failed (exit $LASTEXITCODE)" }
 } else {
     Log "Step 3/6: encrypt skipped"
 }
@@ -190,9 +213,12 @@ if ($LASTEXITCODE -ne 0) {
 
 $installer = Join-Path $fx.SetupOutputDir "CiMSetup-$Version.exe"
 $updateDir = Join-Path $fx.InstallerOutputDir "CiM-Update-$Version"
-Log "=== Build complete ==="
+Log "=== Build complete ($distKind) ==="
+Log "Folder: $($fx.InstallerOutputDir)"
+Log "Export tree: $ExportRoot"
 Log "Installer: $installer"
 if (-not $SkipUpdatePackage) {
     Log "Update package: $updateDir"
+    Log "Update ZIP: $(Join-Path $fx.InstallerOutputDir "CiM-Update-$Version.zip")"
 }
 Log "Log: $logFile"

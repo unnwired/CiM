@@ -233,10 +233,39 @@ def should_apply_live_day_change(
     return True
 
 
+def _apply_intraday_screener_row(
+    out: pd.DataFrame,
+    idx,
+    *,
+    prior_close: float,
+    today_bar_close: float | None,
+    hist_chg: Optional[float],
+    px: Optional[float],
+    chg: Optional[float],
+    today_s: str,
+) -> None:
+    """Refresh intraday % from screener when it differs from the frozen today's bar."""
+    if prior_close is None or prior_close <= 0:
+        return
+    if px is not None and px > 0:
+        ref_today = today_bar_close if today_bar_close is not None and today_bar_close > 0 else None
+        if ref_today is None or screener_price_moved_materially(px, ref_today):
+            out.at[idx, "price"] = round(px, 2)
+            out.at[idx, "change_pct"] = round((px - prior_close) / prior_close * 100.0, 2)
+            out.at[idx, "as_of_date"] = today_s
+            return
+    if chg is not None and should_apply_live_day_change(hist_chg, chg):
+        out.at[idx, "change_pct"] = round(chg, 2)
+        if px is not None and px > 0:
+            out.at[idx, "price"] = round(px, 2)
+        out.at[idx, "as_of_date"] = today_s
+
+
 def apply_session_day_adjustment(df: pd.DataFrame) -> pd.DataFrame:
     """
-    When historical_data's latest bar is before today, use screener price vs the last
-    stored close only when it differs materially; otherwise keep the two-bar historical %.
+    On session days, use fresh screener / NSE % vs the prior session close.
+    When today's bar is already in historical_data, still refresh if screener moved
+    since that bar was written (sync_screener_prices_from_latest_bars freezes price).
     """
     if df.empty or not _session_day_intraday_active():
         return df
@@ -245,14 +274,28 @@ def apply_session_day_adjustment(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for idx, row in out.iterrows():
         as_of = _parse_as_of_date(row.get("as_of_date"))
-        if as_of is not None and as_of >= today:
-            continue
-        ref = _finite_or_none(row.get("eod_close"))
-        if ref is None or ref <= 0:
-            continue
+        prior_close = _finite_or_none(row.get("eod_prev_close"))
+        today_bar_close = _finite_or_none(row.get("eod_close"))
         hist_chg = _finite_or_none(row.get("change_pct"))
         px = _finite_or_none(row.get("screener_price"))
         chg = _finite_or_none(row.get("screener_change_pct"))
+
+        if as_of is not None and as_of >= today:
+            _apply_intraday_screener_row(
+                out,
+                idx,
+                prior_close=prior_close,
+                today_bar_close=today_bar_close,
+                hist_chg=hist_chg,
+                px=px,
+                chg=chg,
+                today_s=today_s,
+            )
+            continue
+
+        ref = today_bar_close
+        if ref is None or ref <= 0:
+            continue
         if px is not None and px > 0 and screener_price_moved_materially(px, ref):
             out.at[idx, "price"] = round(px, 2)
             out.at[idx, "change_pct"] = round((px - ref) / ref * 100.0, 2)
@@ -263,6 +306,21 @@ def apply_session_day_adjustment(df: pd.DataFrame) -> pd.DataFrame:
                 out.at[idx, "price"] = round(px, 2)
             out.at[idx, "as_of_date"] = today_s
     return out
+
+
+def maybe_apply_live_cache_overlay(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply warmed NSE live quotes when available (even without client poll interval)."""
+    if df.empty or not _session_day_intraday_active():
+        return df
+    try:
+        import movers_live as ml
+
+        live = ml.live_cache_snapshot()
+        if live:
+            return ml.apply_live_overlay(df, live)
+    except Exception:
+        pass
+    return df
 
 
 def filter_day_change_by_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
@@ -322,6 +380,7 @@ def query_day_change(
 ) -> dict[str, Any]:
     df = load_movers_universe(conn, mcap_sql)
     df = apply_session_day_adjustment(df)
+    df = maybe_apply_live_cache_overlay(df)
     df = _apply_mcap_filter(df, min_mcap, max_mcap)
     df = _apply_sector_filter(df, allowed_symbols)
     df = df[df["change_pct"].notna()]
@@ -338,6 +397,7 @@ def query_day_change(
         "side": side,
         "limit": limit,
         "as_of_date": as_of,
+        "session_intraday": _session_day_intraday_active(),
         "count": len(rows),
         "data": rows,
     }

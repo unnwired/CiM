@@ -56,6 +56,8 @@ PROTECTED_REL = frozenset({
 
     "data/.cim-license",
 
+    "data/.cim-session.json",
+
 })
 
 

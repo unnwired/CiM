@@ -1,0 +1,14 @@
+name = "chartsinmotion"
+main = "src/index.ts"
+compatibility_date = "2024-06-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cim-license"
+database_id = "579f7ee5-8a33-4b98-bad8-c209693ed58f"
+
+[vars]
+MAX_DEVICES = "1"
+ACCESS_TTL_MINUTES = "60"
+REFRESH_TTL_DAYS = "90"
+OFFLINE_GRACE_DAYS = "7"

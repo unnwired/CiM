@@ -2,19 +2,27 @@
 <#
 .SYNOPSIS
   Canonical paths for Charts In Motion (CiM) distribution build.
+
+.DESCRIPTION
+  Plaintext and encrypted builds write to separate trees so they never overwrite each other:
+    installer\Plaintext\  — readable export, installer, update ZIP/folder
+    installer\Encrypted\  — hardened/encrypted export, installer, update ZIP/folder
 #>
 function Get-CiMPaths {
     param(
-        [string]$RepoRoot = ""
+        [string]$RepoRoot = "",
+        [ValidateSet("Plaintext", "Encrypted")]
+        [string]$DistributionKind = "Encrypted"
     )
     if (-not $RepoRoot) {
         $RepoRoot = Split-Path -Parent $PSScriptRoot
     }
     $installerDir = Join-Path $RepoRoot "installer"
-    $outputDir = Join-Path $installerDir "output"
+    $outputDir = Join-Path $installerDir $DistributionKind
     [pscustomobject]@{
         RepoRoot              = $RepoRoot
         InstallerDir          = $installerDir
+        DistributionKind      = $DistributionKind
         InstallerOutputDir    = $outputDir
         ExportRoot            = Join-Path $outputDir "CiM"
         VersionFile           = Join-Path $outputDir "version.txt"
@@ -28,6 +36,26 @@ function Get-CiMPaths {
         UpdateReadme          = Join-Path $outputDir "UPDATE_README.txt"
         SetupOutputDir        = $outputDir
     }
+}
+
+function Resolve-CiMPathsForExportRoot {
+    <#
+    .SYNOPSIS
+      Pick Plaintext vs Encrypted output paths from the export tree location.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ExportRoot,
+        [string]$RepoRoot = "",
+        [ValidateSet("Plaintext", "Encrypted")]
+        [string]$DefaultKind = "Encrypted"
+    )
+    if (-not $RepoRoot) {
+        $RepoRoot = Split-Path -Parent $PSScriptRoot
+    }
+    $full = [System.IO.Path]::GetFullPath($ExportRoot)
+    $parentName = [System.IO.Path]::GetFileName([System.IO.Path]::GetDirectoryName($full))
+    $kind = if ($parentName -eq "Plaintext" -or $parentName -eq "Encrypted") { $parentName } else { $DefaultKind }
+    return Get-CiMPaths -RepoRoot $RepoRoot -DistributionKind $kind
 }
 
 function Get-CiMDistProfilePath {

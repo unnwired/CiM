@@ -64,4 +64,4 @@ Write-Host ""
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host ""
-Write-Host "Done. See runtime\logs\build-distribution.log" -ForegroundColor Green
+Write-Host "Done. Encrypted build output: installer\Encrypted\ (CiM, CiMSetup-*.exe, CiM-Update-*). Log: runtime\logs\build-distribution.log" -ForegroundColor Green

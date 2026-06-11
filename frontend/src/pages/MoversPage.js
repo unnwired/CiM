@@ -27,7 +27,7 @@ import {
   DEFAULT_CHART_TIMEFRAME_3,
   normalizeSavedTimeframe3,
 } from '../config/chartViewDefaults';
-import { MOVERS_REFRESH_EVENT } from '../chartEvents';
+import { CHART_DATA_UPDATED_EVENT, MOVERS_REFRESH_EVENT } from '../chartEvents';
 import { formatMarketCap, formatCompactCount, parseMarketCapInput } from '../utils/formatMarketCap';
 
 const LIMIT_OPTIONS = [20, 50, 100, 200, 400];
@@ -290,7 +290,7 @@ export default function MoversPage({ onOpenChart, isActive = false, onContextMen
     }
   }, []);
 
-  const fetchMovers = useCallback(async ({ background = false, minMcapOverride, light = false } = {}) => {
+  const fetchMovers = useCallback(async ({ background = false, minMcapOverride, light = false, preferLive = false } = {}) => {
     if (background && loadingRef.current) return;
     if (!background) {
       loadingRef.current = true;
@@ -310,15 +310,16 @@ export default function MoversPage({ onOpenChart, isActive = false, onContextMen
     else params.volume_mode = volumeMode;
     const eodListUrl = mainTab === 'day' ? `${API}/api/movers/day-change` : `${API}/api/movers/volume`;
     const liveListUrl = mainTab === 'day' ? `${API}/api/movers/live/day-change` : `${API}/api/movers/live/volume`;
-    const listUrl = useLive ? liveListUrl : eodListUrl;
-    const metaUrl = useLive ? `${API}/api/movers/live/meta` : `${API}/api/movers/meta`;
+    const wantLive = useLive || preferLive;
+    const listUrl = wantLive ? liveListUrl : eodListUrl;
+    const metaUrl = wantLive ? `${API}/api/movers/live/meta` : `${API}/api/movers/meta`;
     try {
       let listRes;
       let usedEodFallback = false;
       try {
         listRes = await axios.get(listUrl, { params, timeout: light ? 45000 : 120000 });
       } catch (liveErr) {
-        if (!useLive) throw liveErr;
+        if (!wantLive) throw liveErr;
         usedEodFallback = true;
         listRes = await axios.get(eodListUrl, { params });
       }
@@ -327,7 +328,7 @@ export default function MoversPage({ onOpenChart, isActive = false, onContextMen
         const metaRes = await axios.get(metaUrl);
         metaData = metaRes.data || null;
       } catch {
-        if (!useLive) {
+        if (!wantLive) {
           try {
             const metaRes = await axios.get(`${API}/api/movers/meta`);
             metaData = metaRes.data || null;
@@ -339,14 +340,14 @@ export default function MoversPage({ onOpenChart, isActive = false, onContextMen
       let data = filterRowsByMinMcap(listRes.data?.data || [], mcapVal);
       if (background && rowsRef.current.length > 0) {
         setRows(data);
-        if (useLive) {
+        if (wantLive) {
           setChartQuoteTick(t => t + 1);
-          setPollCountdown(appliedPollIntervalSec);
+          if (useLive) setPollCountdown(appliedPollIntervalSec);
         }
       } else {
         setRows(data);
         setMeta(metaData);
-        if (!useLive) {
+        if (!wantLive) {
           setLiveSessionBanner(null);
           setLiveFetchNote('');
         } else if (usedEodFallback) {
@@ -359,7 +360,7 @@ export default function MoversPage({ onOpenChart, isActive = false, onContextMen
             nseRefresh: metaData?.live_status?.last_nse_refresh_at || null,
             marketClosed: metaData?.live_status?.market_open === false,
           });
-          setPollCountdown(appliedPollIntervalSec);
+          if (useLive) setPollCountdown(appliedPollIntervalSec);
         }
         if (!background) setPage(1);
       }
@@ -369,7 +370,7 @@ export default function MoversPage({ onOpenChart, isActive = false, onContextMen
       } else if (!background) setSelectedSymbol(null);
     } catch (e) {
       const msg = e.response?.data?.detail || e.message || 'Failed to load movers';
-      if (background && useLive) {
+      if (background && wantLive) {
         setLiveFetchNote('Live refresh paused (request failed). Next poll will retry.');
       } else {
         setFetchError(msg);
@@ -550,9 +551,13 @@ export default function MoversPage({ onOpenChart, isActive = false, onContextMen
   }
 
   useEffect(() => {
-    const h = () => fetchMovers();
+    const h = () => fetchMovers({ preferLive: true });
     window.addEventListener(MOVERS_REFRESH_EVENT, h);
-    return () => window.removeEventListener(MOVERS_REFRESH_EVENT, h);
+    window.addEventListener(CHART_DATA_UPDATED_EVENT, h);
+    return () => {
+      window.removeEventListener(MOVERS_REFRESH_EVENT, h);
+      window.removeEventListener(CHART_DATA_UPDATED_EVENT, h);
+    };
   }, [fetchMovers]);
   useEffect(() => { if (page !== safePage) setPage(safePage); }, [page, safePage]);
 

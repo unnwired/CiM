@@ -10,11 +10,15 @@ config/build_license_secret.txt
 config/build_license_secret.example
 data/.cim-license
 **/data/.cim-license
+data/.cim-session.json
+**/data/.cim-session.json
 
 # Installer build artifacts with embedded secret
 installer/license_secret.iss
 installer/generated_license_secret.pas
 installer/output/
+installer/Plaintext/
+installer/Encrypted/
 server/_cim_dist_embedded.py
 **/server/_cim_dist_embedded.py
 
@@ -77,6 +81,7 @@ __pycache__/
 # Local scratch and editor tooling
 .cursor/
 export_run*.log
+zJay/
 
 # OS / editor
 .DS_Store
