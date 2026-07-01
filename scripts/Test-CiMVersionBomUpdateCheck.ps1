@@ -14,6 +14,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "Get-CiMPaths.ps1")
 $RepoRoot = Split-Path -Parent $ScriptDir
 $fx = Get-CiMPaths -RepoRoot $RepoRoot
+$pkg = Get-CiMPackagePaths -RepoRoot $RepoRoot
 if (-not $ExportRoot) { $ExportRoot = $fx.ExportRoot }
 
 $TestRoot = Join-Path $fx.InstallerOutputDir "FlowX-bom-version-test"
@@ -41,8 +42,8 @@ if (Test-Path -LiteralPath $TestRoot) {
 Copy-Item -LiteralPath $ExportRoot -Destination $TestRoot -Recurse -Force
 
 # Sync fixed server modules into test tree (plaintext bootstrap path).
-Copy-Item -LiteralPath (Join-Path $RepoRoot "server\update_apply.py") -Destination (Join-Path $TestRoot "server\update_apply.py") -Force
-Copy-Item -LiteralPath (Join-Path $RepoRoot "server\github_updates.py") -Destination (Join-Path $TestRoot "server\github_updates.py") -Force
+Copy-Item -LiteralPath (Join-Path $pkg.ServerRoot "update_apply.py") -Destination (Join-Path $TestRoot "server\update_apply.py") -Force
+Copy-Item -LiteralPath (Join-Path $pkg.ServerRoot "github_updates.py") -Destination (Join-Path $TestRoot "server\github_updates.py") -Force
 Copy-Item -LiteralPath (Join-Path $RepoRoot "scripts\CiMApplyUpdate.ps1") -Destination (Join-Path $TestRoot "scripts\CiMApplyUpdate.ps1") -Force
 
 $verFile = Join-Path $TestRoot "version.txt"

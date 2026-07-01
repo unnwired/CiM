@@ -54,7 +54,13 @@ if (-not $ExportRoot) {
     $ExportRoot = [System.IO.Path]::GetFullPath($ExportRoot)
 }
 if (-not $Version) {
-    $Version = if (Test-Path -LiteralPath $fx.VersionFile) { (Get-Content -LiteralPath $fx.VersionFile -Raw).Trim() } else { "1.0.0" }
+    $exportVerFile = Join-Path $ExportRoot "version.txt"
+    if (Test-Path -LiteralPath $exportVerFile) {
+        $Version = (Get-Content -LiteralPath $exportVerFile -Raw).Trim().Trim([char]0xFEFF)
+    }
+    if (-not $Version) {
+        $Version = Get-CiMRepoVersion -RepoRoot $RepoRoot
+    }
 }
 if (-not $MinAppVersion) { $MinAppVersion = $Version }
 
@@ -84,11 +90,30 @@ function Test-SkipUpdatePath([string]$Rel) {
     return $false
 }
 
+$script:onlineOnly = $false
+$script:legacyInstallKeyRel = @(
+    'scripts/Repair-CiMLicense.ps1',
+    'scripts/Verify-CiMLicenseChain.ps1',
+    'scripts/Show-CiMInstallKey.ps1',
+    'Repair-CiMLicense.bat',
+    'Repair-CiMLicense-Auto.bat'
+)
+
+function Test-LegacyInstallKeyPath([string]$Rel) {
+    if (-not $script:onlineOnly) { return $false }
+    $r = $Rel -replace '\\', '/'
+    foreach ($legacy in $script:legacyInstallKeyRel) {
+        if ($r -ieq $legacy) { return $true }
+    }
+    return $false
+}
+
 function Add-Entry {
     param($List, $Seen, [string]$Root, [string]$FullPath)
     $rel = $FullPath.Substring($Root.Length).TrimStart('\', '/')
     if (Test-ProtectedPath $rel) { return }
     if (Test-SkipUpdatePath $rel) { return }
+    if (Test-LegacyInstallKeyPath $rel) { return }
     if ($Seen.ContainsKey($rel)) { return }
     $Seen[$rel] = $true
     $hash = (Get-FileHash -LiteralPath $FullPath -Algorithm SHA256).Hash.ToLower()
@@ -100,6 +125,7 @@ function Add-Entry {
 }
 
 $exportResolved = (Resolve-Path -LiteralPath $ExportRoot).Path
+$script:onlineOnly = Test-CiMOnlineOnlyInstall -InstallRoot $exportResolved
 $exportLicense = Join-Path $exportResolved "data\.cim-license"
 if (Test-Path -LiteralPath $exportLicense) {
     Remove-Item -LiteralPath $exportLicense -Force
@@ -175,9 +201,17 @@ foreach ($rel in @(
         "scripts\_Apply-LocalUpdate.ps1",
         "scripts\Diagnose-CiMInstall.ps1",
         "scripts\CiMApplyUpdate.ps1",
+        "scripts\Get-CiMPaths.ps1",
         "server\app_code_crypto.py",
         "server\cim_bootstrap.py",
         "server\github_updates.py",
+        "server\nse_bhavcopy.py",
+        "server\eod_reconcile.py",
+        "server\nse_constituents.py",
+        "server\market_map.py",
+        "scrape_daily.py",
+        "scrape_4h.py",
+        "nse_bhavcopy.py",
         "config\github_updates.json",
         "Apply-Update.bat"
     )) {
@@ -206,6 +240,11 @@ $manifestJson = $manifest | ConvertTo-Json -Depth 6
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText($manifestPath, $manifestJson, $utf8NoBom)
 
+$authNote = if ($script:onlineOnly) {
+    "4. Start Charts In Motion (start_cim.bat) and sign in with your account if prompted."
+} else {
+    "4. If offline license is missing, run Repair-CiMLicense.bat in the install folder.`n5. Run start_cim.bat in the Charts In Motion install folder."
+}
 $clientReadme = @"
 Charts In Motion update package (version $Version)
 =====================================
@@ -213,10 +252,9 @@ Charts In Motion update package (version $Version)
 CLIENT PC - double-click Install-Client-Update.bat in this folder.
 
 1. Close Charts In Motion.
-2. Extract this folder into your Charts In Motion UPDATE folder (e.g. D:\CiM\UPDATE\CiM-Update-1.0.2).
+2. Extract this folder into your Charts In Motion UPDATE folder (e.g. D:\CiM\UPDATE\CiM-Update-$Version).
 3. Run Install-Client-Update.bat (install path is detected automatically).
-4. If license is missing, run Repair-CiMLicense.bat in the Charts In Motion install folder.
-5. Run start_cim.bat in the Charts In Motion install folder.
+$authNote
 
 See CLIENT-STEPS.txt in this folder.
 "@
@@ -231,9 +269,11 @@ $installerPs1 = Join-Path $RepoRoot "scripts\Install-Client-Update.ps1"
 if (Test-Path -LiteralPath $installerBat) {
     Copy-Item -LiteralPath $installerBat -Destination (Join-Path $OutputDir "Install-Client-Update.bat") -Force
 }
-$repairBat = Join-Path $RepoRoot "Repair-CiMLicense.bat"
-if (Test-Path -LiteralPath $repairBat) {
-    Copy-Item -LiteralPath $repairBat -Destination (Join-Path $OutputDir "Repair-CiMLicense.bat") -Force
+if (-not $script:onlineOnly) {
+    $repairBat = Join-Path $RepoRoot "Repair-CiMLicense.bat"
+    if (Test-Path -LiteralPath $repairBat) {
+        Copy-Item -LiteralPath $repairBat -Destination (Join-Path $OutputDir "Repair-CiMLicense.bat") -Force
+    }
 }
 $clientPs1Paths = @()
 if (Test-Path -LiteralPath $installerPs1) {
@@ -254,7 +294,9 @@ $repoClientScripts = @(
     (Join-Path $RepoRoot "scripts\CiMInstallLocator.ps1"),
     (Join-Path $RepoRoot "scripts\CiMUpdatePackage.ps1"),
     (Join-Path $RepoRoot "scripts\Apply-LocalUpdate-Entry.ps1"),
-    (Join-Path $RepoRoot "scripts\Diagnose-CiMInstall.ps1")
+    (Join-Path $RepoRoot "scripts\Diagnose-CiMInstall.ps1"),
+    (Join-Path $RepoRoot "scripts\Get-CiMPaths.ps1"),
+    (Join-Path $RepoRoot "scripts\CiMApplyUpdate.ps1")
 )
 Test-PowerShellScriptSyntax -Paths ($repoClientScripts + $clientPs1Paths)
 
@@ -273,3 +315,4 @@ Write-Host "Publish to GitHub Releases:"
 Write-Host "  Repo:  https://github.com/unnwired/CiM-Updates/releases"
 Write-Host "  Tag:   v$Version"
 Write-Host "  Asset: $outName.zip"
+exit 0

@@ -9,7 +9,7 @@
   - Skips encrypt_app_code.ps1
   - Writes config\.cim-plaintext-dist so start_cim.bat uses cim_bootstrap + sign-in shell
 
-  Still requires CIM_LICENSE_SECRET for installer wizard and install keys.
+  Build machine may use config\.build_license_secret for plaintext export embed (online sign-in at runtime).
 
 .EXAMPLE
   $env:CIM_LICENSE_SECRET = 'your-secret'

@@ -13,9 +13,10 @@
 
 ```text
 Charts In Motion/
-├── frontend/              React UI (npm)
-├── desktop/               Electron shell (npm)
-├── server/                FastAPI app + workers
+├── packages/
+│   ├── browser/           React UI (npm)
+│   ├── desktop/           Electron shell (npm)
+│   └── server/            FastAPI app + workers
 ├── data/                  SQLite DB + user JSON (local; not in git)
 ├── config/                Product and update settings
 ├── scripts/               Build, export, installer, and update scripts
@@ -47,12 +48,12 @@ Distribution builds require additional private configuration on the maintainer m
 start_cim.bat
 ```
 
-- With `frontend\build` present → backend at `http://127.0.0.1:8000` + Electron
-- Without a build → `npm start` dev server on port 3000
+- With `packages\browser\build` present → backend at `http://127.0.0.1:8000` + Electron
+- Without a build → `npm start` in `packages\browser` on port 3000
 
 Stop: `stop_cim.bat`
 
-More detail: [README_START_STOP.md](README_START_STOP.md)
+More detail: [docs/README_START_STOP.md](docs/README_START_STOP.md)
 
 ---
 
@@ -87,7 +88,7 @@ Publish client updates to [CiM-Updates Releases](https://github.com/unnwired/CiM
 ## Tests
 
 ```powershell
-python -m unittest discover -s server/tests -p "test_*.py" -v
+python -m unittest discover -s packages/server/tests -p "test_*.py" -v
 python scripts\test_github_updates.py
 ```
 
@@ -103,9 +104,14 @@ See [.gitignore](.gitignore). In short: local databases, user data, build output
 
 | Doc | Audience |
 |-----|----------|
-| [README_START_STOP.md](README_START_STOP.md) | Start/stop and local run |
+| [docs/README.md](docs/README.md) | **Documentation index** — start here |
+| [docs/handoff/PROJECT_HANDOFF.md](docs/handoff/PROJECT_HANDOFF.md) | Full technical handoff for AI/developers |
+| [docs/handoff/PROJECT_HANDOFF_EXEC_SUMMARY.md](docs/handoff/PROJECT_HANDOFF_EXEC_SUMMARY.md) | Executive summary |
+| [docs/CHANGELOG.md](docs/CHANGELOG.md) | Product changelog |
+| [docs/README_START_STOP.md](docs/README_START_STOP.md) | Start/stop and local run |
 | [docs/UPDATE.md](docs/UPDATE.md) | Client update flow |
 | [docs/CLIENT_UPDATE.md](docs/CLIENT_UPDATE.md) | End-user update steps |
+| [docs/standards/CIM_UI_STANDARD.md](docs/standards/CIM_UI_STANDARD.md) | Browser UI standard |
 
 ---
 

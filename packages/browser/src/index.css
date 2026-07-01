@@ -1,0 +1,263 @@
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Stable cursor in chart toolbars (avoid I-beam flashing in gaps between controls). */
+.chart-app-toolbar {
+  cursor: default;
+  user-select: none;
+}
+.chart-app-toolbar input,
+.chart-app-toolbar textarea,
+.chart-app-toolbar select {
+  cursor: text;
+  user-select: text;
+}
+.chart-app-toolbar select {
+  cursor: pointer;
+}
+.chart-app-toolbar button,
+.chart-app-toolbar a[href],
+.chart-app-toolbar [role='button'],
+.chart-app-toolbar label {
+  cursor: pointer;
+}
+.chart-app-toolbar input[type='checkbox'],
+.chart-app-toolbar input[type='radio'] {
+  cursor: pointer;
+  user-select: none;
+}
+
+/* Dashboard filter chip rail: subtle horizontal scrollbar when many filters */
+.dashboard-filter-chips-rail {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.dashboard-filter-chips-rail::-webkit-scrollbar {
+  height: 6px;
+}
+.dashboard-filter-chips-rail::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+.dashboard-filter-chips-rail::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Filter chip: label · enable toggle (24px) · remove (12px, red on hover). */
+.dashboard-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.dashboard-filter-chip-drag {
+  flex-shrink: 0;
+  width: 14px;
+  margin-right: 2px;
+  cursor: grab;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1;
+  user-select: none;
+  letter-spacing: -0.12em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+}
+
+.dashboard-filter-chip-drag:active {
+  cursor: grabbing;
+}
+
+.dashboard-filter-chip-body {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  border-radius: 5px;
+  background-color: var(--bg-secondary);
+  padding-right: 0;
+  overflow: hidden;
+}
+
+.dashboard-filter-chip-body--disabled {
+  opacity: 0.72;
+}
+
+.dashboard-filter-chip-label {
+  cursor: pointer;
+  user-select: none;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+}
+
+.dashboard-filter-chip-toggle {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-left: 1px solid var(--border);
+  cursor: pointer;
+  background-color: transparent;
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.dashboard-filter-chip-divider {
+  align-self: stretch;
+  width: 1px;
+  flex-shrink: 0;
+  background-color: var(--border);
+}
+
+.dashboard-filter-chip-remove {
+  width: 16px;
+  height: 24px;
+  margin-left: 1px;
+  padding: 0;
+  border: none;
+  border-radius: 0 4px 4px 0;
+  cursor: pointer;
+  background-color: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+.dashboard-filter-chip-remove:hover {
+  color: var(--accent-red);
+  background-color: rgba(248, 81, 73, 0.12);
+}
+
+.dashboard-filter-chip-remove svg {
+  display: block;
+  pointer-events: none;
+  transform: translateX(-0.5px);
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+
+.cim-server-status-bar {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  font-size: 11px;
+}
+
+.cim-server-status-cell {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  pointer-events: none;
+  user-select: none;
+}
+
+.cim-server-status-inline {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  font-size: 8px;
+  line-height: 1.15;
+}
+
+.cim-server-status-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.cim-server-status-inline .cim-server-status-panel {
+  align-items: flex-start;
+  gap: 0;
+}
+
+.cim-server-status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.cim-server-status-inline .cim-server-status-line {
+  gap: 5px;
+}
+
+.cim-server-status-label {
+  color: var(--text-muted);
+}
+
+.cim-server-status-inline .cim-server-status-label {
+  font-size: 8px;
+}
+
+.cim-health-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  vertical-align: middle;
+  background: #d29922;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18);
+  pointer-events: auto;
+  cursor: help;
+}
+
+.cim-server-status-inline .cim-health-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.cim-health-dot--green { background: #3fb950; }
+.cim-health-dot--amber { background: #d29922; }
+.cim-health-dot--red { background: #f85149; }
+.cim-health-dot--loading {
+  background: #d29922;
+  animation: cim-health-dot-pulse 1.4s ease-in-out infinite;
+}
+.cim-health-dot--unknown { background: #d29922; }
+
+.cim-users-online-count {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.cim-server-status-inline .cim-users-online-count {
+  font-size: 8px;
+  font-weight: 500;
+}
+
+@keyframes cim-health-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}

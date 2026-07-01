@@ -31,6 +31,7 @@ if (-not $ExportRoot) {
     $ExportRoot = [System.IO.Path]::GetFullPath($ExportRoot)
     $fx = Resolve-CiMPathsForExportRoot -ExportRoot $ExportRoot -RepoRoot $RepoRoot -DefaultKind Encrypted
 }
+$pkg = Get-CiMPackagePaths -RepoRoot $RepoRoot
 
 function Test-ExportPackageComplete {
     param([string]$Root)
@@ -108,7 +109,7 @@ $py = Get-BuildPythonExe -ExportRoot $ExportRoot
 Write-Host "Using build Python: $py"
 
 # Recompile server modules from repo sources so encrypt picks up latest code (not stale .pyc.enc).
-$serverSrc = Join-Path $RepoRoot "server"
+$serverSrc = $pkg.ServerRoot
 $serverDst = Join-Path $ExportRoot "server"
 if (Test-Path -LiteralPath $serverSrc) {
     Get-ChildItem -LiteralPath $serverSrc -File -Filter "*.py" -ErrorAction SilentlyContinue |
@@ -149,7 +150,7 @@ $profilePath = Join-Path $configDir ".fx-dist.cfg"
 $helper = @"
 import os, sys
 from pathlib import Path
-sys.path.insert(0, r'$RepoRoot')
+sys.path.insert(0, r'$($pkg.PackagesRoot -replace '\\', '\\')')
 from server import app_code_crypto as c
 
 root = Path(r'$ExportRoot')
@@ -198,7 +199,8 @@ print(f'Encrypted {enc_count} files under {root}')
 # is_development_tree() true and breaks /static JS (blank Electron shell).
 keep_server_py = frozenset({
     '__init__.py', 'app_code_crypto.py', 'cim_bootstrap.py', 'product_config.py',
-    '_cim_dist_embedded.py', 'license_client.py', 'license_routes.py',
+    '_cim_dist_embedded.py', 'license_client.py', 'license_routes.py', 'http_ssl.py',
+    'session_store.py', 'user_data_paths.py', 'web_auth.py', 'showcase_host_gate.py',
 })
 for py_path in sorted(server_dir.glob('*.py')):
     if py_path.name in keep_server_py:
@@ -263,10 +265,19 @@ $plainFiles = @(
     "server\cim_bootstrap.py",
     "server\product_config.py",
     "server\license_client.py",
-    "server\license_routes.py"
+    "server\license_routes.py",
+    "server\session_store.py",
+    "server\user_data_paths.py",
+    "server\web_auth.py",
+    "server\showcase_host_gate.py",
+    "server\http_ssl.py"
 )
 foreach ($rel in $plainFiles) {
-    $src = Join-Path $RepoRoot $rel
+    if ($rel -like "server\*") {
+        $src = Join-Path $pkg.ServerRoot ($rel -replace '^server\\', '')
+    } else {
+        $src = Join-Path $RepoRoot $rel
+    }
     $dst = Join-Path $ExportRoot $rel
     if (Test-Path -LiteralPath $src) {
         $parent = Split-Path -Parent $dst

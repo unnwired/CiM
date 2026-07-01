@@ -63,12 +63,134 @@ RATE_DELAY_MAX      = 1.5
 MAX_CONSEC_FAILURES = 15
 PAUSE_ON_BLOCK      = 60
 MAX_FAILURE_RATE    = 0.30
-SNAPSHOT_TIMEFRAMES = ("1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W", "4W", "1M")
-SNAPSHOT_LIGHT_TIMEFRAMES = ("1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W")
+SNAPSHOT_TIMEFRAMES = ("4H", "1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W", "4W", "1M")
+SNAPSHOT_LIGHT_TIMEFRAMES = ("4H", "1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W")
 SNAPSHOT_PARALLEL_MODE = str(os.getenv("FLOWX_SNAPSHOT_PARALLEL_MODE", "auto")).strip().lower()
 if SNAPSHOT_PARALLEL_MODE not in {"auto", "process", "thread"}:
     SNAPSHOT_PARALLEL_MODE = "auto"
-MACD_HIST_CHAIN_MAX_BARS = 30
+MACD_HIST_CHAIN_MAX_BARS = 60
+SNAPSHOT_INDICATOR_FAMILIES = frozenset({"ohlc", "ema", "macd", "stochrsi"})
+SNAPSHOT_ALL_FAMILIES = frozenset(SNAPSHOT_INDICATOR_FAMILIES)
+
+
+def _normalize_snapshot_families(families) -> frozenset:
+    if families is None:
+        return SNAPSHOT_ALL_FAMILIES
+    if isinstance(families, str):
+        families = [families]
+    out = {str(f).strip().lower() for f in families if str(f).strip()}
+    out = {f for f in out if f in SNAPSHOT_INDICATOR_FAMILIES}
+    return frozenset(out) if out else SNAPSHOT_ALL_FAMILIES
+# Incremental rebuild: last N daily bars per symbol (EMA200 + MACD chain + weekly rollups).
+SNAPSHOT_INCREMENTAL_MAX_DAILY_BARS = max(
+    260,
+    int(os.environ.get("NSE_PULSE_SNAPSHOT_INCREMENTAL_MAX_DAILY_BARS", "900")),
+)
+
+_SNAPSHOT_FAMILY_FIELDS = {
+    "ohlc": [
+        "close_curr", "close_prev", "open_curr", "open_prev",
+        "high_curr", "high_prev", "low_curr", "low_prev",
+    ],
+    "ema": [
+        "ema9", "ema9_prev", "ema21", "ema21_prev", "ema50", "ema50_prev",
+        "ema100", "ema100_prev", "ema200", "ema200_prev",
+    ],
+    "macd": [
+        "macd", "macd_prev", "macd_signal", "macd_signal_prev", "macd_hist_chain",
+    ],
+    "stochrsi": ["stoch_k", "stoch_k_prev", "stoch_d", "stoch_d_prev"],
+}
+_SNAPSHOT_DATA_FIELDS = [
+    f for fs in _SNAPSHOT_FAMILY_FIELDS.values() for f in fs
+]
+
+
+def _snapshot_merge_needed(families) -> bool:
+    fam = _normalize_snapshot_families(families)
+    return fam != SNAPSHOT_ALL_FAMILIES
+
+
+def _merge_snapshot_rows_with_existing(cursor, rows, families):
+    """Preserve columns outside the rebuilt families when upserting partial payloads."""
+    if not rows or not _snapshot_merge_needed(families):
+        return rows
+    fam = _normalize_snapshot_families(families)
+    preserve_fields = set()
+    for skip in SNAPSHOT_ALL_FAMILIES - fam:
+        preserve_fields.update(_SNAPSHOT_FAMILY_FIELDS.get(skip, []))
+    merged = []
+    col_sql = ", ".join(_SNAPSHOT_DATA_FIELDS)
+    for row in rows:
+        sym = row["symbol"]
+        tf = row["timeframe"]
+        cursor.execute(
+            f"SELECT {col_sql} FROM indicator_snapshots WHERE symbol = ? AND timeframe = ?",
+            (sym, tf),
+        )
+        existing = cursor.fetchone()
+        new_row = {"symbol": sym, "timeframe": tf}
+        if existing:
+            for i, field in enumerate(_SNAPSHOT_DATA_FIELDS):
+                if field in preserve_fields:
+                    new_row[field] = existing[i]
+                else:
+                    new_row[field] = row.get(field, existing[i])
+        else:
+            for field in _SNAPSHOT_DATA_FIELDS:
+                new_row[field] = row.get(field)
+        merged.append(new_row)
+    return merged
+
+
+_SNAPSHOT_UPSERT_SQL = """
+            INSERT INTO indicator_snapshots (
+                symbol, timeframe, close_curr, close_prev, open_curr, open_prev,
+                high_curr, high_prev, low_curr, low_prev,
+                ema9, ema9_prev, ema21, ema21_prev, ema50, ema50_prev,
+                ema100, ema100_prev, ema200, ema200_prev,
+                macd, macd_prev, macd_signal, macd_signal_prev,
+                macd_hist_chain,
+                stoch_k, stoch_k_prev, stoch_d, stoch_d_prev, updated_at
+            ) VALUES (
+                :symbol, :timeframe, :close_curr, :close_prev, :open_curr, :open_prev,
+                :high_curr, :high_prev, :low_curr, :low_prev,
+                :ema9, :ema9_prev, :ema21, :ema21_prev, :ema50, :ema50_prev,
+                :ema100, :ema100_prev, :ema200, :ema200_prev,
+                :macd, :macd_prev, :macd_signal, :macd_signal_prev,
+                :macd_hist_chain,
+                :stoch_k, :stoch_k_prev, :stoch_d, :stoch_d_prev, CURRENT_TIMESTAMP
+            )
+            ON CONFLICT(symbol, timeframe) DO UPDATE SET
+                close_curr=excluded.close_curr,
+                close_prev=excluded.close_prev,
+                open_curr=excluded.open_curr,
+                open_prev=excluded.open_prev,
+                high_curr=excluded.high_curr,
+                high_prev=excluded.high_prev,
+                low_curr=excluded.low_curr,
+                low_prev=excluded.low_prev,
+                ema9=excluded.ema9,
+                ema9_prev=excluded.ema9_prev,
+                ema21=excluded.ema21,
+                ema21_prev=excluded.ema21_prev,
+                ema50=excluded.ema50,
+                ema50_prev=excluded.ema50_prev,
+                ema100=excluded.ema100,
+                ema100_prev=excluded.ema100_prev,
+                ema200=excluded.ema200,
+                ema200_prev=excluded.ema200_prev,
+                macd=excluded.macd,
+                macd_prev=excluded.macd_prev,
+                macd_signal=excluded.macd_signal,
+                macd_signal_prev=excluded.macd_signal_prev,
+                macd_hist_chain=excluded.macd_hist_chain,
+                stoch_k=excluded.stoch_k,
+                stoch_k_prev=excluded.stoch_k_prev,
+                stoch_d=excluded.stoch_d,
+                stoch_d_prev=excluded.stoch_d_prev,
+                updated_at=CURRENT_TIMESTAMP
+        """
 
 
 def load_nse_calendar():
@@ -121,10 +243,26 @@ def get_today_ist() -> date:
 
 def sync_screener_prices_from_latest_bars(conn, log_fn=None) -> int:
     """
-    After OHLCV writes today's bar, align screener.price and change_percent with
-    the latest two daily closes so movers / screeners show the current session.
+    After OHLCV refresh, align screener.price and change_percent with the latest
+    two daily closes (works after market close — not only when today's bar exists).
+    Skipped during live session on legacy NSE-primary installs only.
     """
-    today_iso = get_today_ist().strftime("%Y-%m-%d")
+    try:
+        import sys
+        from pathlib import Path
+
+        pkg = Path(__file__).resolve().parents[1]
+        if str(pkg) not in sys.path:
+            sys.path.insert(0, str(pkg))
+        from server import movers_data as md
+        from server.product_config import yahoo_primary_pipeline
+
+        if md._session_day_intraday_active() and not yahoo_primary_pipeline():
+            if log_fn:
+                log_fn("[skip] Screener EOD sync deferred during live session (NSE quotes are authoritative)")
+            return 0
+    except Exception:
+        pass
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -144,17 +282,16 @@ def sync_screener_prices_from_latest_bars(conn, log_fn=None) -> int:
                 / (SELECT Close FROM historical_data h3
                    WHERE h3.Symbol = screener.symbol ORDER BY h3.Date DESC LIMIT 1 OFFSET 1)
                 * 100, 2)
-        WHERE EXISTS (
-            SELECT 1 FROM historical_data h
-            WHERE h.Symbol = screener.symbol AND substr(h.Date, 1, 10) = ?
-        )
-        """,
-        (today_iso,),
+        WHERE (
+            SELECT COUNT(*) FROM historical_data h
+            WHERE h.Symbol = screener.symbol
+        ) >= 2
+        """
     )
     n = cursor.rowcount
     conn.commit()
     if log_fn and n:
-        log_fn(f"✓ Screener prices synced for {n} symbols with today's bar ({today_iso})")
+        log_fn(f"[OK] Screener prices synced from latest EOD bars for {n} symbols")
     return n
 
 
@@ -177,8 +314,14 @@ def write_rows(conn, symbol, rows, overwrite=False):
             data,
         )
     else:
+        for date_str, o, h, l, c, v in rows:
+            day = str(date_str)[:10]
+            cursor.execute(
+                "DELETE FROM historical_data WHERE Symbol=? AND substr(Date,1,10)=?",
+                (symbol, day),
+            )
         cursor.executemany(
-            "INSERT OR IGNORE INTO historical_data (Symbol, Date, Open, High, Low, Close, AdjClose, Volume, MarketCap) VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO historical_data (Symbol, Date, Open, High, Low, Close, AdjClose, Volume, MarketCap) VALUES (?,?,?,?,?,?,?,?,?)",
             data,
         )
     conn.commit()
@@ -548,74 +691,296 @@ def last_two(series):
     return round(float(valid[-1]), 4), round(float(valid[-2]), 4)
 
 
-def build_snapshot_payload(symbol, timeframe, candles):
+def _load_snapshot_bars_module():
+    """Chart-parity bars + MACD (repo: packages/server; distro: server/)."""
+    import importlib.util
+    import sys
+    root = Path(__file__).resolve().parent
+    mod_name = "cim_snapshot_bars"
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    candidates = (
+        root / "packages" / "server" / "snapshot_bars.py",
+        root / "server" / "snapshot_bars.py",
+    )
+    path = next((p for p in candidates if p.is_file()), None)
+    if path is None:
+        raise RuntimeError(
+            "Cannot load snapshot_bars.py — expected at "
+            + " or ".join(str(p) for p in candidates)
+        )
+    spec = importlib.util.spec_from_file_location(mod_name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load snapshot_bars from {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    sys.modules[mod_name] = mod
+    return mod
+
+
+def build_snapshot_payload(symbol, timeframe, candles, families=None):
     if len(candles) < 3:
         return None
+    fam = _normalize_snapshot_families(families)
     closes = [float(c[4]) for c in candles]
     last = candles[-1]
     prev = candles[-2]
     payload = {
         "symbol": symbol,
         "timeframe": timeframe,
-        "close_curr": round(float(last[4]), 4),
-        "close_prev": round(float(prev[4]), 4),
-        "open_curr": round(float(last[1]), 4),
-        "open_prev": round(float(prev[1]), 4),
-        "high_curr": round(float(last[2]), 4),
-        "high_prev": round(float(prev[2]), 4),
-        "low_curr": round(float(last[3]), 4),
-        "low_prev": round(float(prev[3]), 4),
     }
-    for period in (9, 21, 50, 100, 200):
-        curr, prev_val = last_two(calc_ema_series_local(closes, period))
-        payload[f"ema{period}"] = curr
-        payload[f"ema{period}_prev"] = prev_val
-    macd = calculate_macd_local(closes, fast=12, slow=26, signal=9)
-    payload["macd"], payload["macd_prev"] = last_two(macd["macd"])
-    payload["macd_signal"], payload["macd_signal_prev"] = last_two(macd["signal"])
-    hist_valid = [round(float(v), 4) for v in macd["histogram"] if v is not None]
-    payload["macd_hist_chain"] = "|".join(
-        f"{v:.4f}" for v in hist_valid[-MACD_HIST_CHAIN_MAX_BARS:]
-    ) if hist_valid else None
-    stoch = calculate_stochrsi_local(closes, rsi_period=14, stoch_period=14, k_smooth=3, d_smooth=3)
-    payload["stoch_k"], payload["stoch_k_prev"] = last_two(stoch["k"])
-    payload["stoch_d"], payload["stoch_d_prev"] = last_two(stoch["d"])
+    if "ohlc" in fam:
+        payload.update({
+            "close_curr": round(float(last[4]), 4),
+            "close_prev": round(float(prev[4]), 4),
+            "open_curr": round(float(last[1]), 4),
+            "open_prev": round(float(prev[1]), 4),
+            "high_curr": round(float(last[2]), 4),
+            "high_prev": round(float(prev[2]), 4),
+            "low_curr": round(float(last[3]), 4),
+            "low_prev": round(float(prev[3]), 4),
+        })
+    if "ema" in fam:
+        for period in (9, 21, 50, 100, 200):
+            curr, prev_val = last_two(calc_ema_series_local(closes, period))
+            payload[f"ema{period}"] = curr
+            payload[f"ema{period}_prev"] = prev_val
+    if "macd" in fam:
+        sb = _load_snapshot_bars_module()
+        macd = sb.calculate_macd(closes, fast=12, slow=26, signal=9)
+        payload["macd"], payload["macd_prev"] = last_two(macd["macd"])
+        payload["macd_signal"], payload["macd_signal_prev"] = last_two(macd["signal"])
+        hist_valid = [round(float(v), 4) for v in macd["histogram"] if v is not None]
+        payload["macd_hist_chain"] = "|".join(
+            f"{v:.4f}" for v in hist_valid[-MACD_HIST_CHAIN_MAX_BARS:]
+        ) if hist_valid else None
+    if "stochrsi" in fam:
+        stoch = calculate_stochrsi_local(closes, rsi_period=14, stoch_period=14, k_smooth=3, d_smooth=3)
+        payload["stoch_k"], payload["stoch_k_prev"] = last_two(stoch["k"])
+        payload["stoch_d"], payload["stoch_d_prev"] = last_two(stoch["d"])
     return payload
 
 
-def _build_snapshot_rows_for_symbol(sym, candles, allowed_timeframes=None):
+def _build_snapshot_rows_for_symbol(sym, candles, allowed_timeframes=None, bars_4h_series=None, families=None):
     rows = []
     allowed = set(allowed_timeframes) if allowed_timeframes else None
-    daily = candles
-    weekly = aggregate_to_weekly(candles)
-    two_w = aggregate_to_nperiod_local(weekly, 2, "week")
-    four_w = aggregate_to_nperiod_local(weekly, 4, "week")
-    monthly = aggregate_to_monthly(candles)
-    series_tuples = [("1D", daily)]
-    for nd in range(2, 7):
-        series_tuples.append((f"{nd}D", aggregate_to_nperiod_local(daily, nd, "day")))
-    series_tuples.extend(
-        [
-            ("1W", weekly),
-            ("2W", two_w),
-            ("4W", four_w),
-            ("1M", monthly),
-        ]
-    )
-    for timeframe, series in series_tuples:
+    sb = _load_snapshot_bars_module()
+    for timeframe in SNAPSHOT_TIMEFRAMES:
         if allowed is not None and timeframe not in allowed:
             continue
-        payload = build_snapshot_payload(sym, timeframe, series)
+        if timeframe == "4H":
+            series = list(bars_4h_series or [])
+        else:
+            series = sb.chart_candles_for_timeframe(candles, timeframe)
+        if len(series) < 3:
+            continue
+        payload = build_snapshot_payload(sym, timeframe, series, families=families)
         if payload is not None:
             rows.append(payload)
     return rows
 
 
-def _build_snapshot_rows_for_chunk(chunk_items, allowed_timeframes=None):
+def _build_snapshot_rows_for_chunk(chunk_items, allowed_timeframes=None, bars_4h_by_symbol=None, families=None):
     out = []
+    bars_map = bars_4h_by_symbol or {}
     for sym, candles in chunk_items:
-        out.extend(_build_snapshot_rows_for_symbol(sym, candles, allowed_timeframes=allowed_timeframes))
+        out.extend(
+            _build_snapshot_rows_for_symbol(
+                sym,
+                candles,
+                allowed_timeframes=allowed_timeframes,
+                bars_4h_series=bars_map.get(sym),
+                families=families,
+            )
+        )
     return out, len(chunk_items)
+
+
+def _is_incremental_snapshot_run(symbols_override, clear_first) -> bool:
+    return symbols_override is not None and not clear_first
+
+
+def _load_candles_batch(cursor, sym_batch, max_daily_bars=None):
+    """Load OHLC tuples per symbol; optional cap on trailing daily bars (incremental safe path)."""
+    if not sym_batch:
+        return {}
+    placeholders = ",".join(["?"] * len(sym_batch))
+    candles_by_symbol = {sym: [] for sym in sym_batch}
+    params = list(sym_batch)
+    if max_daily_bars is None or int(max_daily_bars) <= 0:
+        cursor.execute(
+            f"SELECT Symbol, SUBSTR(Date,1,10) as dt, Open, High, Low, Close "
+            f"FROM historical_data WHERE Symbol IN ({placeholders}) "
+            f"ORDER BY Symbol ASC, Date ASC",
+            params,
+        )
+    else:
+        n = int(max_daily_bars)
+        cursor.execute(
+            f"SELECT Symbol, dt, Open, High, Low, Close FROM ("
+            f"  SELECT Symbol, SUBSTR(Date,1,10) as dt, Open, High, Low, Close,"
+            f"         ROW_NUMBER() OVER (PARTITION BY Symbol ORDER BY Date DESC) AS rn"
+            f"  FROM historical_data WHERE Symbol IN ({placeholders})"
+            f") WHERE rn <= ? ORDER BY Symbol ASC, dt ASC",
+            params + [n],
+        )
+    for row in cursor:
+        if row[2] is None or row[3] is None or row[4] is None or row[5] is None:
+            continue
+        candles_by_symbol.setdefault(row[0], []).append((row[1], row[2], row[3], row[4], row[5]))
+    return candles_by_symbol
+
+
+def _delete_snapshots_for_symbols(conn, symbols, timeframes):
+    if not symbols or not timeframes:
+        return
+    tf_placeholders = ",".join(["?"] * len(timeframes))
+    sym_placeholders = ",".join(["?"] * len(symbols))
+    conn.execute(
+        f"DELETE FROM indicator_snapshots WHERE timeframe IN ({tf_placeholders}) AND symbol IN ({sym_placeholders})",
+        list(timeframes) + list(symbols),
+    )
+
+
+def _compute_snapshot_rows_parallel(items, requested_timeframes, log, bars_4h_by_symbol=None, families=None):
+    snapshot_rows = []
+    if not items:
+        return snapshot_rows
+    workers = max(1, min(4, os.cpu_count() or 1))
+    chunk_size = max(5, len(items) // max(1, workers * 2))
+    chunks = [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+    effective_mode = SNAPSHOT_PARALLEL_MODE
+    if effective_mode == "auto":
+        effective_mode = "thread" if os.name == "nt" else "process"
+
+    def _consume_chunk(chunk):
+        rows_chunk, _processed = _build_snapshot_rows_for_chunk(
+            chunk, requested_timeframes, bars_4h_by_symbol, families=families
+        )
+        return rows_chunk
+
+    if workers <= 1 or len(chunks) <= 1:
+        for chunk in chunks:
+            snapshot_rows.extend(_consume_chunk(chunk))
+    elif effective_mode == "process":
+        try:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(
+                        _build_snapshot_rows_for_chunk, c, requested_timeframes, bars_4h_by_symbol, families
+                    )
+                    for c in chunks
+                ]
+                for fut in concurrent.futures.as_completed(futures):
+                    snapshot_rows.extend(fut.result()[0])
+        except Exception:
+            log("[perf] snapshots: Process mode unavailable; falling back to thread mode.")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max(2, workers)) as pool:
+                futures = [
+                    pool.submit(
+                        _build_snapshot_rows_for_chunk, c, requested_timeframes, bars_4h_by_symbol, families
+                    )
+                    for c in chunks
+                ]
+                for fut in concurrent.futures.as_completed(futures):
+                    snapshot_rows.extend(fut.result()[0])
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(2, workers)) as pool:
+            futures = [
+                pool.submit(
+                    _build_snapshot_rows_for_chunk, c, requested_timeframes, bars_4h_by_symbol, families
+                )
+                for c in chunks
+            ]
+            for fut in concurrent.futures.as_completed(futures):
+                snapshot_rows.extend(fut.result()[0])
+    return snapshot_rows
+
+
+def _rebuild_indicator_snapshots_incremental_safe(
+    conn,
+    cursor,
+    symbols,
+    requested_timeframes,
+    max_daily_bars,
+    log,
+    progress_callback,
+    t_total_start,
+    families=None,
+):
+    """Bounded OHLC load, per-batch compute, delete+write only after successful compute."""
+    total_syms = len(symbols)
+    upsert_sql = _SNAPSHOT_UPSERT_SQL
+    default_batch = int(os.environ.get("NSE_PULSE_SNAPSHOT_INCREMENTAL_BATCH", "50"))
+    load_batch = int(os.environ.get("NSE_PULSE_SNAPSHOT_LOAD_BATCH", str(default_batch)))
+    load_batch = max(1, min(load_batch, 200))
+    symbol_batches = [symbols[i:i + load_batch] for i in range(0, len(symbols), load_batch)]
+    n_sym_batches = len(symbol_batches)
+    log(
+        f"Incremental safe path: {n_sym_batches} batch(es) (~{load_batch} symbols), "
+        f"last {max_daily_bars} daily bars/symbol, delete-after-compute per batch."
+    )
+    if progress_callback:
+        progress_callback(0, total_syms)
+
+    processed_syms = 0
+    total_rows = 0
+    hist_chain_rows = 0
+    hist_chain_full = 0
+
+    for bi, sym_batch in enumerate(symbol_batches):
+        t_batch = time.perf_counter()
+        candles_by_symbol = _load_candles_batch(cursor, sym_batch, max_daily_bars=max_daily_bars)
+        items = list(candles_by_symbol.items())
+        bars_4h_batch = {}
+        if "4H" in requested_timeframes:
+            try:
+                from server.bars_4h import load_bars_4h_candles_batch
+
+                bars_4h_batch = load_bars_4h_candles_batch(conn, sym_batch)
+            except Exception:
+                bars_4h_batch = {}
+        snapshot_rows = _compute_snapshot_rows_parallel(
+            items, requested_timeframes, log, bars_4h_by_symbol=bars_4h_batch, families=families
+        )
+        if snapshot_rows:
+            if not _snapshot_merge_needed(families):
+                _delete_snapshots_for_symbols(conn, sym_batch, requested_timeframes)
+            snapshot_rows = _merge_snapshot_rows_with_existing(cursor, snapshot_rows, families)
+            cursor.executemany(upsert_sql, snapshot_rows)
+            conn.commit()
+            total_rows += len(snapshot_rows)
+            hist_chain_rows += sum(1 for r in snapshot_rows if r.get("macd_hist_chain"))
+            hist_chain_full += sum(
+                1 for r in snapshot_rows
+                if r.get("macd_hist_chain")
+                and len(str(r["macd_hist_chain"]).split("|")) >= MACD_HIST_CHAIN_MAX_BARS
+            )
+        processed_syms += len(sym_batch)
+        if progress_callback:
+            p = min(total_syms, max(0, processed_syms))
+            if processed_syms < total_syms:
+                p = min(p, max(0, total_syms - 1))
+            progress_callback(p, total_syms)
+        del candles_by_symbol, snapshot_rows, items
+        t_batch_ms = int((time.perf_counter() - t_batch) * 1000)
+        log(f"[perf] snapshots batch {bi + 1}/{n_sym_batches}: {len(sym_batch)} symbols in {t_batch_ms}ms")
+
+    if progress_callback:
+        progress_callback(total_syms, total_syms)
+    hist_pct = (100.0 * hist_chain_full / hist_chain_rows) if hist_chain_rows else 0.0
+    total_ms = int((time.perf_counter() - t_total_start) * 1000)
+    log(
+        f"[perf] snapshots incremental safe: {total_rows} rows for {total_syms} symbols in {total_ms}ms"
+    )
+    log(
+        f"macd_hist_chain: {hist_chain_rows} rows with chain, "
+        f"{hist_chain_full} with >={MACD_HIST_CHAIN_MAX_BARS} bars ({hist_pct:.1f}%)"
+    )
+    log(
+        f"✓ Indicator snapshots updated for {len(symbols)} stocks across {', '.join(requested_timeframes)}"
+    )
+    return len(symbols)
 
 
 def rebuild_indicator_snapshots_universe(
@@ -625,6 +990,7 @@ def rebuild_indicator_snapshots_universe(
     message_callback=None,
     symbols_override=None,
     timeframes_override=None,
+    families_override=None,
 ):
     """
     Rebuild indicator_snapshots for all screener symbols from historical_data.
@@ -650,6 +1016,7 @@ def rebuild_indicator_snapshots_universe(
         )
         if not requested_timeframes:
             requested_timeframes = SNAPSHOT_TIMEFRAMES
+        families = _normalize_snapshot_families(families_override)
         if clear_first:
             log("Clearing existing indicator snapshot rows...")
             conn.execute("DELETE FROM indicator_snapshots")
@@ -667,14 +1034,20 @@ def rebuild_indicator_snapshots_universe(
             log("No symbols in screener; nothing to snapshot.")
             return 0
 
-        if not clear_first:
-            tf_placeholders = ",".join(["?"] * len(requested_timeframes))
-            sym_placeholders = ",".join(["?"] * len(symbols))
-            conn.execute(
-                f"DELETE FROM indicator_snapshots WHERE timeframe IN ({tf_placeholders}) AND symbol IN ({sym_placeholders})",
-                list(requested_timeframes) + list(symbols),
+        incremental_safe = _is_incremental_snapshot_run(symbols_override, clear_first)
+        if incremental_safe:
+            max_bars = SNAPSHOT_INCREMENTAL_MAX_DAILY_BARS
+            return _rebuild_indicator_snapshots_incremental_safe(
+                conn,
+                cursor,
+                symbols,
+                requested_timeframes,
+                max_bars,
+                log,
+                progress_callback,
+                t_total_start,
+                families=families,
             )
-            conn.commit()
 
         if progress_callback:
             progress_callback(0, total_syms)
@@ -726,54 +1099,17 @@ def rebuild_indicator_snapshots_universe(
         t_load_ms = int((time.perf_counter() - t_load_start) * 1000)
         log(f"[perf] snapshots: loaded candles for {len(symbols)} symbols in {t_load_ms}ms")
 
-        upsert_sql = """
-            INSERT INTO indicator_snapshots (
-                symbol, timeframe, close_curr, close_prev, open_curr, open_prev,
-                high_curr, high_prev, low_curr, low_prev,
-                ema9, ema9_prev, ema21, ema21_prev, ema50, ema50_prev,
-                ema100, ema100_prev, ema200, ema200_prev,
-                macd, macd_prev, macd_signal, macd_signal_prev,
-                macd_hist_chain,
-                stoch_k, stoch_k_prev, stoch_d, stoch_d_prev, updated_at
-            ) VALUES (
-                :symbol, :timeframe, :close_curr, :close_prev, :open_curr, :open_prev,
-                :high_curr, :high_prev, :low_curr, :low_prev,
-                :ema9, :ema9_prev, :ema21, :ema21_prev, :ema50, :ema50_prev,
-                :ema100, :ema100_prev, :ema200, :ema200_prev,
-                :macd, :macd_prev, :macd_signal, :macd_signal_prev,
-                :macd_hist_chain,
-                :stoch_k, :stoch_k_prev, :stoch_d, :stoch_d_prev, CURRENT_TIMESTAMP
-            )
-            ON CONFLICT(symbol, timeframe) DO UPDATE SET
-                close_curr=excluded.close_curr,
-                close_prev=excluded.close_prev,
-                open_curr=excluded.open_curr,
-                open_prev=excluded.open_prev,
-                high_curr=excluded.high_curr,
-                high_prev=excluded.high_prev,
-                low_curr=excluded.low_curr,
-                low_prev=excluded.low_prev,
-                ema9=excluded.ema9,
-                ema9_prev=excluded.ema9_prev,
-                ema21=excluded.ema21,
-                ema21_prev=excluded.ema21_prev,
-                ema50=excluded.ema50,
-                ema50_prev=excluded.ema50_prev,
-                ema100=excluded.ema100,
-                ema100_prev=excluded.ema100_prev,
-                ema200=excluded.ema200,
-                ema200_prev=excluded.ema200_prev,
-                macd=excluded.macd,
-                macd_prev=excluded.macd_prev,
-                macd_signal=excluded.macd_signal,
-                macd_signal_prev=excluded.macd_signal_prev,
-                macd_hist_chain=excluded.macd_hist_chain,
-                stoch_k=excluded.stoch_k,
-                stoch_k_prev=excluded.stoch_k_prev,
-                stoch_d=excluded.stoch_d,
-                stoch_d_prev=excluded.stoch_d_prev,
-                updated_at=CURRENT_TIMESTAMP
-        """
+        bars_4h_by_symbol = {}
+        if "4H" in requested_timeframes:
+            try:
+                from server.bars_4h import load_bars_4h_candles_batch
+
+                bars_4h_by_symbol = load_bars_4h_candles_batch(conn, symbols)
+                log(f"Loaded 4H bars for snapshot rebuild ({len(bars_4h_by_symbol)} symbols).")
+            except Exception as e4:
+                log(f"[!] 4H snapshot load warning: {e4}")
+
+        upsert_sql = _SNAPSHOT_UPSERT_SQL
 
         t_compute_start = time.perf_counter()
         snapshot_rows = []
@@ -790,7 +1126,9 @@ def rebuild_indicator_snapshots_universe(
 
         if workers <= 1 or len(chunks) <= 1:
             for chunk in chunks:
-                rows_chunk, processed = _build_snapshot_rows_for_chunk(chunk, requested_timeframes)
+                rows_chunk, processed = _build_snapshot_rows_for_chunk(
+                    chunk, requested_timeframes, bars_4h_by_symbol, families=families
+                )
                 snapshot_rows.extend(rows_chunk)
                 done += processed
                 report_compute_progress(done)
@@ -798,7 +1136,16 @@ def rebuild_indicator_snapshots_universe(
             # Prefer process pool when explicitly requested or on stable environments.
             try:
                 with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
-                    futures = [pool.submit(_build_snapshot_rows_for_chunk, c, requested_timeframes) for c in chunks]
+                    futures = [
+                        pool.submit(
+                            _build_snapshot_rows_for_chunk,
+                            c,
+                            requested_timeframes,
+                            bars_4h_by_symbol,
+                            families,
+                        )
+                        for c in chunks
+                    ]
                     for fut in concurrent.futures.as_completed(futures):
                         rows_chunk, processed = fut.result()
                         snapshot_rows.extend(rows_chunk)
@@ -807,7 +1154,16 @@ def rebuild_indicator_snapshots_universe(
             except Exception as e:
                 log("[perf] snapshots: Process mode unavailable; falling back to thread mode.")
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max(2, min(8, workers))) as pool:
-                    futures = [pool.submit(_build_snapshot_rows_for_chunk, c, requested_timeframes) for c in chunks]
+                    futures = [
+                        pool.submit(
+                            _build_snapshot_rows_for_chunk,
+                            c,
+                            requested_timeframes,
+                            bars_4h_by_symbol,
+                            families,
+                        )
+                        for c in chunks
+                    ]
                     for fut in concurrent.futures.as_completed(futures):
                         rows_chunk, processed = fut.result()
                         snapshot_rows.extend(rows_chunk)
@@ -815,16 +1171,35 @@ def rebuild_indicator_snapshots_universe(
                         report_compute_progress(done)
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max(2, min(8, workers))) as pool:
-                futures = [pool.submit(_build_snapshot_rows_for_chunk, c, requested_timeframes) for c in chunks]
+                futures = [
+                    pool.submit(
+                        _build_snapshot_rows_for_chunk,
+                        c,
+                        requested_timeframes,
+                        bars_4h_by_symbol,
+                        families,
+                    )
+                    for c in chunks
+                ]
                 for fut in concurrent.futures.as_completed(futures):
                     rows_chunk, processed = fut.result()
                     snapshot_rows.extend(rows_chunk)
                     done += processed
                     report_compute_progress(done)
         t_compute_ms = int((time.perf_counter() - t_compute_start) * 1000)
+        hist_chain_rows = sum(1 for r in snapshot_rows if r.get("macd_hist_chain"))
+        hist_chain_full = sum(
+            1 for r in snapshot_rows
+            if r.get("macd_hist_chain") and len(str(r["macd_hist_chain"]).split("|")) >= MACD_HIST_CHAIN_MAX_BARS
+        )
+        hist_pct = (100.0 * hist_chain_full / hist_chain_rows) if hist_chain_rows else 0.0
         log(
             f"[perf] snapshots: computed {len(snapshot_rows)} rows in {t_compute_ms}ms "
             f"(symbols={total_syms}, workers={workers}, chunks={len(chunks)}, mode={effective_mode})"
+        )
+        log(
+            f"macd_hist_chain: {hist_chain_rows} rows with chain, "
+            f"{hist_chain_full} with >={MACD_HIST_CHAIN_MAX_BARS} bars ({hist_pct:.1f}%)"
         )
 
         t_write_start = time.perf_counter()
@@ -832,6 +1207,7 @@ def rebuild_indicator_snapshots_universe(
             if progress_callback:
                 p = min(total_syms, max(0, round(total_syms * 0.96)))
                 progress_callback(p, total_syms)
+            snapshot_rows = _merge_snapshot_rows_with_existing(cursor, snapshot_rows, families)
             cursor.executemany(upsert_sql, snapshot_rows)
             conn.commit()
         if progress_callback:
@@ -847,7 +1223,24 @@ def rebuild_indicator_snapshots_universe(
         conn.close()
 
 
-def run(progress_callback=None, message_callback=None, refresh_snapshots=False):
+def run(progress_callback=None, message_callback=None, refresh_snapshots=False, cancel_check=None):
+    try:
+        from server.admin_job_control import JobCancelled, sleep_interruptible
+    except ImportError:
+        class JobCancelled(Exception):
+            pass
+
+        def sleep_interruptible(seconds, cancel_check=None):
+            time.sleep(seconds)
+
+    def _check_cancel():
+        if cancel_check and cancel_check():
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise JobCancelled()
+
     def log(msg):
         line = console_safe_text(msg)
         safe_console_print(line)
@@ -868,6 +1261,7 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False):
         )
 
         for sym in list_lineage_canonicals():
+            _check_cancel()
             if lineage_backfill_needed(conn, sym):
                 log(f"Lineage backfill required for {sym} (rename-aware history)…")
                 result = run_lineage_backfill(conn, sym, log=log)
@@ -932,7 +1326,7 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False):
     if not to_update:
         log("All symbols are up to date.")
         conn.close()
-        return 0
+        return {"updated": 0, "bhav_screener_written": 0}
 
     log(f"Found {len(to_update)} symbols needing updates.")
 
@@ -965,6 +1359,7 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False):
         from_dt = datetime.strptime(from_str, "%Y-%m-%d")
 
         for batch_start in range(0, len(group_symbols), BATCH_SIZE):
+            _check_cancel()
             batch = group_symbols[batch_start:batch_start + BATCH_SIZE]
 
             # Safety: stop if failure rate too high
@@ -973,13 +1368,13 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False):
                 if fail_rate > MAX_FAILURE_RATE:
                     log(f"\n⚠ Failure rate {fail_rate:.0%} exceeds threshold. Stopping to protect connection.")
                     conn.close()
-                    return updated
+                    return {"updated": updated, "bhav_screener_written": 0}
 
             result, status = fetch_batch(batch, from_dt, today_end)
 
             if status not in ("ok", "empty"):
                 log(f"⚠ Batch error: {status}. Pausing...")
-                time.sleep(random.uniform(PAUSE_ON_BLOCK, PAUSE_ON_BLOCK + 15))
+                sleep_interruptible(random.uniform(PAUSE_ON_BLOCK, PAUSE_ON_BLOCK + 15), cancel_check=cancel_check)
                 consec_failures += len(batch)
                 failed          += len(batch)
             else:
@@ -1001,7 +1396,7 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False):
 
             if consec_failures >= MAX_CONSEC_FAILURES:
                 log(f"⚠ {MAX_CONSEC_FAILURES} consecutive failures. Pausing {PAUSE_ON_BLOCK}s...")
-                time.sleep(random.uniform(PAUSE_ON_BLOCK, PAUSE_ON_BLOCK + 15))
+                sleep_interruptible(random.uniform(PAUSE_ON_BLOCK, PAUSE_ON_BLOCK + 15), cancel_check=cancel_check)
                 consec_failures = 0
 
             processed += len(batch)
@@ -1017,7 +1412,22 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False):
             if progress_callback:
                 progress_callback(processed, total)
 
-            time.sleep(random.uniform(RATE_DELAY_MIN, RATE_DELAY_MAX))
+            sleep_interruptible(random.uniform(RATE_DELAY_MIN, RATE_DELAY_MAX), cancel_check=cancel_check)
+
+    _check_cancel()
+    log("\nReconciling screener price/1D% from NSE bhavcopy (charts unchanged)...")
+    bhav_written = 0
+    try:
+        from server.nse_bhavcopy import reconcile_recent_eod_from_nse
+
+        all_syms = list(get_all_screener_symbols(conn))
+        bhav_written = reconcile_recent_eod_from_nse(conn, all_syms, log_fn=log)
+        if bhav_written == 0:
+            sync_screener_prices_from_latest_bars(conn, log_fn=log)
+        else:
+            updated = max(updated, 1)
+    except Exception as e:
+        log(f"[!] NSE bhavcopy screener overlay warning: {e}")
 
     # Recalculate EMA columns for updated symbols
     log("\nRecalculating EMA values...")
@@ -1077,7 +1487,7 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False):
     else:
         log("\nSkipping indicator snapshots in OHLCV update flow (decoupled).")
 
-    if session_day and refresh_today and updated > 0:
+    if updated > 0 or bhav_written > 0:
         try:
             sync_screener_prices_from_latest_bars(conn, log_fn=log)
         except Exception as e:
@@ -1086,7 +1496,7 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False):
     set_last_ohlcv_success_ist(conn, now_ist())
     conn.close()
     log(f"\n✓ Done. Updated: {updated} | Skipped: {skipped} | Failed: {failed}")
-    return updated
+    return {"updated": updated, "bhav_screener_written": int(bhav_written or 0)}
 
 
 if __name__ == "__main__":

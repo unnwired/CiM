@@ -1,0 +1,11 @@
+{
+  "_comment": "NSE charting scripcodes for indices where Yahoo 5m is unavailable. Tokens verified via EOD open/close match (Jun 2026). Used only as Layer-2 fallback after Yahoo returns no 5m rows.",
+  "^CNXINDDEF": {
+    "token": "26085",
+    "chartSymbol": "NIFTY IND DEFENCE"
+  },
+  "NIFTY_HEALTHCARE.NS": {
+    "token": "26060",
+    "chartSymbol": "NIFTY HEALTHCARE"
+  }
+}

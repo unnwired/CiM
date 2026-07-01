@@ -24,16 +24,14 @@ if (-not $ExportRoot) {
     $ExportRoot = [System.IO.Path]::GetFullPath($ExportRoot)
 }
 if (-not $Version) {
-    $repoVerFile = Join-Path $RepoRoot "version.txt"
-    if (Test-Path -LiteralPath $fx.VersionFile) {
-        $Version = (Get-Content -LiteralPath $fx.VersionFile -Raw).Trim()
-    } elseif (Test-Path -LiteralPath $repoVerFile) {
-        $Version = (Get-Content -LiteralPath $repoVerFile -Raw).Trim()
-    } else {
-        $Version = "1.0.0"
+    $exportVerFile = Join-Path $ExportRoot "version.txt"
+    if (Test-Path -LiteralPath $exportVerFile) {
+        $Version = (Get-Content -LiteralPath $exportVerFile -Raw).Trim().Trim([char]0xFEFF)
+    }
+    if (-not $Version) {
+        $Version = Get-CiMRepoVersion -RepoRoot $RepoRoot
     }
 }
-if (-not $Version) { $Version = "1.0.0" }
 
 function Ensure-InstallerSupportFiles {
     param(
@@ -44,14 +42,7 @@ function Ensure-InstallerSupportFiles {
     if (-not (Test-Path -LiteralPath $Paths.InstallerOutputDir)) {
         New-Item -ItemType Directory -Force -Path $Paths.InstallerOutputDir | Out-Null
     }
-    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    foreach ($target in @($Paths.VersionFile, (Join-Path $ExportRoot "version.txt"))) {
-        $dir = Split-Path -Parent $target
-        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
-            New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        }
-        [System.IO.File]::WriteAllText($target, $Version, $utf8NoBom)
-    }
+    Write-CiMVersionFiles -Version $Version -ExportRoot $ExportRoot -Paths $Paths
     $updateReadmeSource = Join-Path $Paths.InstallerDir "UPDATE_README.txt"
     $updateReadmeOut = Join-Path $Paths.InstallerOutputDir "UPDATE_README.txt"
     if (Test-Path -LiteralPath $updateReadmeSource) {

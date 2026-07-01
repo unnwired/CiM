@@ -1,0 +1,2 @@
+symbol,isin,trade_date,exchange,segment,series,trade_type,auction,quantity,price,trade_id,order_id,order_execution_time
+TRENT,INE849A01020,2026-01-15,NSE,EQ,EQ,buy,FALSE,17,3000.00,900001,1,2026-01-15T10:00:00

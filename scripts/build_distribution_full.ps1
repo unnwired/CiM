@@ -12,6 +12,9 @@ param(
     [switch]$SkipExport,
     [switch]$SkipEncrypt,
     [switch]$SkipUpdatePackage,
+    [switch]$SkipInstaller,
+    [switch]$FastExport,
+    [switch]$SkipSmoke,
     [switch]$PlaintextExport
 )
 
@@ -28,7 +31,7 @@ if (-not $ExportRoot) {
     $ExportRoot = Join-Path $RepoRoot $ExportRoot
 }
 if (-not $Version) {
-    $Version = if (Test-Path -LiteralPath $fx.VersionFile) { (Get-Content -LiteralPath $fx.VersionFile -Raw).Trim() } else { "1.0.2" }
+    $Version = Get-CiMRepoVersion -RepoRoot $RepoRoot
 }
 if (-not $LicenseSecret -and $env:CIM_LICENSE_SECRET) {
     $LicenseSecret = $env:CIM_LICENSE_SECRET.Trim()
@@ -117,108 +120,124 @@ function Log([string]$Msg) {
     Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8
 }
 
+$refreshOnly = $SkipInstaller -and $SkipUpdatePackage
 $buildKind = if ($PlaintextExport) { "plaintext (readable source + online auth)" } else { "encrypted distribution" }
-Log "=== Charts In Motion $buildKind build (version $Version) ==="
+$modeLabel = if ($refreshOnly) { "$buildKind refresh export" } else { "$buildKind build" }
+Log "=== Charts In Motion $modeLabel (version $Version) ==="
 Log "Output folder: $($fx.InstallerOutputDir)"
 Log "ExportRoot: $ExportRoot"
 
 function Write-FlowXVersionFiles {
     param([string]$Ver)
-    $repoVer = Join-Path $RepoRoot "version.txt"
-    $content = if (Test-Path -LiteralPath $repoVer) {
-        (Get-Content -LiteralPath $repoVer -Raw).Trim()
-    } else {
-        $Ver
-    }
-    if (-not $content) { $content = $Ver }
-    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    foreach ($target in @(
-        (Join-Path $ExportRoot "version.txt"),
-        $fx.VersionFile
-    )) {
-        $dir = Split-Path -Parent $target
-        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
-            New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        }
-        [System.IO.File]::WriteAllText($target, $content, $utf8NoBom)
-    }
-    Log "Wrote version.txt = $content (export + installer output)"
+    if (-not $Ver) { $Ver = Get-CiMRepoVersion -RepoRoot $RepoRoot }
+    Write-CiMVersionFiles -Version $Ver -ExportRoot $ExportRoot -Paths $fx
+    Log "Wrote version.txt = $Ver (repo canonical -> export + installer output)"
 }
 
+$Version = Get-CiMRepoVersion -RepoRoot $RepoRoot
 Write-FlowXVersionFiles -Ver $Version
 
-Log "Step 0/6: Verify-CiMBuildPrerequisites.ps1"
-& (Join-Path $ScriptDir "Verify-CiMBuildPrerequisites.ps1") -RepoRoot $RepoRoot -SkipEncrypt:($SkipEncrypt -or $PlaintextExport)
+$stepTotal = if ($refreshOnly) { 5 } else { 6 }
+$step = 0
+
+$step++
+Log "Step $step/$stepTotal`: Verify-CiMBuildPrerequisites.ps1"
+& (Join-Path $ScriptDir "Verify-CiMBuildPrerequisites.ps1") -RepoRoot $RepoRoot -SkipEncrypt:($SkipEncrypt -or $PlaintextExport) -RequireInnoSetup:(-not $SkipInstaller)
 if ($LASTEXITCODE -ne 0) {
     throw "Build prerequisites check failed. Fix missing files/tools before export (see messages above)."
 }
 
 if (-not $SkipExport) {
-    if ($PlaintextExport) {
-        Log "Step 1/6: export_cim.ps1 -Mode distribution -PlaintextDistribution (no obfuscation)"
-        & (Join-Path $RepoRoot "export_cim.ps1") -SourceRoot $SourceRoot -ExportRoot $ExportRoot -Mode distribution -PlaintextDistribution
-    } else {
-        Log "Step 1/6: export_cim.ps1 -Mode distribution -HardenAll"
-        & (Join-Path $RepoRoot "export_cim.ps1") -SourceRoot $SourceRoot -ExportRoot $ExportRoot -Mode distribution -HardenAll
+    $exportArgs = @{
+        SourceRoot           = $SourceRoot
+        ExportRoot           = $ExportRoot
+        Mode                 = 'distribution'
+        SkipEmbeddedPython   = [bool]$FastExport
+        SkipWheelhouse       = [bool]$FastExport
     }
+    if ($PlaintextExport) {
+        $step++
+        Log "Step $step/$stepTotal`: export_cim.ps1 -PlaintextDistribution$(if ($FastExport) { ' (fast: keep runtime\python)' })"
+        $exportArgs.PlaintextDistribution = $true
+    } else {
+        $step++
+        Log "Step $step/$stepTotal`: export_cim.ps1 -HardenAll$(if ($FastExport) { ' (fast: keep runtime\python)' })"
+        $exportArgs.HardenAll = $true
+    }
+    & (Join-Path $RepoRoot "export_cim.ps1") @exportArgs
     if ($LASTEXITCODE -ne 0) { throw "export_cim failed (exit $LASTEXITCODE)" }
+    $Version = Get-CiMRepoVersion -RepoRoot $RepoRoot
     Write-FlowXVersionFiles -Ver $Version
 } else {
-    Log "Step 1/6: export skipped"
+    $step++
+    Log "Step $step/$stepTotal`: export skipped"
 }
 
-Log "Step 2/6: Sync-ExportDistributionFixes.ps1"
+$step++
+Log "Step $step/$stepTotal`: Sync-ExportDistributionFixes.ps1"
 & (Join-Path $ScriptDir "Sync-ExportDistributionFixes.ps1") -RepoRoot $RepoRoot -ExportRoot $ExportRoot
 
 if ($PlaintextExport) {
-    Log "Step 3/6: Prepare-CiMPlaintextExport.ps1 (license embed + online auth, no encryption)"
+    $step++
+    Log "Step $step/$stepTotal`: Prepare-CiMPlaintextExport.ps1 (license embed + online auth, no encryption)"
     & (Join-Path $ScriptDir "Prepare-CiMPlaintextExport.ps1") -ExportRoot $ExportRoot -RepoRoot $RepoRoot -LicenseSecret $LicenseSecret
     if ($LASTEXITCODE -ne 0) { throw "Prepare-CiMPlaintextExport failed (exit $LASTEXITCODE)" }
 } elseif (-not $SkipEncrypt) {
-    Log "Step 3/6: encrypt_app_code.ps1"
+    $step++
+    Log "Step $step/$stepTotal`: encrypt_app_code.ps1"
     & (Join-Path $ScriptDir "encrypt_app_code.ps1") -ExportRoot $ExportRoot -LicenseSecret $LicenseSecret
     if ($LASTEXITCODE -ne 0) { throw "encrypt_app_code failed (exit $LASTEXITCODE)" }
-    Log "Step 3b/6: Prepare-CiMOnlineDistribution.ps1 (online auth, no install key wizard)"
+    Log "Step $step/$stepTotal`: Prepare-CiMOnlineDistribution.ps1 (online auth, no install key wizard)"
     & (Join-Path $ScriptDir "Prepare-CiMOnlineDistribution.ps1") -ExportRoot $ExportRoot -RepoRoot $RepoRoot
     if ($LASTEXITCODE -ne 0) { throw "Prepare-CiMOnlineDistribution failed (exit $LASTEXITCODE)" }
 } else {
-    Log "Step 3/6: encrypt skipped"
+    $step++
+    Log "Step $step/$stepTotal`: encrypt skipped"
 }
 
-$installerIss = Join-Path $fx.InstallerDir "CiM.iss"
-$installerPas = $fx.LicenseValidateSource
-if (-not (Test-Path -LiteralPath $installerIss)) {
-    throw "Missing tracked installer source: $installerIss (restore from repo)."
+if (-not $SkipInstaller) {
+    $installerIss = Join-Path $fx.InstallerDir "CiM.iss"
+    $installerPas = $fx.LicenseValidateSource
+    if (-not (Test-Path -LiteralPath $installerIss)) {
+        throw "Missing tracked installer source: $installerIss (restore from repo)."
+    }
+    if (-not (Test-Path -LiteralPath $installerPas)) {
+        throw "Missing tracked installer source: $installerPas (restore from repo)."
+    }
+    $step++
+    Log "Step $step/$stepTotal`: build_installer.ps1"
+    & (Join-Path $ScriptDir "build_installer.ps1") -ExportRoot $ExportRoot -Version $Version -LicenseSecret $LicenseSecret
+    if ($LASTEXITCODE -ne 0) { throw "build_installer failed (exit $LASTEXITCODE)" }
 }
-if (-not (Test-Path -LiteralPath $installerPas)) {
-    throw "Missing tracked installer source: $installerPas (restore from repo)."
-}
-Log "Step 4/6: build_installer.ps1"
-& (Join-Path $ScriptDir "build_installer.ps1") -ExportRoot $ExportRoot -Version $Version -LicenseSecret $LicenseSecret
-if ($LASTEXITCODE -ne 0) { throw "build_installer failed (exit $LASTEXITCODE)" }
 
 if (-not $SkipUpdatePackage) {
-    Log "Step 5/6: build_update_package.ps1"
+    $step++
+    Log "Step $step/$stepTotal`: build_update_package.ps1"
     & (Join-Path $ScriptDir "build_update_package.ps1") -ExportRoot $ExportRoot -Version $Version
-    if ($LASTEXITCODE -ne 0) { throw "build_update_package failed (exit $LASTEXITCODE)" }
-} else {
-    Log "Step 5/6: update package skipped"
+    Assert-LastExitSuccess -Step "build_update_package.ps1"
 }
 
-Log "Step 6/6: Test-CiMPackagedSmoke.ps1 (export tree - blocks blank Electron releases)"
-& (Join-Path $ScriptDir "Test-CiMPackagedSmoke.ps1") -InstallRoot $ExportRoot
-if ($LASTEXITCODE -ne 0) {
-    throw "Release gate FAILED on export tree. Do not publish this build to GitHub."
+if (-not $SkipSmoke) {
+    $step++
+    Log "Step $step/$stepTotal`: Test-CiMPackagedSmoke.ps1 (export tree - blocks blank Electron releases)"
+    & (Join-Path $ScriptDir "Test-CiMPackagedSmoke.ps1") -InstallRoot $ExportRoot
+    Assert-LastExitSuccess -Step "Test-CiMPackagedSmoke.ps1"
 }
 
 $installer = Join-Path $fx.SetupOutputDir "CiMSetup-$Version.exe"
 $updateDir = Join-Path $fx.InstallerOutputDir "CiM-Update-$Version"
-Log "=== Build complete ($distKind) ==="
+$completeLabel = if ($refreshOnly) { "Refresh export complete ($distKind)" } else { "Build complete ($distKind)" }
+Log "=== $completeLabel ==="
 Log "Folder: $($fx.InstallerOutputDir)"
 Log "Export tree: $ExportRoot"
-Log "Installer: $installer"
+if (-not $SkipInstaller) {
+    Log "Installer: $installer"
+}
 if (-not $SkipUpdatePackage) {
     Log "Update package: $updateDir"
     Log "Update ZIP: $(Join-Path $fx.InstallerOutputDir "CiM-Update-$Version.zip")"
+}
+if ($refreshOnly) {
+    Log "Next: run Batch Files\$distKind-UpdatePackage.bat to create the update ZIP"
 }
 Log "Log: $logFile"

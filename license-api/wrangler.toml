@@ -8,7 +8,10 @@ database_name = "cim-license"
 database_id = "579f7ee5-8a33-4b98-bad8-c209693ed58f"
 
 [vars]
-MAX_DEVICES = "1"
+MAX_DEVICES = "2"
 ACCESS_TTL_MINUTES = "60"
 REFRESH_TTL_DAYS = "90"
 OFFLINE_GRACE_DAYS = "7"
+# Set to "1" after: wrangler secret put IPQS_API_KEY
+BLOCK_ANONYMIZED_NETWORKS = "0"
+IP_REPUTATION_STRICTNESS = "1"

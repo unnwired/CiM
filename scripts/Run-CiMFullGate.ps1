@@ -17,6 +17,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "Get-CiMPaths.ps1")
 $RepoRoot = Split-Path -Parent $ScriptDir
 $fx = Get-CiMPaths -RepoRoot $RepoRoot -DistributionKind Encrypted
+$pkg = Get-CiMPackagePaths -RepoRoot $RepoRoot
 $ExportRoot = $fx.ExportRoot
 $IsccPath = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
 
@@ -98,9 +99,8 @@ while ($attempt -lt $MaxAttempts) {
     Stop-CiMProcesses
 
     if (-not $SkipRebuild) {
-        Write-Host "Building frontend (npm run build)..."
-        $frontendDir = Join-Path $RepoRoot "frontend"
-        Push-Location $frontendDir
+        Write-Host "Building browser package (npm run build)..."
+        Push-Location $pkg.BrowserRoot
         try {
             & npm run build
             if ($LASTEXITCODE -ne 0) { throw "npm run build failed (exit $LASTEXITCODE)" }

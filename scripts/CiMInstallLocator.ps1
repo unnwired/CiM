@@ -12,7 +12,9 @@ function Test-CiMInstall([string]$Path) {
         if (Test-Path -LiteralPath $db) { return $true }
         $serverOk = (Test-Path -LiteralPath (Join-Path $Path "server\cim_bootstrap.py")) -or
             (Test-Path -LiteralPath (Join-Path $Path "server\server.pyc.enc")) -or
-            (Test-Path -LiteralPath (Join-Path $Path "server\server.py"))
+            (Test-Path -LiteralPath (Join-Path $Path "server\server.py")) -or
+            (Test-Path -LiteralPath (Join-Path $Path "packages\server\cim_bootstrap.py")) -or
+            (Test-Path -LiteralPath (Join-Path $Path "packages\server\server.py"))
         if ($serverOk) { return $true }
     }
     # UPDATE folder under install is enough for client update apply (bat may be restored by the package).

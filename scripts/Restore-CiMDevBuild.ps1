@@ -30,22 +30,25 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $ScriptDir "Get-CiMPaths.ps1")
 if (-not $RepoRoot) {
     $RepoRoot = Split-Path -Parent $ScriptDir
 }
+$pkg = Get-CiMPackagePaths -RepoRoot $RepoRoot
 
 $DevRestoreDir = Join-Path $ScriptDir "dev-restore"
 $FilesToRestore = @(
     "start_cim.bat",
-    "server\app_code_crypto.py",
-    "server\cim_bootstrap.py"
+    "packages\server\app_code_crypto.py",
+    "packages\server\cim_bootstrap.py"
 )
 
 function Test-DevRepo([string]$Root) {
-    $serverPy = Join-Path $Root "server\server.py"
+    $pkgPaths = Get-CiMPackagePaths -RepoRoot $Root
+    $serverPy = Join-Path $pkgPaths.ServerRoot "server.py"
     if (-not (Test-Path -LiteralPath $serverPy)) {
         throw @"
-This is not a Charts In Motion development tree (missing server\server.py).
+This is not a Charts In Motion development tree (missing packages\server\server.py).
 
 Restore-CiMDevBuild.ps1 is ONLY for the dev repo - not client installs.
 For client PCs use Repair-CiMLicense.ps1 instead.
@@ -178,7 +181,7 @@ Write-Host ""
 Test-DevRepo -Root $RepoRoot
 
 $needsRestore = $false
-$cryptoPath = Join-Path $RepoRoot "server\app_code_crypto.py"
+$cryptoPath = Join-Path $pkg.ServerRoot "app_code_crypto.py"
 $batPath = Join-Path $RepoRoot "start_cim.bat"
 if (-not (Test-DevAwareAppCrypto $cryptoPath) -or -not (Test-DevAwareStartBat $batPath)) {
     $needsRestore = $true

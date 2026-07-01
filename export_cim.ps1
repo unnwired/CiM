@@ -76,6 +76,37 @@ function Copy-TreeIfExists {
     }
 }
 
+function Copy-DatabaseSnapshot {
+    param(
+        [string]$SourceRoot,
+        [string]$ExportRoot
+    )
+    $srcDb = Join-Path $SourceRoot "data\nse_data.db"
+    $dstDb = Join-Path $ExportRoot "data\nse_data.db"
+    $snapPy = Join-Path $SourceRoot "scripts\copy_db_snapshot.py"
+    if (-not (Test-Path -LiteralPath $srcDb)) { return }
+    if (-not (Test-Path -LiteralPath $snapPy)) {
+        throw "Missing scripts\copy_db_snapshot.py (required for safe nse_data.db export)"
+    }
+    Ensure-Dir -Path (Split-Path -Parent $dstDb)
+    $py = $null
+    foreach ($candidate in @(
+            (Join-Path $ExportRoot "runtime\python\python.exe"),
+            (Join-Path $SourceRoot "runtime\python\python.exe")
+        )) {
+        if (Test-Path -LiteralPath $candidate) { $py = $candidate; break }
+    }
+    if ($py) {
+        & $py -s $snapPy $srcDb $dstDb
+    } else {
+        & python $snapPy $srcDb $dstDb
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "copy_db_snapshot.py failed for nse_data.db (exit $LASTEXITCODE)"
+    }
+    Write-Host "Copied data\nse_data.db via SQLite backup (integrity verified)"
+}
+
 function Ensure-Command {
     param(
         [string]$Name,
@@ -128,14 +159,22 @@ function Invoke-FrontendObfuscation {
 
 function Invoke-GenerateSupportQrPayload {
     param([string]$SourceRoot)
+    $pkg = Get-CiMPackagePaths -RepoRoot $SourceRoot
     $generator = Join-Path $SourceRoot "scripts\Generate-SupportQrPayload.ps1"
-    $image = Join-Path $SourceRoot "frontend\src\assets\support-upi-qr.png"
-    $out = Join-Path $SourceRoot "frontend\src\support\supportQrPayload.generated.js"
+    $assetsDir = Join-Path $pkg.BrowserSrc "assets"
+    $image = Join-Path $assetsDir "support-upi-qr.png"
+    if (-not (Test-Path -LiteralPath $image)) {
+        $image = Join-Path $assetsDir "support-upi-qr.jpg"
+    }
+    if (-not (Test-Path -LiteralPath $image)) {
+        $image = Join-Path $assetsDir "support-upi-qr.jpeg"
+    }
+    $out = Join-Path $pkg.BrowserSrc "support\supportQrPayload.generated.js"
     if (-not (Test-Path -LiteralPath $generator)) {
         throw "Support QR generator script missing: $generator"
     }
     if (-not (Test-Path -LiteralPath $image)) {
-        throw "Support QR source image missing: $image"
+        throw "Support QR source image missing (expected packages\browser\src\assets\support-upi-qr.png or .jpg): $assetsDir"
     }
     & $generator -ImagePath $image -OutPath $out
     if (-not (Test-Path -LiteralPath $out)) {
@@ -177,7 +216,8 @@ function Invoke-PythonObfuscationToTemp {
     Ensure-Dir -Path $opsOut
 
     Write-Host "Obfuscating server Python modules..."
-    & $pyarmorExe gen -r -O $serverOut (Join-Path $SourceRoot "server")
+    $pkg = Get-CiMPackagePaths -RepoRoot $SourceRoot
+    & $pyarmorExe gen -r -O $serverOut $pkg.ServerRoot
     if ($LASTEXITCODE -ne 0) {
         throw "PyArmor server obfuscation failed."
     }
@@ -208,7 +248,8 @@ function Invoke-PythonBytecodeHardeningToTemp {
     $serverOutRoot = Join-Path $tempRoot "server_out"
     $serverOut = Join-Path $serverOutRoot "server"
     Ensure-Dir -Path $serverOutRoot
-    Copy-TreeIfExists -From (Join-Path $SourceRoot "server") -To $serverOut
+    $pkg = Get-CiMPackagePaths -RepoRoot $SourceRoot
+    Copy-TreeIfExists -From $pkg.ServerRoot -To $serverOut
 
     # Compile bytecode with a Python version compatible with packaged runtime.
     $pythonExePath = $PythonExePath
@@ -271,7 +312,7 @@ function Test-EmbeddedPythonRuntime {
         return $false
     }
     $exitCode = Invoke-NativeQuiet {
-        & $embeddedPy -c "import fastapi, uvicorn, pandas, yfinance, tradingview_screener" 2>$null | Out-Null
+        & $embeddedPy -c "import fastapi, uvicorn, pandas, yfinance, tradingview_screener, certifi" 2>$null | Out-Null
     }
     return $exitCode -eq 0
 }
@@ -346,7 +387,7 @@ function Prepare-EmbeddedPythonRuntime {
     }
 
     $exitCode = Invoke-NativeQuiet {
-        & $embeddedPy -c "import fastapi, uvicorn, pandas, yfinance, tradingview_screener" 2>$null | Out-Null
+        & $embeddedPy -c "import fastapi, uvicorn, pandas, yfinance, tradingview_screener, certifi" 2>$null | Out-Null
     }
     if ($exitCode -ne 0) {
         throw "Embedded runtime validation failed."
@@ -567,6 +608,9 @@ if (-not (Test-Path -LiteralPath $SourceRoot)) {
     throw "Source root does not exist: $SourceRoot"
 }
 
+. (Join-Path $SourceRoot "scripts\Get-CiMPaths.ps1")
+$pkg = Get-CiMPackagePaths -RepoRoot $SourceRoot
+
 trap {
     if (-not $exportSucceeded) {
         Write-Host ""
@@ -600,34 +644,13 @@ if ($effectiveObfuscateFrontend) {
 }
 
 if (-not $SkipFrontendBuild) {
-    $frontendDir = Join-Path $SourceRoot "frontend"
-    if (Test-Path -LiteralPath (Join-Path $frontendDir "package.json")) {
-        Write-Host "Building frontend production bundle..."
-        Push-Location $frontendDir
-        try {
-            $env:GENERATE_SOURCEMAP = "false"
-            if ($isDistribution) {
-                $env:REACT_APP_EXPORT_MODE = "distribution"
-            } else {
-                Remove-Item Env:REACT_APP_EXPORT_MODE -ErrorAction SilentlyContinue
-            }
-            if ($effectiveObfuscateFrontend) {
-                $env:REACT_APP_SUPPORT_QR_SECURE = "true"
-            } else {
-                Remove-Item Env:REACT_APP_SUPPORT_QR_SECURE -ErrorAction SilentlyContinue
-            }
-            & npm run build
-            if ($LASTEXITCODE -ne 0) {
-                throw "Frontend build failed. Run npm install in frontend and retry."
-            }
-            if ($effectiveObfuscateFrontend) {
-                Remove-LooseSupportQrAssets -BuildRoot (Join-Path $frontendDir "build")
-            }
-        } finally {
-            Remove-Item Env:REACT_APP_EXPORT_MODE -ErrorAction SilentlyContinue
-            Remove-Item Env:REACT_APP_SUPPORT_QR_SECURE -ErrorAction SilentlyContinue
-            Pop-Location
-        }
+    if (Test-Path -LiteralPath (Join-Path $pkg.BrowserRoot "package.json")) {
+        Write-Host "Building browser production bundle..."
+        Invoke-CiMBrowserProductionBuild `
+            -BrowserRoot $pkg.BrowserRoot `
+            -DistributionMode:$isDistribution `
+            -SupportQrSecure:$effectiveObfuscateFrontend `
+            -RemoveLooseSupportQr:$effectiveObfuscateFrontend
     }
 }
 
@@ -736,9 +759,8 @@ $rootFiles = @(
     "start_cim.bat",
     "stop_cim.bat",
     "create_desktop_shortcut.bat",
-    "README_START_STOP.md",
     "requirements_runtime.txt",
-    "CHANGELOG.md",
+    "version.txt",
     "db_sqlite.py",
     "symbol_lineage.py"
 )
@@ -746,6 +768,10 @@ $rootFiles = @(
 foreach ($f in $rootFiles) {
     Copy-IfExists -From (Join-Path $SourceRoot $f) -To (Join-Path $ExportRoot $f)
 }
+
+# Client install trees keep flat names at export root (source lives under docs\ in repo).
+Copy-IfExists -From (Join-Path $SourceRoot "docs\README_START_STOP.md") -To (Join-Path $ExportRoot "README_START_STOP.md")
+Copy-IfExists -From (Join-Path $SourceRoot "docs\CHANGELOG.md") -To (Join-Path $ExportRoot "CHANGELOG.md")
 
 # start_cim.bat and distribution installs depend on this helper script.
 Copy-IfExists -From (Join-Path $SourceRoot "scripts\frontend_needs_build.ps1") -To (Join-Path $ExportRoot "scripts\frontend_needs_build.ps1")
@@ -755,17 +781,17 @@ Copy-IfExists -From (Join-Path $SourceRoot "scripts\backfill_symbol_history.py")
 # 2) Frontend
 # Prefer build output for zero-input startup; include source as fallback.
 # ------------------------------------------------------------
-Copy-IfExists     -From (Join-Path $SourceRoot "frontend\package.json")      -To (Join-Path $ExportRoot "frontend\package.json")
-Copy-IfExists     -From (Join-Path $SourceRoot "frontend\package-lock.json") -To (Join-Path $ExportRoot "frontend\package-lock.json")
-Copy-IfExists     -From (Join-Path $SourceRoot "frontend\yarn.lock")         -To (Join-Path $ExportRoot "frontend\yarn.lock")
-Copy-TreeIfExists -From (Join-Path $SourceRoot "frontend\public")            -To (Join-Path $ExportRoot "frontend\public")
+Copy-IfExists     -From (Join-Path $pkg.BrowserRoot "package.json")      -To (Join-Path $ExportRoot "frontend\package.json")
+Copy-IfExists     -From (Join-Path $pkg.BrowserRoot "package-lock.json") -To (Join-Path $ExportRoot "frontend\package-lock.json")
+Copy-IfExists     -From (Join-Path $pkg.BrowserRoot "yarn.lock")         -To (Join-Path $ExportRoot "frontend\yarn.lock")
+Copy-TreeIfExists -From $pkg.BrowserPublic                                -To (Join-Path $ExportRoot "frontend\public")
 # Plaintext sign-in shell (not encrypted) — required before online session unlocks app code.
-Copy-TreeIfExists -From (Join-Path $SourceRoot "frontend\auth")              -To (Join-Path $ExportRoot "frontend\auth")
+Copy-TreeIfExists -From $pkg.BrowserAuth                                  -To (Join-Path $ExportRoot "frontend\auth")
 if (-not $isDistribution) {
     # Standard mode keeps source for easier local development/troubleshooting.
-    Copy-TreeIfExists -From (Join-Path $SourceRoot "frontend\src")           -To (Join-Path $ExportRoot "frontend\src")
+    Copy-TreeIfExists -From $pkg.BrowserSrc                                 -To (Join-Path $ExportRoot "frontend\src")
 }
-$frontendBuildSrc = Join-Path $SourceRoot "frontend\build"
+$frontendBuildSrc = $pkg.BrowserBuild
 $frontendBuildDst = Join-Path $ExportRoot "frontend\build"
 if (Test-Path -LiteralPath $frontendBuildSrc) {
     if (Test-Path -LiteralPath $frontendBuildDst) {
@@ -774,11 +800,11 @@ if (Test-Path -LiteralPath $frontendBuildSrc) {
     Ensure-Dir -Path $frontendBuildDst
     Copy-Item -Path (Join-Path $frontendBuildSrc "*") -Destination $frontendBuildDst -Recurse -Force
 }
-if (Test-Path -LiteralPath (Join-Path $SourceRoot "desktop")) {
+if (Test-Path -LiteralPath $pkg.DesktopRoot) {
     # Copy desktop folder contents (not the folder itself) to avoid desktop\desktop nesting.
     $desktopDest = Join-Path $ExportRoot "desktop"
     Ensure-Dir -Path $desktopDest
-    Copy-Item -Path (Join-Path $SourceRoot "desktop\*") -Destination $desktopDest -Recurse -Force
+    Copy-Item -Path (Join-Path $pkg.DesktopRoot "*") -Destination $desktopDest -Recurse -Force
 }
 
 if ($effectiveObfuscateFrontend) {
@@ -788,6 +814,13 @@ if ($effectiveObfuscateFrontend) {
 
 Copy-TreeIfExists -From $EmbeddedPythonRoot -To (Join-Path $ExportRoot "runtime\python")
 Copy-TreeIfExists -From (Join-Path $SourceRoot "runtime\wheelhouse")         -To (Join-Path $ExportRoot "runtime\wheelhouse")
+$runUvicornSrc = Join-Path $SourceRoot "runtime\run_uvicorn.py"
+if (Test-Path -LiteralPath $runUvicornSrc) {
+    Ensure-Dir -Path (Join-Path $ExportRoot "runtime")
+    Copy-Item -LiteralPath $runUvicornSrc -Destination (Join-Path $ExportRoot "runtime\run_uvicorn.py") -Force
+}
+Ensure-Dir -Path (Join-Path $ExportRoot "scripts")
+Copy-IfExists -From (Join-Path $SourceRoot "scripts\Resolve-CiMPaths.bat") -To (Join-Path $ExportRoot "scripts\Resolve-CiMPaths.bat")
 
 # Prepare desktop runtime inside export so start_cim.bat can launch a window immediately.
 $desktopDir = Join-Path $ExportRoot "desktop"
@@ -832,7 +865,7 @@ if ($effectiveObfuscatePython -and $pythonObfInfo) {
     }
 } else {
     # Plaintext: copy full server package tree (server.core, server.routers, etc.)
-    $serverSrc = Join-Path $SourceRoot "server"
+    $serverSrc = $pkg.ServerRoot
     $serverDst = Join-Path $ExportRoot "server"
     Ensure-Dir -Path $serverDst
     Get-ChildItem -LiteralPath $serverSrc -Force -ErrorAction SilentlyContinue | ForEach-Object {
@@ -867,9 +900,26 @@ if ($effectiveObfuscatePython -and $pythonObfInfo -and $pythonObfInfo.Mode -eq "
 # ------------------------------------------------------------
 # 5) Data needed for app + updates
 # ------------------------------------------------------------
-$dataFiles = @("nse_data.db", "nse_dataset.csv", "nse_calendar.json", "market_sectors.json", "market_sector_mapping.json", "symbol_lineage.json", "knowledge_base.json")
+$dataFiles = @("nse_dataset.csv", "nse_calendar.json", "market_sectors.json", "market_sector_mapping.json", "symbol_lineage.json", "knowledge_base.json")
 if (-not $isDistribution) {
     $dataFiles += @("layout.json", "watchlists.json", "saved_filters.json", "screener_session.json")
+}
+if (Test-Path -LiteralPath (Join-Path $SourceRoot "data\nse_data.db")) {
+    Copy-DatabaseSnapshot -SourceRoot $SourceRoot -ExportRoot $ExportRoot
+    if ($isDistribution) {
+        $exportDb = Join-Path $ExportRoot "data\nse_data.db"
+        $sanitizePy = Join-Path $SourceRoot "scripts\sanitize_export_db.py"
+        $pyExe = Join-Path $SourceRoot "runtime\python\python.exe"
+        if ((Test-Path -LiteralPath $exportDb) -and (Test-Path -LiteralPath $sanitizePy) -and (Test-Path -LiteralPath $pyExe)) {
+            Write-Host "Clearing instrument_notes from export database (no shared user notes in distribution)..."
+            & $pyExe -s $sanitizePy $exportDb
+            if ($LASTEXITCODE -ne 0) {
+                throw "sanitize_export_db.py failed (exit $LASTEXITCODE)"
+            }
+        } elseif (Test-Path -LiteralPath $exportDb) {
+            Write-Warning "[WARN] Could not sanitize instrument_notes — missing sanitize_export_db.py or runtime\python"
+        }
+    }
 }
 foreach ($f in $dataFiles) {
     Copy-IfExists -From (Join-Path $SourceRoot ("data\" + $f)) -To (Join-Path $ExportRoot ("data\" + $f))

@@ -13,6 +13,14 @@ param(
 $ErrorActionPreference = "Stop"
 $PackageRoot = (Resolve-Path -LiteralPath $PSScriptRoot).Path
 
+$pathsScript = Join-Path $PSScriptRoot "Get-CiMPaths.ps1"
+if (-not (Test-Path -LiteralPath $pathsScript)) {
+    $pathsScript = Join-Path $PSScriptRoot "scripts\Get-CiMPaths.ps1"
+}
+if (Test-Path -LiteralPath $pathsScript) {
+    . $pathsScript
+}
+
 function Resolve-InstallGuessFromPackage([string]$Path) {
     if (-not $Path) { return $null }
     $d = $Path.TrimEnd('\')
@@ -132,14 +140,13 @@ $bootstrap = @(
     "stop_cim.bat",
     "scripts\CiMApplyUpdate.ps1",
     "scripts\CiMDownloadUpdate.ps1",
-    "scripts\Repair-CiMLicense.ps1",
     "scripts\_Apply-LocalUpdate.ps1",
     "scripts\CiMInstallLocator.ps1",
     "scripts\Install-Client-Update.ps1",
     "scripts\Diagnose-CiMInstall.ps1",
     "scripts\Apply-LocalUpdate-Entry.ps1",
     "scripts\CiMUpdatePackage.ps1",
-    "Repair-CiMLicense.bat"
+    "scripts\Get-CiMPaths.ps1"
 )
 foreach ($rel in $bootstrap) {
     $src = Join-Path $payload ($rel -replace '/', '\')
@@ -176,15 +183,6 @@ if ($LASTEXITCODE -ne 0) {
     throw "CiMApplyUpdate failed. See $logDir\update-apply.log"
 }
 
-$licensePath = Join-Path $install "data\.cim-license"
-if (-not (Test-Path -LiteralPath $licensePath)) {
-    Write-Host ""
-    Write-Host "WARNING: data\.cim-license is still missing. Run Repair-CiMLicense.bat with a support install key."
-} else {
-    Write-Host ""
-    Write-Host "Update complete. Start Charts In Motion: $install\start_cim.bat"
-}
-
 $resultFile = Join-Path $install "update-result.txt"
 if (Test-Path -LiteralPath $resultFile) {
     Write-Host ""
@@ -196,4 +194,6 @@ if (Test-Path -LiteralPath $diag) {
     Write-Host ""
     Write-Host "Running install diagnostic ..."
     & powershell -NoProfile -ExecutionPolicy Bypass -File $diag -InstallRoot $install
+    # Informational only — update apply already succeeded above.
 }
+exit 0

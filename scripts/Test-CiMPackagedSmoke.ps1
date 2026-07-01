@@ -23,7 +23,7 @@ function Stop-SmokeBackend {
         Where-Object {
             $_.CommandLine -and
             $_.CommandLine -like "*$ListenPort*" -and
-            $_.CommandLine -like "*cim_bootstrap*"
+            $_.CommandLine -like "*cim_bootstrap*" -or $_.CommandLine -like "*run_uvicorn.py*"
         } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     $pidFile = Join-Path $Root "runtime\logs\backend.pid"
@@ -99,19 +99,6 @@ function Clear-AppCacheForInstall {
     }
 }
 
-function Test-InstallUsesOnlineOnly {
-    param([string]$Root)
-    if (Test-Path -LiteralPath (Join-Path $Root "config\.cim-online-only")) { return $true }
-    $prodPath = Join-Path $Root "config\product.json"
-    if (-not (Test-Path -LiteralPath $prodPath)) { return $false }
-    try {
-        $prod = Get-Content -LiteralPath $prodPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        return [bool]$prod.onlineOnlyActivation
-    } catch {
-        return $false
-    }
-}
-
 function Invoke-OnlineSmokeActivation {
     param([string]$Root, [int]$ListenPort)
     $testEmail = "cim-smoke-{0}@example.com" -f ([Guid]::NewGuid().ToString("N").Substring(0, 10))
@@ -140,6 +127,26 @@ if (-not (Test-Path -LiteralPath (Join-Path $root "server\cim_bootstrap.py"))) {
 if (-not (Test-Path -LiteralPath (Join-Path $root "data\nse_data.db"))) {
     throw "Missing data\nse_data.db under $root"
 }
+$dbPath = Join-Path $root "data\nse_data.db"
+$integrityPy = Join-Path $ScriptDir "check_db_integrity.py"
+$pyCheck = Join-Path $root "runtime\python\python.exe"
+if ((Test-Path -LiteralPath $integrityPy) -and (Test-Path -LiteralPath $pyCheck)) {
+    & $pyCheck -s $integrityPy $dbPath
+    if ($LASTEXITCODE -ne 0) {
+        $repoRoot = Split-Path -Parent $ScriptDir
+        $snapPy = Join-Path $ScriptDir "copy_db_snapshot.py"
+        $srcDb = Join-Path $repoRoot "data\nse_data.db"
+        if ((Test-Path -LiteralPath $snapPy) -and (Test-Path -LiteralPath $srcDb)) {
+            Write-Host "Export DB corrupt - refreshing from repo via SQLite backup..."
+            & $pyCheck -s $snapPy $srcDb $dbPath
+            if ($LASTEXITCODE -ne 0) { throw "copy_db_snapshot.py failed refreshing export DB" }
+            & $pyCheck -s $integrityPy $dbPath
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw "data\nse_data.db failed integrity_check (malformed). Re-run export with copy_db_snapshot or rebuild from dev data\nse_data.db"
+        }
+    }
+}
 $authShell = Join-Path $root "frontend\auth\index.html"
 if (-not (Test-Path -LiteralPath $authShell)) {
     throw "Missing plaintext auth shell: frontend\auth\index.html (required for online licensing)"
@@ -147,7 +154,7 @@ if (-not (Test-Path -LiteralPath $authShell)) {
 
 $licensePath = Join-Path $root "data\.cim-license"
 $sessionPath = Join-Path $root "data\.cim-session.json"
-$onlineOnly = Test-InstallUsesOnlineOnly -Root $root
+$onlineOnly = Test-CiMOnlineOnlyInstall -InstallRoot $root
 $hadLicenseBefore = Test-Path -LiteralPath $licensePath
 $hadSessionBefore = Test-Path -LiteralPath $sessionPath
 if ($onlineOnly) {
@@ -174,7 +181,7 @@ $savedFlowxDev = $env:CIM_DEV
 Remove-Item Env:CIM_DEV -ErrorAction SilentlyContinue
 
 $proc = Start-Process -FilePath $py `
-    -ArgumentList @("-s", "-m", "uvicorn", "server.cim_bootstrap:app", "--host", "127.0.0.1", "--port", "$Port") `
+    -ArgumentList (Get-CiMUvicornPythonArgs -RepoRoot $root -AppModule "server.cim_bootstrap:app" -ExtraArgs @("--host", "127.0.0.1", "--port", "$Port")) `
     -WorkingDirectory $root `
     -RedirectStandardOutput $outLog `
     -RedirectStandardError $errLog `
@@ -200,7 +207,7 @@ try {
             Stop-SmokeBackend -Root $root -ListenPort $Port
             Start-Sleep -Seconds 2
             $proc = Start-Process -FilePath $py `
-                -ArgumentList @("-s", "-m", "uvicorn", "server.cim_bootstrap:app", "--host", "127.0.0.1", "--port", "$Port") `
+                -ArgumentList (Get-CiMUvicornPythonArgs -RepoRoot $root -AppModule "server.cim_bootstrap:app" -ExtraArgs @("--host", "127.0.0.1", "--port", "$Port")) `
                 -WorkingDirectory $root `
                 -RedirectStandardOutput $outLog `
                 -RedirectStandardError $errLog `

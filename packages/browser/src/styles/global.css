@@ -1,0 +1,158 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg-primary:     #0d1117;
+  --bg-secondary:   #161b22;
+  --bg-tertiary:    #1c2128;
+  --bg-hover:       #21262d;
+  --bg-active:      #2d333b;
+  --border:         #30363d;
+  --border-light:   #21262d;
+  --text-primary:   #e6edf3;
+  --text-secondary: #8b949e;
+  --text-muted:     #484f58;
+  --accent-blue:    #388bfd;
+  --accent-green:   #3fb950;
+  --accent-red:     #f85149;
+  --accent-gold:    #d4af37;
+  --accent-yellow:  #d29922;
+  --accent-purple:  #bc8cff;
+  --accent-orange:  #ffa657;
+  --scrollbar-bg:   #161b22;
+  --scrollbar-thumb:#30363d;
+  --font-mono:      'Consolas', 'SF Mono', 'Fira Code', monospace;
+  --font-sans:      -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --row-height:     36px;
+  --header-height:  52px;
+  --topbar-height:  52px;
+  --tabbar-height:  36px;
+  --chart-toolbar-height: 48px;
+  --cim-kb-chrome-width: 16px;
+  --cim-kb-slide-ms: 520ms;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar        { width: 6px; height: 6px; }
+::-webkit-scrollbar-track  { background: var(--scrollbar-bg); }
+::-webkit-scrollbar-thumb  { background: var(--scrollbar-thumb); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #484f58; }
+
+button {
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  border: none;
+  outline: none;
+}
+
+input {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  outline: none;
+  border: none;
+}
+
+/* Remove TradingView watermark inside chart widgets only (not toolbar external links) */
+.tv-lightweight-charts a,
+.tv-lightweight-charts table tr:last-child td:last-child {
+  display: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* Row edit (pen) icon in dropdown lists — watchlist, presets, etc. */
+.cim-row-edit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0;
+  transition:
+    background-color 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+    color 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.cim-row-edit-btn:hover {
+  background-color: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--text-primary);
+  transform: scale(1.04);
+}
+.cim-row-edit-btn:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 1px;
+}
+
+.chart-app-toolbar {
+  cursor: default;
+  user-select: none;
+}
+.chart-app-toolbar input,
+.chart-app-toolbar textarea,
+.chart-app-toolbar select {
+  cursor: text;
+  user-select: text;
+}
+.chart-app-toolbar select {
+  cursor: pointer;
+}
+.chart-app-toolbar button,
+.chart-app-toolbar a[href],
+.chart-app-toolbar [role='button'],
+.chart-app-toolbar label {
+  cursor: pointer;
+}
+.chart-app-toolbar input[type='checkbox'],
+.chart-app-toolbar input[type='radio'] {
+  cursor: pointer;
+  user-select: none;
+}
+
+.chart-toolbar-external-links {
+  flex-shrink: 0;
+}
+.chart-app-toolbar .chart-toolbar-external-links a[href*='tradingview'] {
+  display: flex !important;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* Earnings filters: empty fields show a faint em dash, not sample values */
+.earnings-filters-panel input.earnings-filter-input::placeholder {
+  color: var(--text-muted);
+  opacity: 0.4;
+}
+.earnings-filters-panel input.earnings-filter-input:not(:placeholder-shown) {
+  color: var(--text-secondary);
+}

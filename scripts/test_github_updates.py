@@ -105,6 +105,28 @@ def test_version_bom_no_false_github_offer():
     print("version_bom_no_false_github_offer OK")
 
 
+def test_https_ssl_context_uses_certifi():
+    from http_ssl import https_ssl_context
+
+    import certifi
+
+    ctx = https_ssl_context()
+    assert ctx is not None
+    assert Path(certifi.where()).is_file()
+    print("https_ssl_context_uses_certifi OK")
+
+
+def test_github_api_ssl_smoke():
+    """Live check — fails fast if certifi/SSL cannot reach GitHub API."""
+    try:
+        release = gh.fetch_latest_release()
+    except RuntimeError as e:
+        if "CERTIFICATE_VERIFY_FAILED" in str(e):
+            raise AssertionError(f"GitHub SSL still broken: {e}") from e
+        raise
+    print(f"github_api_ssl_smoke OK (release={'found' if release else 'none'})")
+
+
 def test_read_version_utf8_bom_file():
     import importlib
 
@@ -125,5 +147,7 @@ if __name__ == "__main__":
     test_extract_layout()
     test_manifest_utf8_bom()
     test_version_bom_no_false_github_offer()
+    test_https_ssl_context_uses_certifi()
+    test_github_api_ssl_smoke()
     test_read_version_utf8_bom_file()
     print("ALL PASS")

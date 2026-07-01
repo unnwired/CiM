@@ -1,0 +1,9 @@
+{
+  "showcaseInstallRoot": "D:\\CiM\\Client_Test",
+  "showcasePort": 8002,
+  "showcaseLiveInstallRoot": "D:\\CiM\\Client",
+  "showcaseLivePort": 8001,
+  "restartShowcaseAfterDeploy": true,
+  "runDeployCheckAfterDeploy": true,
+  "fullPlaintextExportRefresh": false
+}

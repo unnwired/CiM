@@ -18,9 +18,23 @@ npx wrangler d1 execute cim-license --remote --file=./schema.sql
 npx wrangler secret put JWT_SECRET
 npx wrangler secret put TOTP_ENCRYPTION_KEY
 npx wrangler secret put REFRESH_PEPPER
+npx wrangler secret put IPQS_API_KEY
 npx wrangler deploy
 curl https://chartsinmotion.chartsinmotion.workers.dev/health
 ```
+
+### VPN / proxy blocking (optional)
+
+Uses [IPQualityScore](https://www.ipqualityscore.com/) at login. After signup for an API key:
+
+```bash
+npx wrangler d1 execute cim-license --remote --file=./schema-migration-ip-reputation.sql
+npx wrangler secret put IPQS_API_KEY
+```
+
+In `wrangler.toml` set `BLOCK_ANONYMIZED_NETWORKS = "1"` and redeploy. Logins from VPN, proxy, Tor, or datacenter IPs are rejected with HTTP 403. Flags and blocked attempts are visible in License Admin (Login events).
+
+Without `IPQS_API_KEY`, reputation lookup is skipped and blocking stays off.
 
 ## Verify from repo
 

@@ -1,0 +1,13 @@
+{
+  "actions": [
+    {
+      "symbol": "TRENT",
+      "action_type": "bonus",
+      "record_date": "2026-06-04",
+      "ratio_num": 1,
+      "ratio_den": 2,
+      "source": "manual_registry",
+      "note": "1:2 bonus — 1 new share per 2 held"
+    }
+  ]
+}

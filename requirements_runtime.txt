@@ -4,6 +4,7 @@ pandas
 yfinance
 tradingview-screener
 requests
+certifi
 cryptography
 cachetools
 python-dotenv

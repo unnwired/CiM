@@ -50,7 +50,8 @@ $protected = @(
     "data\layout.json",
     "data\saved_filters.json",
     "data\screener_session.json",
-    "data\.cim-license"
+    "data\.cim-license",
+    "data\.cim-session.json"
 )
 
 Start-Sleep -Seconds 3
@@ -107,6 +108,30 @@ try {
     if (Test-Path -LiteralPath $cacheRoot) {
         Remove-Item -LiteralPath $cacheRoot -Recurse -Force -ErrorAction SilentlyContinue
         Write-Log "Cleared app-cache"
+    }
+
+    $py = Join-Path $InstallRoot "runtime\python\python.exe"
+    $dbPath = Join-Path $InstallRoot "data\nse_data.db"
+    if ((Test-Path -LiteralPath $py) -and (Test-Path -LiteralPath $dbPath)) {
+        Write-Log "Running post-update NSE EOD reconcile (fixes chart/market-map % without full reinstall)..."
+        $rootEsc = $InstallRoot.Replace("'", "''")
+        $code = @"
+import sys
+from pathlib import Path
+root = Path(r'$rootEsc')
+sys.path.insert(0, str(root))
+try:
+    from server.eod_reconcile import run_eod_bhavcopy_reconcile
+    n = run_eod_bhavcopy_reconcile(root / 'data' / 'nse_data.db', log_fn=print)
+    print(f'post_update_eod_reconcile bars={n}')
+except Exception as e:
+    print(f'post_update_eod_reconcile warning: {e}')
+"@
+        try {
+            & $py -s -c $code 2>&1 | ForEach-Object { Write-Log $_ }
+        } catch {
+            Write-Log "Post-update EOD reconcile warning: $_"
+        }
     }
 
     $msg = "Update complete ($ver). Start Charts In Motion from start_cim.bat or the desktop shortcut."

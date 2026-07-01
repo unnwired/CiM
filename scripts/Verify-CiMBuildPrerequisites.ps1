@@ -64,11 +64,11 @@ if (-not $SkipEncrypt) {
         }
     }
     if (-not $hasSecret) {
-        $missing += "License secret: set CIM_LICENSE_SECRET or config\.build_license_secret (required for encrypt + installer)"
+        $missing += "Build vendor secret: set CIM_LICENSE_SECRET or config\.build_license_secret (required for encrypted app-code on build machine)"
     }
 }
 
-if ($RequireInnoSetup -or -not $SkipEncrypt) {
+if ($RequireInnoSetup) {
     $isccCandidates = @(
         "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
         "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",

@@ -13,6 +13,7 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "Get-CiMPaths.ps1")
 if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $ScriptDir }
+$pkg = Get-CiMPackagePaths -RepoRoot $RepoRoot
 if (-not $ExportRoot) {
     $fx = Get-CiMPaths -RepoRoot $RepoRoot -DistributionKind Encrypted
     $ExportRoot = $fx.ExportRoot
@@ -55,7 +56,7 @@ $sync = @(
     "server\product_config.py"
 )
 foreach ($rel in $sync) {
-    $src = Join-Path $RepoRoot $rel
+    $src = Join-Path $pkg.ServerRoot ($rel -replace '^server\\', '')
     $dst = Join-Path $ExportRoot $rel
     if (-not (Test-Path -LiteralPath $src)) { continue }
     $parent = Split-Path -Parent $dst
@@ -65,7 +66,7 @@ foreach ($rel in $sync) {
     Copy-Item -LiteralPath $src -Destination $dst -Force
 }
 
-$authSrc = Join-Path $RepoRoot "frontend\auth"
+$authSrc = $pkg.BrowserAuth
 $authDst = Join-Path $ExportRoot "frontend\auth"
 if (Test-Path -LiteralPath $authSrc) {
     if (Test-Path -LiteralPath $authDst) { Remove-Item -LiteralPath $authDst -Recurse -Force }

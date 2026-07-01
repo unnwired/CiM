@@ -1,4 +1,4 @@
-FLOWX UPDATE - CLIENT PC ONLY
+Charts In Motion UPDATE - CLIENT PC ONLY
 
 =============================
 
@@ -8,13 +8,13 @@ FLOWX UPDATE - CLIENT PC ONLY
 
 
 
-2. Extract the ZIP support sent you (folder like CiM-Update-1.0.2).
+2. Extract the ZIP support sent you (folder like CiM-Update-1.0.3).
 
 
 
 3. Put that folder inside your Charts In Motion UPDATE folder (no typing paths):
 
-   D:\CiM\UPDATE\CiM-Update-1.0.2
+   D:\CiM\UPDATE\CiM-Update-1.0.3
 
    (Replace D:\CiM with your Charts In Motion install folder.)
 
@@ -32,11 +32,8 @@ FLOWX UPDATE - CLIENT PC ONLY
 
 
 
-6. If license is missing, double-click Repair-CiMLicense.bat in the Charts In Motion folder.
-
-
-
-7. Double-click start_cim.bat in your Charts In Motion folder.
+6. Double-click start_cim.bat in your Charts In Motion folder.
+   Sign in with your account if the auth screen appears.
 
 
 
@@ -46,6 +43,5 @@ Support needs if it fails:
 
 - backend-startup.err.log
 
-  (both in FlowX\runtime\logs\)
-
+  (both in <install>\runtime\logs\)
 

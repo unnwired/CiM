@@ -11,6 +11,15 @@ import {
   verifyJwt,
   verifyPassword,
 } from './crypto';
+import { type ClientEnv, isWebClientEnv, resolveClientEnv, type ClientEnvBody } from './clientEnv';
+import { type ClientGeo, resolveClientGeo } from './clientGeo';
+import {
+  formatDenyReason,
+  isBlockingEnabled,
+  lookupIpReputation,
+  reputationToDbFlags,
+  type IpReputationDbFlags,
+} from './ipReputation';
 import { generateTotpSecret, otpauthUri, verifyTotp } from './totp';
 
 export interface Env {
@@ -18,6 +27,10 @@ export interface Env {
   JWT_SECRET: string;
   TOTP_ENCRYPTION_KEY: string;
   REFRESH_PEPPER: string;
+  IPQS_API_KEY?: string;
+  BLOCK_ANONYMIZED_NETWORKS?: string;
+  IP_REPUTATION_STRICTNESS?: string;
+  IP_REPUTATION_FAIL_CLOSED?: string;
   MAX_DEVICES?: string;
   ACCESS_TTL_MINUTES?: string;
   REFRESH_TTL_DAYS?: string;
@@ -31,7 +44,36 @@ type UserRow = {
   status: string;
   totp_enabled: number;
   totp_secret_enc: string | null;
+  plan?: string | null;
 };
+
+async function maxDevicesForUser(env: Env, userId: string): Promise<number> {
+  try {
+    const row = await env.DB.prepare('SELECT max_devices FROM user_limits WHERE user_id = ?')
+      .bind(userId)
+      .first<{ max_devices: number | null }>();
+    if (row?.max_devices != null && Number.isFinite(row.max_devices)) {
+      return row.max_devices;
+    }
+  } catch {
+    // user_limits table not migrated yet
+  }
+  return intEnv(env, 'MAX_DEVICES', 2);
+}
+
+function planForUser(user: UserRow): string {
+  const p = user.plan;
+  return p && String(p).trim() ? String(p).trim() : 'free';
+}
+
+async function isDeviceRevoked(env: Env, userId: string, deviceId: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    'SELECT revoked FROM devices WHERE user_id = ? AND device_id = ?',
+  )
+    .bind(userId, deviceId)
+    .first<{ revoked: number }>();
+  return !row || !!row.revoked;
+}
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -94,7 +136,7 @@ async function issueTokens(
   const refreshDays = intEnv(env, 'REFRESH_TTL_DAYS', 90);
   const graceDays = intEnv(env, 'OFFLINE_GRACE_DAYS', 7);
   const access_token = await signJwt(
-    { sub: user.id, email: user.email, device_id: deviceId, plan: 'free' },
+    { sub: user.id, email: user.email, device_id: deviceId, plan: planForUser(user) },
     env.JWT_SECRET,
     accessTtl,
   );
@@ -109,25 +151,153 @@ async function issueTokens(
   return { access_token, refresh_token, expires_in: accessTtl, offline_grace_days: graceDays };
 }
 
+async function recordLoginEvent(
+  env: Env,
+  userId: string,
+  deviceId: string,
+  appVersion: string,
+  geo: ClientGeo,
+  clientEnv: ClientEnv,
+  rep: IpReputationDbFlags,
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO login_events (
+       id, user_id, device_id, ip, country, city, region, app_version,
+       client_platform, client_os, client_os_version, client_browser, client_browser_version, client_device_type,
+       ip_proxy, ip_vpn, ip_tor, ip_datacenter, ip_fraud_score
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      uuid(),
+      userId,
+      deviceId,
+      geo.ip,
+      geo.country,
+      geo.city,
+      geo.region,
+      appVersion,
+      clientEnv.client_platform,
+      clientEnv.client_os,
+      clientEnv.client_os_version,
+      clientEnv.client_browser,
+      clientEnv.client_browser_version,
+      clientEnv.client_device_type,
+      rep.ip_proxy,
+      rep.ip_vpn,
+      rep.ip_tor,
+      rep.ip_datacenter,
+      rep.ip_fraud_score,
+    )
+    .run();
+}
+
+async function recordLoginDenied(
+  env: Env,
+  userId: string,
+  email: string,
+  deviceId: string,
+  geo: ClientGeo,
+  denyReason: string,
+  rep: IpReputationDbFlags,
+): Promise<void> {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO login_denied_events (
+         id, user_id, email, device_id, ip, country, city, region, deny_reason,
+         ip_proxy, ip_vpn, ip_tor, ip_datacenter, ip_fraud_score
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        uuid(),
+        userId,
+        email,
+        deviceId,
+        geo.ip,
+        geo.country,
+        geo.city,
+        geo.region,
+        denyReason,
+        rep.ip_proxy,
+        rep.ip_vpn,
+        rep.ip_tor,
+        rep.ip_datacenter,
+        rep.ip_fraud_score,
+      )
+      .run();
+  } catch {
+    // login_denied_events table not migrated yet
+  }
+}
+
+async function syncDeviceReputation(
+  env: Env,
+  userId: string,
+  deviceId: string,
+  rep: IpReputationDbFlags,
+): Promise<void> {
+  try {
+    await env.DB.prepare(
+      `UPDATE devices SET last_ip_proxy = ?, last_ip_vpn = ?, last_ip_tor = ?,
+       last_ip_datacenter = ?, last_ip_fraud_score = ?
+       WHERE user_id = ? AND device_id = ?`,
+    )
+      .bind(rep.ip_proxy, rep.ip_vpn, rep.ip_tor, rep.ip_datacenter, rep.ip_fraud_score, userId, deviceId)
+      .run();
+  } catch {
+    // reputation columns not migrated yet
+  }
+}
+
 async function registerDevice(
   env: Env,
   userId: string,
   deviceId: string,
   deviceName: string,
   appVersion: string,
+  geo: ClientGeo,
+  clientEnv: ClientEnv,
 ): Promise<Response | null> {
-  const maxDevices = intEnv(env, 'MAX_DEVICES', 1);
+  const maxDevices = await maxDevicesForUser(env, userId);
   const existing = await env.DB.prepare(
     'SELECT id FROM devices WHERE user_id = ? AND device_id = ? AND revoked = 0',
   )
     .bind(userId, deviceId)
     .first<{ id: string }>();
+  const webClient = isWebClientEnv(clientEnv);
   if (existing) {
-    await env.DB.prepare(
-      'UPDATE devices SET last_seen = datetime(\'now\'), device_name = ?, app_version = ? WHERE id = ?',
-    )
-      .bind(deviceName, appVersion, existing.id)
-      .run();
+    if (webClient) {
+      await env.DB.prepare(
+        `UPDATE devices SET last_seen = datetime('now'), device_name = ?, app_version = ?,
+         last_ip = ?, last_country = ?, last_city = ?, last_region = ?,
+         last_client_platform = ?, last_client_os = ?, last_client_os_version = ?,
+         last_client_browser = ?, last_client_browser_version = ?, last_client_device_type = ?
+         WHERE id = ?`,
+      )
+        .bind(
+          deviceName,
+          appVersion,
+          geo.ip,
+          geo.country,
+          geo.city,
+          geo.region,
+          clientEnv.client_platform,
+          clientEnv.client_os,
+          clientEnv.client_os_version,
+          clientEnv.client_browser,
+          clientEnv.client_browser_version,
+          clientEnv.client_device_type,
+          existing.id,
+        )
+        .run();
+    } else {
+      await env.DB.prepare(
+        `UPDATE devices SET last_seen = datetime('now'), device_name = ?, app_version = ?,
+         last_ip = ?, last_country = ?, last_city = ?, last_region = ?
+         WHERE id = ?`,
+      )
+        .bind(deviceName, appVersion, geo.ip, geo.country, geo.city, geo.region, existing.id)
+        .run();
+    }
     return null;
   }
   const countRow = await env.DB.prepare(
@@ -138,11 +308,41 @@ async function registerDevice(
   if ((countRow?.c ?? 0) >= maxDevices) {
     return err(`Device limit reached (${maxDevices} PCs per account)`, 403, { max_devices: maxDevices });
   }
-  await env.DB.prepare(
-    'INSERT INTO devices (id, user_id, device_id, device_name, app_version) VALUES (?, ?, ?, ?, ?)',
-  )
-    .bind(uuid(), userId, deviceId, deviceName, appVersion)
-    .run();
+  if (webClient) {
+    await env.DB.prepare(
+      `INSERT INTO devices (
+         id, user_id, device_id, device_name, app_version,
+         last_ip, last_country, last_city, last_region,
+         last_client_platform, last_client_os, last_client_os_version,
+         last_client_browser, last_client_browser_version, last_client_device_type
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        uuid(),
+        userId,
+        deviceId,
+        deviceName,
+        appVersion,
+        geo.ip,
+        geo.country,
+        geo.city,
+        geo.region,
+        clientEnv.client_platform,
+        clientEnv.client_os,
+        clientEnv.client_os_version,
+        clientEnv.client_browser,
+        clientEnv.client_browser_version,
+        clientEnv.client_device_type,
+      )
+      .run();
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO devices (id, user_id, device_id, device_name, app_version, last_ip, last_country, last_city, last_region)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(uuid(), userId, deviceId, deviceName, appVersion, geo.ip, geo.country, geo.city, geo.region)
+      .run();
+  }
   return null;
 }
 
@@ -187,12 +387,18 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     device_id?: string;
     device_name?: string;
     app_version?: string;
-  }>(request);
+    client_ip?: string;
+    client_country?: string;
+    client_city?: string;
+    client_region?: string;
+  } & ClientEnvBody>(request);
   const email = normalizeEmail(body.email || '');
   const password = String(body.password || '');
   const deviceId = String(body.device_id || '').trim().toUpperCase();
   const deviceName = String(body.device_name || 'Unknown PC').slice(0, 120);
   const appVersion = String(body.app_version || '').slice(0, 40);
+  const geo = resolveClientGeo(request, body);
+  const clientEnv = resolveClientEnv(body);
   if (!email || !password || !deviceId) return err('email, password, and device_id required');
   const user = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first<UserRow>();
   if (!user || user.status !== 'active') return err('Invalid email or password', 401);
@@ -205,21 +411,40 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
       : '';
     if (!secret || !(await verifyTotp(secret, totp))) return err('Invalid TOTP code', 401);
   }
-  const deviceErr = await registerDevice(env, user.id, deviceId, deviceName, appVersion);
+  const reputation = await lookupIpReputation(geo.ip, env);
+  const repFlags = reputationToDbFlags(reputation);
+  if (isBlockingEnabled(env) && reputation.shouldBlock) {
+    await recordLoginDenied(
+      env,
+      user.id,
+      email,
+      deviceId,
+      geo,
+      formatDenyReason(reputation),
+      repFlags,
+    );
+    return err('Sign-in is not allowed from VPN, proxy, Tor, or datacenter networks.', 403, {
+      network_blocked: true,
+    });
+  }
+  const deviceErr = await registerDevice(env, user.id, deviceId, deviceName, appVersion, geo, clientEnv);
   if (deviceErr) return deviceErr;
+  await syncDeviceReputation(env, user.id, deviceId, repFlags);
+  await recordLoginEvent(env, user.id, deviceId, appVersion, geo, clientEnv, repFlags);
   const tokens = await issueTokens(env, user, deviceId);
   const devicesRow = await env.DB.prepare(
     'SELECT COUNT(*) AS c FROM devices WHERE user_id = ? AND revoked = 0',
   )
     .bind(user.id)
     .first<{ c: number }>();
+  const maxDev = await maxDevicesForUser(env, user.id);
   return json({
     ...tokens,
     email: user.email,
-    plan: 'free',
+    plan: planForUser(user),
     totp_enabled: !!user.totp_enabled,
     devices_used: devicesRow?.c ?? 1,
-    max_devices: intEnv(env, 'MAX_DEVICES', 1),
+    max_devices: maxDev,
   });
 }
 
@@ -237,11 +462,14 @@ async function handleRefresh(request: Request, env: Env): Promise<Response> {
     .bind(tokenHash, deviceId)
     .first<{ rt_id: string; user_id: string; email: string; status: string; totp_enabled: number }>();
   if (!row || row.status !== 'active') return err('Invalid refresh token', 401);
+  if (await isDeviceRevoked(env, row.user_id, deviceId)) {
+    return err('Device disabled', 403);
+  }
   await env.DB.prepare('UPDATE refresh_tokens SET revoked_at = datetime(\'now\') WHERE id = ?').bind(row.rt_id).run();
   const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(row.user_id).first<UserRow>();
   if (!user) return err('Invalid refresh token', 401);
   const tokens = await issueTokens(env, user, deviceId);
-  return json({ ...tokens, email: user.email, plan: 'free' });
+  return json({ ...tokens, email: user.email, plan: planForUser(user) });
 }
 
 async function handleLogout(request: Request, env: Env): Promise<Response> {
@@ -288,18 +516,22 @@ async function handleLicenseStatus(request: Request, env: Env): Promise<Response
   if (!auth) return err('Unauthorized', 401);
   const { user, payload } = auth;
   const deviceId = String(payload.device_id || '');
+  if (deviceId && (await isDeviceRevoked(env, user.id, deviceId))) {
+    return err('Device disabled', 403);
+  }
   const devicesRow = await env.DB.prepare(
     'SELECT COUNT(*) AS c FROM devices WHERE user_id = ? AND revoked = 0',
   )
     .bind(user.id)
     .first<{ c: number }>();
+  const maxDev = await maxDevicesForUser(env, user.id);
   return json({
     valid: true,
     email: user.email,
-    plan: 'free',
+    plan: planForUser(user),
     totp_enabled: !!user.totp_enabled,
     devices_used: devicesRow?.c ?? 0,
-    max_devices: intEnv(env, 'MAX_DEVICES', 1),
+    max_devices: maxDev,
     offline_grace_days: intEnv(env, 'OFFLINE_GRACE_DAYS', 7),
     device_id: deviceId,
   });
@@ -309,11 +541,58 @@ async function handleHeartbeat(request: Request, env: Env): Promise<Response> {
   const auth = await bearerUser(request, env);
   if (!auth) return err('Unauthorized', 401);
   const deviceId = String(auth.payload.device_id || '');
-  await env.DB.prepare(
-    'UPDATE devices SET last_seen = datetime(\'now\') WHERE user_id = ? AND device_id = ? AND revoked = 0',
-  )
-    .bind(auth.user.id, deviceId)
-    .run();
+  let geo: ClientGeo = resolveClientGeo(request);
+  let clientEnv: ClientEnv = resolveClientEnv();
+  try {
+    const body = await readJson<{
+      client_ip?: string;
+      client_country?: string;
+      client_city?: string;
+      client_region?: string;
+    } & ClientEnvBody>(request);
+    geo = resolveClientGeo(request, body);
+    clientEnv = resolveClientEnv(body);
+  } catch {
+    // empty or non-JSON body — use connecting IP only
+  }
+  if (isWebClientEnv(clientEnv)) {
+    await env.DB.prepare(
+      `UPDATE devices SET last_seen = datetime('now'),
+       last_ip = COALESCE(?, last_ip), last_country = COALESCE(?, last_country),
+       last_city = COALESCE(?, last_city), last_region = COALESCE(?, last_region),
+       last_client_platform = COALESCE(?, last_client_platform),
+       last_client_os = COALESCE(?, last_client_os),
+       last_client_os_version = COALESCE(?, last_client_os_version),
+       last_client_browser = COALESCE(?, last_client_browser),
+       last_client_browser_version = COALESCE(?, last_client_browser_version),
+       last_client_device_type = COALESCE(?, last_client_device_type)
+       WHERE user_id = ? AND device_id = ? AND revoked = 0`,
+    )
+      .bind(
+        geo.ip,
+        geo.country,
+        geo.city,
+        geo.region,
+        clientEnv.client_platform,
+        clientEnv.client_os,
+        clientEnv.client_os_version,
+        clientEnv.client_browser,
+        clientEnv.client_browser_version,
+        clientEnv.client_device_type,
+        auth.user.id,
+        deviceId,
+      )
+      .run();
+  } else {
+    await env.DB.prepare(
+      `UPDATE devices SET last_seen = datetime('now'),
+       last_ip = COALESCE(?, last_ip), last_country = COALESCE(?, last_country),
+       last_city = COALESCE(?, last_city), last_region = COALESCE(?, last_region)
+       WHERE user_id = ? AND device_id = ? AND revoked = 0`,
+    )
+      .bind(geo.ip, geo.country, geo.city, geo.region, auth.user.id, deviceId)
+      .run();
+  }
   return json({
     valid: true,
     server_time: new Date().toISOString(),

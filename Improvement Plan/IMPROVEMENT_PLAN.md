@@ -180,7 +180,7 @@ In the encrypted distribution, `__file__` for any `.pyc.enc` module points to:
 ```
 C:\Users\...\AppData\Local\CiM\app-cache\1.0.6\server\module.pyc
 ```
-NOT the install root. This caused three separate bugs (documented in PROJECT_HANDOFF.md §3.5–3.7).
+NOT the install root. This caused three separate bugs (documented in docs/handoff/PROJECT_HANDOFF.md §3.5–3.7).
 The current fix is ad-hoc (per-module global path variables). A new developer writing:
 ```python
 SCRAPE_PATH = Path(__file__).parent.parent / "scrape_daily.py"
@@ -1676,7 +1676,7 @@ The MACD/StochRSI swing scanner is fully built and working but gated out for all
 **Recommendation:** Either:
 1. Enable it for all clients (it's a key differentiator)
 2. Gate by license tier (same license file, different machine code tier)
-3. Document the product decision in `USER_REQUIREMENTS.md` to avoid confusion for future developers
+3. Document the product decision in `docs/handoff/USER_REQUIREMENTS.md` to avoid confusion for future developers
 
 ---
 

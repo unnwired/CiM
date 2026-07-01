@@ -39,6 +39,7 @@ INDICES = [
     ("^NSEMDCP50", "NIFTY Midcap 50",              "equity"),
     ("^CNXFMCG",   "NIFTY FMCG",                  "equity"),
     ("^CNXPHARMA", "NIFTY Pharma",                "equity"),
+    ("NIFTY_HEALTHCARE.NS", "Nifty Healthcare",   "equity"),
     ("^CNXAUTO",   "NIFTY Auto",                  "equity"),
     ("^CNXMETAL",  "NIFTY Metal",                 "equity"),
     ("^CNXREALTY", "NIFTY Realty",                "equity"),
@@ -70,6 +71,7 @@ NSE_NAME_MAP = {
     "^NSEMDCP50": "NIFTY MIDCAP 50",
     "^CNXFMCG":   "NIFTY FMCG",
     "^CNXPHARMA": "NIFTY PHARMA",
+    "NIFTY_HEALTHCARE.NS": "NIFTY HEALTHCARE INDEX",
     "^CNXAUTO":   "NIFTY AUTO",
     "^CNXMETAL":  "NIFTY METAL",
     "^CNXREALTY": "NIFTY REALTY",
@@ -94,15 +96,33 @@ NSE_NAME_MAP = {
 SKIP_KEYWORDS = ["G-SEC", "BOND", "BHARAT BOND", "COMPOSITE G-SEC"]
 CHARTABLE_NAMES = set(NSE_NAME_MAP.values())
 
-# Yahoo has no OHLC series — always use NSE historicalOR/indicesHistory.
+# Yahoo has no usable daily OHLC — use NSE indicesHistory for 1D+ only (not 4H).
+# 4H intraday uses Yahoo 5m first, then NSE charting 5m fallback (see bars_4h.py).
 NSE_ONLY_INDEX_SYMBOLS = frozenset({
     "^CNXINDDEF",
+    "NIFTY_HEALTHCARE.NS",
 })
 
 # Earliest calendar date to request from NSE (index may list later).
 NSE_INDEX_HISTORY_START = {
     "^CNXINDDEF": "2024-11-11",
+    "NIFTY_HEALTHCARE.NS": "2020-11-18",
 }
+
+
+def get_nse_chart_token(symbol: str):
+    """NSE charting scripcode for 4H fallback (config/nse_index_chart_tokens.json)."""
+    import sys
+
+    root = str(BASE_DIR)
+    pkg = BASE_DIR / "packages"
+    if str(pkg) not in sys.path:
+        sys.path.insert(0, str(pkg))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from server.nse_charting_intraday import get_nse_chart_token as _get
+
+    return _get(symbol, BASE_DIR)
 
 
 def get_usd_inr():

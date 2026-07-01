@@ -18,6 +18,7 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "Get-CiMPaths.ps1")
 if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $ScriptDir }
+$pkg = Get-CiMPackagePaths -RepoRoot $RepoRoot
 if (-not $ExportRoot) {
     $fx = Get-CiMPaths -RepoRoot $RepoRoot -DistributionKind Plaintext
     $ExportRoot = $fx.ExportRoot
@@ -32,7 +33,7 @@ if (-not $ExportRoot) {
 $secret = Get-CiMVendorSecret -LicenseSecret $LicenseSecret -RepoRoot $RepoRoot
 if (-not $secret) {
     throw @"
-CIM_LICENSE_SECRET is required for plaintext distribution (installer + install keys).
+CIM_LICENSE_SECRET or config\.build_license_secret embeds distribution crypto on the build machine (clients use online sign-in).
 
 Set: `$env:CIM_LICENSE_SECRET = 'your-secret'
 Or save one line in config\.build_license_secret
@@ -99,7 +100,7 @@ foreach ($rel in @("server", "frontend\build\static\js")) {
 Write-CiMEmbeddedDistSecret -Root $ExportRoot -Secret $secret
 
 # Readable server sources from repo (replaces encrypted .pyc.enc from prior builds).
-$serverSrc = Join-Path $RepoRoot "server"
+$serverSrc = $pkg.ServerRoot
 $serverDst = Join-Path $ExportRoot "server"
 if (Test-Path -LiteralPath $serverSrc) {
     Get-ChildItem -LiteralPath $serverSrc -File -Filter "*.py" -ErrorAction SilentlyContinue |
@@ -115,7 +116,11 @@ $plainSync = @(
     "desktop\preload.js"
 )
 foreach ($rel in $plainSync) {
-    $src = Join-Path $RepoRoot $rel
+    if ($rel -like "desktop\*") {
+        $src = Join-Path $pkg.DesktopRoot ($rel -replace '^desktop\\', '')
+    } else {
+        $src = Join-Path $RepoRoot $rel
+    }
     $dst = Join-Path $ExportRoot $rel
     if (-not (Test-Path -LiteralPath $src)) {
         Write-Warning "Skip missing repo file: $rel"
@@ -133,22 +138,12 @@ foreach ($rel in $plainSync) {
 # Only rebuild if the export bundle is missing (e.g. -SkipExport on a stale tree).
 $frontendBuildDst = Join-Path $ExportRoot "frontend\build"
 if (-not (Test-Path -LiteralPath (Join-Path $frontendBuildDst "index.html"))) {
-    $frontendDir = Join-Path $RepoRoot "frontend"
-    if (-not (Test-Path -LiteralPath (Join-Path $frontendDir "package.json"))) {
-        throw "Missing frontend\build in export and no frontend\package.json in repo."
+    if (-not (Test-Path -LiteralPath (Join-Path $pkg.BrowserRoot "package.json"))) {
+        throw "Missing frontend\build in export and no packages\browser\package.json in repo."
     }
-    Write-Host "Building frontend (distribution profile, readable JS)..."
-    Push-Location $frontendDir
-    try {
-        $env:GENERATE_SOURCEMAP = "false"
-        $env:REACT_APP_EXPORT_MODE = "distribution"
-        & npm run build
-        if ($LASTEXITCODE -ne 0) { throw "npm run build failed for plaintext distribution" }
-    } finally {
-        Remove-Item Env:REACT_APP_EXPORT_MODE -ErrorAction SilentlyContinue
-        Pop-Location
-    }
-    $frontendBuildSrc = Join-Path $RepoRoot "frontend\build"
+    Write-Host "Building browser package (distribution profile, readable JS)..."
+    Invoke-CiMBrowserProductionBuild -BrowserRoot $pkg.BrowserRoot -DistributionMode
+    $frontendBuildSrc = $pkg.BrowserBuild
     if (-not (Test-Path -LiteralPath $frontendBuildDst)) {
         New-Item -ItemType Directory -Force -Path $frontendBuildDst | Out-Null
     }
@@ -156,7 +151,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $frontendBuildDst "index.html"))) {
     Write-Host "Synced frontend\build from repo (readable JS bundle)"
 }
 
-$authSrc = Join-Path $RepoRoot "frontend\auth"
+$authSrc = $pkg.BrowserAuth
 $authDst = Join-Path $ExportRoot "frontend\auth"
 if (Test-Path -LiteralPath $authSrc) {
     if (Test-Path -LiteralPath $authDst) { Remove-Item -LiteralPath $authDst -Recurse -Force }

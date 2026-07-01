@@ -15,6 +15,8 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $ScriptDir }
+. (Join-Path $ScriptDir "Get-CiMPaths.ps1")
+$pkg = Get-CiMPackagePaths -RepoRoot $RepoRoot
 
 function Resolve-Python {
     param([string]$Root)
@@ -43,15 +45,16 @@ try {
     & $PythonExe scripts/dev_setup.py
     if ($LASTEXITCODE -ne 0) { throw "dev_setup failed" }
 
+    Set-CiMPythonPackagePath -RepoRoot $RepoRoot
     Write-Host "`n[2/4] unit tests..."
-    & $PythonExe -m unittest discover -s server/tests -v
+    & $PythonExe -m unittest discover -s (Join-Path $pkg.ServerRoot "tests") -v
     if ($LASTEXITCODE -ne 0) { throw "unit tests failed" }
 
     if (-not $SkipLint) {
-        Write-Host "`n[3/4] frontend lint (build)..."
+        Write-Host "`n[3/4] browser package lint (build)..."
         $npm = "${env:ProgramFiles}\nodejs\npm.cmd"
         if (-not (Test-Path -LiteralPath $npm)) { $npm = "npm" }
-        Push-Location (Join-Path $RepoRoot "frontend")
+        Push-Location $pkg.BrowserRoot
         try {
             & $npm run build 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
@@ -77,7 +80,7 @@ try {
             $outLog = Join-Path $logDir "dev-gate-backend.log"
             $errLog = Join-Path $logDir "dev-gate-backend.err.log"
             $proc = Start-Process -FilePath $PythonExe `
-                -ArgumentList @("-s", "-m", "uvicorn", "server.server:app", "--host", "127.0.0.1", "--port", "$Port") `
+                -ArgumentList (Get-CiMUvicornPythonArgs -RepoRoot $RepoRoot -AppModule "server.server:app" -ExtraArgs @("--host", "127.0.0.1", "--port", "$Port")) `
                 -WorkingDirectory $RepoRoot -PassThru `
                 -RedirectStandardOutput $outLog -RedirectStandardError $errLog -WindowStyle Hidden
             $deadline = (Get-Date).AddSeconds(90)

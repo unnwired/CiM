@@ -7,6 +7,8 @@
 param([string]$InstallRoot = "")
 
 $ErrorActionPreference = "Continue"
+. (Join-Path $PSScriptRoot "Get-CiMPaths.ps1")
+
 if (-not $InstallRoot) { $InstallRoot = (Get-Location).Path }
 try {
     $InstallRoot = (Resolve-Path -LiteralPath $InstallRoot).Path
@@ -21,6 +23,8 @@ Write-Host "Install folder: $InstallRoot"
 Write-Host ""
 
 $fail = 0
+$onlineOnly = Test-CiMOnlineOnlyInstall -InstallRoot $InstallRoot
+
 function Report([string]$Label, [bool]$Ok, [string]$Detail = "") {
     if ($Ok) {
         Write-Host "[OK]   $Label"
@@ -37,12 +41,18 @@ $checks = @(
     @{ Path = "db_sqlite.py"; Label = "db_sqlite.py" },
     @{ Path = "runtime\python\python.exe"; Label = "Bundled Python" },
     @{ Path = "frontend\build\index.html"; Label = "Frontend build" },
-    @{ Path = "data\.cim-license"; Label = "License file" },
     @{ Path = "server\_cim_dist_embedded.py"; Label = "Embedded distribution secret" }
 )
 foreach ($c in $checks) {
     $p = Join-Path $InstallRoot $c.Path
     Report $c.Label (Test-Path -LiteralPath $p) $p
+}
+
+if ($onlineOnly) {
+    Report "Online activation" $true "Sign in with your account (no offline install key file)"
+} else {
+    $licensePath = Join-Path $InstallRoot "data\.cim-license"
+    Report "License file" (Test-Path -LiteralPath $licensePath) $licensePath
 }
 
 $legacyProfile = Join-Path $InstallRoot "config\.fx-dist.cfg"
@@ -63,7 +73,7 @@ if (Test-Path -LiteralPath $py) {
 }
 
 if ([bool]$env:CIM_LICENSE_SECRET) {
-    Report "CIM_LICENSE_SECRET env unset" $false "Env is set; Repair clears it for installed apps."
+    Report "CIM_LICENSE_SECRET env unset" $false "Env is set; clear it for installed apps."
 } else {
     Report "CIM_LICENSE_SECRET env unset" $true
 }
@@ -90,9 +100,13 @@ if ($fail -eq 0) {
     Write-Host "$fail check(s) failed."
     Write-Host ""
     Write-Host "Usually you can fix without reinstall:"
-    Write-Host "  1. Repair-CiMLicense.ps1 (if license fail)"
+    if ($onlineOnly) {
+        Write-Host "  1. Sign in again from the auth screen (online activation)"
+    } else {
+        Write-Host "  1. Repair-CiMLicense.ps1 (offline install key)"
+    }
     Write-Host "  2. Fresh update ZIP + Install-Client-Update.bat"
-    Write-Host "  3. Full reinstall preserves data\ if installer uses onlyifdoesntexist on user JSON"
+    Write-Host "  3. Full reinstall preserves data\ user JSON when using onlyifdoesntexist"
 }
 Write-Host ""
 if ($fail -gt 0) { exit 1 }

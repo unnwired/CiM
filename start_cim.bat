@@ -3,7 +3,7 @@ setlocal DisableDelayedExpansion
 
 REM ========================================================================
 REM Primary way to run Charts In Motion: double-click this file or run from CMD here.
-REM It prepares Python, rebuilds frontend\build when frontend\src is newer,
+REM It prepares Python, rebuilds packages\browser\build when sources are newer,
 REM starts the API at http://127.0.0.1:8000 , then opens Charts In Motion Desktop.
 REM
 REM Optional environment variables (set before running, or in System):
@@ -13,14 +13,28 @@ REM   CIM_REQUIRE_ONLINE_AUTH=1  — show sign-in / sign-up (dev auth test; or u
 REM
 REM Manual start without this file ^(developers^):
 REM   cd /d "<project folder>"
-REM   cd frontend ^&^& npm install ^&^& npm run build ^&^& cd ..
-REM   runtime\python\python.exe -s -m uvicorn server.server:app --host 127.0.0.1 --port 8000
+REM   cd packages\browser ^&^& npm install ^&^& npm run build ^&^& cd ..
+REM   runtime\python\python.exe -s runtime\run_uvicorn.py server.server:app --host 127.0.0.1 --port 8000
 REM   Open http://127.0.0.1:8000  ^(or let Charts In Motion Desktop load it^)
 REM ========================================================================
 
 REM Resolve project root from this script location
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+
+call "%ROOT%\scripts\Resolve-CiMPaths.bat" "%ROOT%" 2>nul
+if not defined CIM_FRONTEND_DIR (
+  set "CIM_FRONTEND_DIR=%ROOT%\frontend"
+  if not exist "%CIM_FRONTEND_DIR%\package.json" if exist "%ROOT%\packages\browser\package.json" set "CIM_FRONTEND_DIR=%ROOT%\packages\browser"
+)
+if not defined CIM_UVICORN_LAUNCHER set "CIM_UVICORN_LAUNCHER=%ROOT%\runtime\run_uvicorn.py"
+if not exist "%ROOT%\scripts\Resolve-CiMPaths.bat" if not exist "%CIM_UVICORN_LAUNCHER%" (
+  echo [ERROR] Missing runtime\run_uvicorn.py — re-run export/sync from the dev repo.
+  if not defined CIM_NO_PAUSE pause
+  exit /b 1
+)
+set "FRONTEND_DIR=%CIM_FRONTEND_DIR%"
+set "UVICORN_LAUNCHER=%CIM_UVICORN_LAUNCHER%"
 
 REM Set log paths here (not inside parenthesized blocks — avoids empty vars with DisableDelayedExpansion).
 set "BACKEND_LOG=%ROOT%\runtime\logs\backend-startup.log"
@@ -38,14 +52,18 @@ set "EMBEDDED_PY=%ROOT%\runtime\python\python.exe"
 
 set "SERVER_LAYOUT_OK=0"
 if exist "%ROOT%\server\server.py" set "SERVER_LAYOUT_OK=1"
+if exist "%ROOT%\packages\server\server.py" set "SERVER_LAYOUT_OK=1"
 if exist "%ROOT%\server\server.pyc" set "SERVER_LAYOUT_OK=1"
 if exist "%ROOT%\server\server.pyc.enc" set "SERVER_LAYOUT_OK=1"
 if exist "%ROOT%\server\cim_bootstrap.py" if exist "%ROOT%\server\app_code_crypto.py" (
   if exist "%ROOT%\server\server.pyc.enc" set "SERVER_LAYOUT_OK=1"
 )
+if exist "%ROOT%\packages\server\cim_bootstrap.py" if exist "%ROOT%\packages\server\app_code_crypto.py" (
+  if exist "%ROOT%\packages\server\server.pyc.enc" set "SERVER_LAYOUT_OK=1"
+)
 if "%SERVER_LAYOUT_OK%"=="0" (
-  echo [ERROR] Charts In Motion server files are missing under server\
-  echo Expected dev build: server\server.py or server\server.pyc
+  echo [ERROR] Charts In Motion server files are missing.
+  echo Expected dev build: packages\server\server.py or server\server.py
   echo Expected distribution: server\cim_bootstrap.py + server\server.pyc.enc
   echo Ensure this .bat is inside a complete Charts In Motion install folder.
   if not defined CIM_NO_PAUSE pause
@@ -252,7 +270,7 @@ if "%CIM_DISTRIBUTION%"=="1" (
   )
   if exist "%ROOT%\runtime\python\python.exe" (
     set "CIM_LICENSE_SECRET="
-    "%ROOT%\runtime\python\python.exe" -s -c "import os, sys; os.environ.pop('CIM_LICENSE_SECRET', None); sys.path.insert(0, r'%ROOT%'); from pathlib import Path; from server.app_code_crypto import access_granted; raise SystemExit(0 if access_granted(Path(r'%ROOT%')) else 1)" >nul 2>&1
+    "%ROOT%\runtime\python\python.exe" -s -c "import sys; sys.path.insert(0, r'%ROOT%'); sys.path.insert(0, r'%ROOT%\packages'); from pathlib import Path; from server.app_code_crypto import access_granted; raise SystemExit(0 if access_granted(Path(r'%ROOT%')) else 1)" >nul 2>&1
     if errorlevel 1 (
       echo No offline license or online session — sign-in screen will open first.
     ) else (
@@ -286,7 +304,7 @@ echo.
 REM -----------------------------------------------------------
 REM 3) Prefer built frontend (no npm/node needed for users)
 REM -----------------------------------------------------------
-if exist "%ROOT%\frontend\build\index.html" (
+if exist "%FRONTEND_DIR%\build\index.html" (
   call :StartPackagedApp
   exit /b %ERRORLEVEL%
 )
@@ -294,8 +312,8 @@ if exist "%ROOT%\frontend\build\index.html" (
 REM -----------------------------------------------------------
 REM 4) Dev mode fallback: install node/npm and run frontend
 REM -----------------------------------------------------------
-if not exist "%ROOT%\frontend\package.json" (
-  echo [ERROR] frontend\package.json not found and no frontend build exists.
+if not exist "%FRONTEND_DIR%\package.json" (
+  echo [ERROR] browser package.json not found and no frontend build exists.
   echo This package appears incomplete.
   if not defined CIM_NO_PAUSE pause
   exit /b 1
@@ -323,18 +341,18 @@ if errorlevel 1 (
 )
 
 echo Installing/validating frontend npm packages...
-cd /d "%ROOT%\frontend"
+cd /d "%FRONTEND_DIR%"
 "%NPM_CMD%" install
 if errorlevel 1 (
-  echo [ERROR] npm install failed in frontend.
+  echo [ERROR] npm install failed in browser package.
   if not defined CIM_NO_PAUSE pause
   exit /b 1
 )
 cd /d "%ROOT%"
 
 echo Starting Charts In Motion services (backend + frontend dev server)...
-start "CiM Backend" /D "%ROOT%" "%PYTHON_EXE%" -s -m uvicorn server.server:app --reload --host 127.0.0.1 --port 8000
-start "Charts In Motion Frontend" /D "%ROOT%\frontend" cmd /k call "%NPM_CMD%" start
+start "CiM Backend" /D "%ROOT%" "%PYTHON_EXE%" -s "%UVICORN_LAUNCHER%" server.server:app --reload --reload-dir "%CIM_SERVER_RELOAD_DIR%" --host 127.0.0.1 --port 8000
+start "Charts In Motion Frontend" /D "%FRONTEND_DIR%" cmd /k call "%NPM_CMD%" start
 call :FlowxSleep 5
 start "" "http://localhost:3000"
 
@@ -357,16 +375,23 @@ if exist "%ROOT%\config\.cim-plaintext-dist" (
     set "CIM_UVICORN_APP=server.server:app"
     echo Development backend ^(server.server:app — no license required^).
   )
+) else if exist "%ROOT%\packages\server\server.py" (
+  if /I "%CIM_REQUIRE_ONLINE_AUTH%"=="1" (
+    echo Development backend with online auth gate ^(cim_bootstrap — sign-in required^).
+  ) else (
+    set "CIM_UVICORN_APP=server.server:app"
+    echo Development backend ^(server.server:app — no license required^).
+  )
 ) else (
   echo Distribution backend ^(encrypted app code^).
 )
 if defined CIM_NO_PAUSE goto :StartPackagedApp_Hidden
 echo Opening CiM Backend console ^(live scan / fetch logs appear here^)...
-start "CiM Backend" /D "%ROOT%" cmd /k ""%PYTHON_EXE%" -s -m uvicorn %CIM_UVICORN_APP% --host 127.0.0.1 --port 8000"
+start "CiM Backend" /D "%ROOT%" cmd /k ""%PYTHON_EXE%" -s "%UVICORN_LAUNCHER%" %CIM_UVICORN_APP% --host 127.0.0.1 --port 8000"
 goto :StartPackagedApp_AfterLaunch
 :StartPackagedApp_Hidden
 powershell -NoProfile -WindowStyle Hidden -Command ^
-  "$root = '%ROOT%'; $py = '%PYTHON_EXE%'; $app = '%CIM_UVICORN_APP%'; $log = Join-Path $root 'runtime\logs\backend-startup.log'; $err = Join-Path $root 'runtime\logs\backend-startup.err.log'; $pidf = Join-Path $root 'runtime\logs\backend.pid'; New-Item -ItemType Directory -Force -Path (Split-Path -Parent $log) | Out-Null; $p = Start-Process -FilePath $py -ArgumentList @('-s','-m','uvicorn',$app,'--host','127.0.0.1','--port','8000') -WorkingDirectory $root -PassThru -RedirectStandardOutput $log -RedirectStandardError $err; if ($p) { $p.Id | Out-File -FilePath $pidf -Encoding ascii }"
+  "$root = '%ROOT%'; $py = '%PYTHON_EXE%'; $launcher = Join-Path $root 'runtime\run_uvicorn.py'; $app = '%CIM_UVICORN_APP%'; $log = Join-Path $root 'runtime\logs\backend-startup.log'; $err = Join-Path $root 'runtime\logs\backend-startup.err.log'; $pidf = Join-Path $root 'runtime\logs\backend.pid'; New-Item -ItemType Directory -Force -Path (Split-Path -Parent $log) | Out-Null; $p = Start-Process -FilePath $py -ArgumentList @('-s',$launcher,$app,'--host','127.0.0.1','--port','8000') -WorkingDirectory $root -PassThru -RedirectStandardOutput $log -RedirectStandardError $err; if ($p) { $p.Id | Out-File -FilePath $pidf -Encoding ascii }"
 :StartPackagedApp_AfterLaunch
 if errorlevel 1 (
   echo [ERROR] Failed to launch backend process.
@@ -415,13 +440,8 @@ call :FlowxSleep 2
 goto :WaitForBackendReady_Loop
 
 :LaunchDesktop
-set "DESKTOP_DIR=%ROOT%\desktop"
-set "ELECTRON_EXE=%ROOT%\desktop\node_modules\electron\dist\electron.exe"
-if exist "%ROOT%\desktop\desktop\package.json" if not exist "%ROOT%\desktop\package.json" set "DESKTOP_DIR=%ROOT%\desktop\desktop"
-if exist "%ROOT%\desktop\desktop\node_modules\electron\dist\electron.exe" if not exist "%ELECTRON_EXE%" (
-  set "DESKTOP_DIR=%ROOT%\desktop\desktop"
-  set "ELECTRON_EXE=%ROOT%\desktop\desktop\node_modules\electron\dist\electron.exe"
-)
+set "DESKTOP_DIR=%CIM_DESKTOP_DIR%"
+set "ELECTRON_EXE=%DESKTOP_DIR%\node_modules\electron\dist\electron.exe"
 
 if not exist "%DESKTOP_DIR%\package.json" (
   echo [ERROR] Desktop launcher files missing: "%DESKTOP_DIR%\package.json"
@@ -576,8 +596,8 @@ if errorlevel 1 (
   echo.
   echo [WARN] Frontend must be rebuilt but npm was not found.
   echo Install Node.js LTS from https://nodejs.org ^(check "Add to PATH"^) and re-run,
-  echo or run manually: cd frontend ^&^& npm install ^&^& npm run build
-  echo Continuing with existing frontend\build — UI may be outdated.
+  echo or run manually: cd packages\browser ^&^& npm install ^&^& npm run build
+  echo Continuing with existing browser build — UI may be outdated.
   exit /b 0
 )
 
@@ -586,20 +606,20 @@ if exist "%ProgramFiles%\nodejs\" set "PATH=%ProgramFiles%\nodejs;%PATH%"
 if exist "%ProgramFiles(x86)%\nodejs\" set "PATH=%ProgramFiles(x86)%\nodejs;%PATH%"
 if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Programs\nodejs\" set "PATH=%LOCALAPPDATA%\Programs\nodejs;%PATH%"
 
-if not exist "%ROOT%\frontend\node_modules" (
-  echo [cim] Installing frontend npm dependencies ^(first run may take a few minutes^)...
-  pushd "%ROOT%\frontend"
+if not exist "%FRONTEND_DIR%\node_modules" (
+  echo [cim] Installing browser npm dependencies ^(first run may take a few minutes^)...
+  pushd "%FRONTEND_DIR%"
   call "%NPM_CMD%" install
   if errorlevel 1 (
     popd
-    echo [ERROR] npm install failed in frontend.
+    echo [ERROR] npm install failed in browser package.
     exit /b 1
   )
   popd
 )
 
-echo [cim] Running npm run build in frontend...
-pushd "%ROOT%\frontend"
+echo [cim] Running npm run build in browser package...
+pushd "%FRONTEND_DIR%"
 call "%NPM_CMD%" run build
 if errorlevel 1 (
   popd
