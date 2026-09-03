@@ -160,7 +160,7 @@ try {
             param($Msg, $Lvl)
             Write-WatchdogLine $Msg $Lvl
         }
-        $result = & $healScript -WebRoot $WebRoot -LogFn $logBlock
+        $result = & $healScript -WebRoot $WebRoot -LogFn $logBlock -ConsecutiveFailures $consecutiveFailures
 
         if ($result.OverallOk) {
             $consecutiveFailures = 0

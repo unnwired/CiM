@@ -16,6 +16,8 @@
 param(
     [switch]$CheckOnly,
     [int]$CooldownMinutes = 10,
+    [int]$ConsecutiveFailures = 0,
+    [switch]$ResetFunnelFirst,
     [string]$WebRoot = "",
     [string]$MobileRoot = "",
     [string]$StateFile = "",
@@ -47,6 +49,25 @@ function Write-HealLog {
 function Test-CiMHealPortListening {
     param([int]$Port)
     Test-CiMDeployPortListening -Port $Port
+}
+
+function Restart-CiMTailscaleForHeal {
+    param([hashtable]$State)
+    if (Test-CiMHealCooldown -ActionKey "tailscaleRestart" -State $State) {
+        Write-HealLog "HEAL skipped (cooldown): tailscaleRestart" "WARN"
+        return $false
+    }
+    Write-HealLog "HEAL: restart Tailscale service (stale funnel after sleep/network change)" "HEAL"
+    try {
+        Restart-Service -Name Tailscale -Force -ErrorAction Stop
+    } catch {
+        tailscale down 2>&1 | Out-Null
+        Start-Sleep -Seconds 2
+        tailscale up 2>&1 | Out-Null
+    }
+    Start-Sleep -Seconds 8
+    Set-CiMHealCooldown -ActionKey "tailscaleRestart" -State $State
+    return $true
 }
 
 function Test-CiMHealHttp {
@@ -141,9 +162,15 @@ function Write-CiMHealState {
 function Test-CiMHealCooldown {
     param(
         [string]$ActionKey,
-        [hashtable]$State
+        [hashtable]$State,
+        [switch]$Force
     )
+    if ($Force) { return $false }
     if ($CooldownMinutes -le 0) { return $false }
+    if ($ConsecutiveFailures -ge 2 -and ($ActionKey -like '*Funnel*')) {
+        # Public funnel often goes stale after sleep — retry sooner than the default 10m cooldown.
+        return $false
+    }
     $key = "lastHeal_$ActionKey"
     if (-not $State.ContainsKey($key)) { return $false }
     try {
@@ -193,8 +220,23 @@ function Invoke-CiMHealStepWebFunnel {
         Write-HealLog "HEAL skipped (cooldown): webFunnel" "WARN"
         return "skipped_cooldown:webFunnel"
     }
-    Write-HealLog "HEAL: refresh public web funnel /" "HEAL"
-    & $routesScript -WebPort $pair.WebPort -SkipMobileRoute -WaitForEnableMinutes 0 -WebInstallRoot $WebRoot
+    $doReset = $ResetFunnelFirst.IsPresent -or $ConsecutiveFailures -ge 2
+    if ($doReset) {
+        [void](Restart-CiMTailscaleForHeal -State $State)
+    }
+    if ($doReset) {
+        Write-HealLog "HEAL: reset + refresh public web funnel /" "HEAL"
+    } else {
+        Write-HealLog "HEAL: refresh public web funnel /" "HEAL"
+    }
+    $routeArgs = @{
+        WebPort               = $pair.WebPort
+        SkipMobileRoute       = $true
+        WaitForEnableMinutes  = 0
+        WebInstallRoot        = $WebRoot
+    }
+    if ($doReset) { $routeArgs.ResetFirst = $true }
+    & $routesScript @routeArgs
     if ($LASTEXITCODE -ne 0) { throw "Enable-CiMTailscalePublicRoutes (web) failed (exit $LASTEXITCODE)" }
     Set-CiMHealCooldown -ActionKey "webFunnel" -State $State
     return "webFunnel"
@@ -230,13 +272,26 @@ function Invoke-CiMHealStepMobileFunnel {
         Write-HealLog "HEAL skipped (cooldown): mobileFunnel" "WARN"
         return "skipped_cooldown:mobileFunnel"
     }
-    Write-HealLog "HEAL: UpdateMobileOnly /mobile funnel" "HEAL"
-    & $routesScript `
-        -WebPort $pair.WebPort `
-        -MobilePort $pair.MobilePort `
-        -UpdateMobileOnly `
-        -WebInstallRoot $WebRoot `
-        -MobileInstallRoot $MobileRoot
+    if ($ResetFunnelFirst.IsPresent -or $ConsecutiveFailures -ge 2) {
+        Write-HealLog "HEAL: reset + refresh full funnel (web + /mobile)" "HEAL"
+        $routeArgs = @{
+            WebPort              = $pair.WebPort
+            MobilePort           = $pair.MobilePort
+            WaitForEnableMinutes = 0
+            WebInstallRoot       = $WebRoot
+            MobileInstallRoot    = $MobileRoot
+            ResetFirst           = $true
+        }
+        & $routesScript @routeArgs
+    } else {
+        Write-HealLog "HEAL: UpdateMobileOnly /mobile funnel" "HEAL"
+        & $routesScript `
+            -WebPort $pair.WebPort `
+            -MobilePort $pair.MobilePort `
+            -UpdateMobileOnly `
+            -WebInstallRoot $WebRoot `
+            -MobileInstallRoot $MobileRoot
+    }
     if ($LASTEXITCODE -ne 0) { throw "Enable-CiMTailscalePublicRoutes (mobile) failed (exit $LASTEXITCODE)" }
     Set-CiMHealCooldown -ActionKey "mobileFunnel" -State $State
     return "mobileFunnel"
@@ -255,8 +310,8 @@ $portWeb = Test-CiMHealPortListening -Port $pair.WebPort
 $portMobile = Test-CiMHealPortListening -Port $pair.MobilePort
 $webLocal = Test-CiMHealHttp -Url "http://127.0.0.1:$($pair.WebPort)/api/health"
 $mobileLocal = Test-CiMHealHttp -Url $pair.MobileLocalUrl
-$webPublic = if ($publicWebHealth) { Test-CiMHealHttp -Url $publicWebHealth -TimeoutSec 35 } else { @{ Ok = $false; Status = 0; Error = "no_tailscale_dns" } }
-$mobilePublic = if ($publicMobile) { Test-CiMHealHttp -Url $publicMobile -TimeoutSec 35 } else { @{ Ok = $false; Status = 0; Error = "no_tailscale_dns" } }
+$webPublic = if ($publicWebHealth) { Test-CiMHealHttp -Url $publicWebHealth -TimeoutSec 60 } else { @{ Ok = $false; Status = 0; Error = "no_tailscale_dns" } }
+$mobilePublic = if ($publicMobile) { Test-CiMHealHttp -Url $publicMobile -TimeoutSec 60 } else { @{ Ok = $false; Status = 0; Error = "no_tailscale_dns" } }
 $funnelStatus = Get-CiMHealFunnelStatusText
 
 $webLocalOk = $portWeb -and $webLocal.Ok
@@ -292,8 +347,8 @@ if (-not $CheckOnly -and -not $overallOk) {
             $portMobile = Test-CiMHealPortListening -Port $pair.MobilePort
             $webLocal = Test-CiMHealHttp -Url "http://127.0.0.1:$($pair.WebPort)/api/health"
             $mobileLocal = Test-CiMHealHttp -Url $pair.MobileLocalUrl
-            if ($publicWebHealth) { $webPublic = Test-CiMHealHttp -Url $publicWebHealth -TimeoutSec 35 }
-            if ($publicMobile) { $mobilePublic = Test-CiMHealHttp -Url $publicMobile -TimeoutSec 35 }
+            if ($publicWebHealth) { $webPublic = Test-CiMHealHttp -Url $publicWebHealth -TimeoutSec 60 }
+            if ($publicMobile) { $mobilePublic = Test-CiMHealHttp -Url $publicMobile -TimeoutSec 60 }
             $webLocalOk = $portWeb -and $webLocal.Ok
             $webPublicOk = $webPublic.Ok
             $mobileLocalOk = $portMobile -and $mobileLocal.Ok

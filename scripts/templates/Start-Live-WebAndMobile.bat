@@ -25,6 +25,9 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM One-time install of resume-from-sleep heal (needs Admin; safe to re-run)
+powershell -NoProfile -ExecutionPolicy Bypass -File "D:\CiM\Client\scripts\Install-CiMLiveResumeHeal.ps1" -WebRoot "D:\CiM\Client" -Quiet
+
 echo.
 echo === LIVE CLIENT LINKS (share with users) ===
 echo Web:    https://charts-in-motion.tail22251c.ts.net/

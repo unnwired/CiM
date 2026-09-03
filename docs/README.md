@@ -9,6 +9,7 @@ All project markdown lives under `docs/` except the GitHub-facing **[README.md](
 | [handoff/PROJECT_HANDOFF.md](handoff/PROJECT_HANDOFF.md) | Full technical handoff — architecture, bugs, runbooks, P&L, showcase |
 | [handoff/PROJECT_HANDOFF_EXEC_SUMMARY.md](handoff/PROJECT_HANDOFF_EXEC_SUMMARY.md) | Short executive summary and risks |
 | [handoff/USER_REQUIREMENTS.md](handoff/USER_REQUIREMENTS.md) | Product-owner release workflow |
+| [handoff/LOVABLE_DESIGN_HANDOFF.md](handoff/LOVABLE_DESIGN_HANDOFF.md) | **Lovable / external UI** — structure, tokens, pages, chrome modules |
 
 ## Standards
 
@@ -43,4 +44,4 @@ All project markdown lives under `docs/` except the GitHub-facing **[README.md](
 
 ---
 
-*Last updated: 29 Jun 26*
+*Last updated: 03 Sep 26*

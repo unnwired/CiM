@@ -135,4 +135,4 @@ Per `.cursor/rules/inr-display-mbt.mdc`: M/B/T only in UI; use `formatMarketCap.
 
 ---
 
-*Last updated: 27 Jun 26*
+*Last updated: 03 Sep 26*
