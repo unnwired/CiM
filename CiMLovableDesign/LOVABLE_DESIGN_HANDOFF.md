@@ -3,7 +3,9 @@
 **Purpose:** Give Lovable (or any external UI designer) enough structure to extend the **browser showcase** UI without breaking product conventions.  
 **Audience:** Design + front-end implementation on `packages/browser/`  
 **Last updated:** 03 Sep 26  
-**Companion docs:** `docs/standards/CIM_UI_STANDARD.md` (mandatory tokens/buttons), `docs/handoff/PROJECT_HANDOFF.md` (full technical handoff)
+**Companion docs:** `CiMLovableDesign/CIM_UI_STANDARD.md` (mandatory tokens/buttons), `CiMLovableDesign/INR_DISPLAY.md` (M/B/T formatting)
+
+> **GitHub:** All Lovable design files live in the repo root folder **[CiMLovableDesign/](../CiMLovableDesign/)** — start with `CiMLovableDesign/README.md`.
 
 ---
 
@@ -14,7 +16,7 @@
 - Local FastAPI backend + React SPA (no React Router — `view` state in `App.js`)
 - SQLite market DB + per-user JSON for portfolio, watchlists, P&L ledger, layout
 - Primary UI code: **`packages/browser/src/`**
-- Production CSS tokens: **`packages/browser/src/styles/global.css`**
+- Production CSS tokens: **`packages/browser/src/styles/global.css`** (snapshot: `CiMLovableDesign/reference/global.css`)
 
 ### Product surfaces (do not mix scopes)
 
@@ -24,7 +26,7 @@
 | **Desktop Electron** | `packages/desktop/` + same browser bundle | **8000** | Offline license; separate agent scope |
 | **Mobile dashboard** | `D:\CiM\Mobile_Testbed\` (separate tree) | **8010** / **8011** | Read `packages/browser/` for API patterns only |
 
-**Lovable should target `packages/browser/`** and follow `CIM_UI_STANDARD.md`. Deploy testbed via `scripts/Deploy-CiMShowcaseFromRepo.ps1` → `D:\CiM\Client_Test`.
+**Lovable should target `packages/browser/`** and follow `CiMLovableDesign/CIM_UI_STANDARD.md`. Deploy testbed via `scripts/Deploy-CiMShowcaseFromRepo.ps1` → `D:\CiM\Client_Test`.
 
 ---
 
@@ -83,7 +85,7 @@
 
 **Rule:** Do **not** invent new hex colors in components. Use CSS variables only.
 
-**INR / counts:** Display **M / B / T** only (never Cr/L/Lakh in UI). Helpers in `utils/formatMarketCap.js` — see `.cursor/rules/inr-display-mbt.mdc`.
+**INR / counts:** Display **M / B / T** only (never Cr/L/Lakh in UI). See `CiMLovableDesign/INR_DISPLAY.md` and `reference/formatMarketCap.js`.
 
 ---
 
@@ -100,7 +102,7 @@
 
 **Button spec:** 28px height, 11px font, `nowrap`, primary = `--accent-blue` weight 600. Footer buttons go in dialog **`footer` prop**, never inside `children`.
 
-Full rules: **`docs/standards/CIM_UI_STANDARD.md`**.
+Full rules: **`CiMLovableDesign/CIM_UI_STANDARD.md`** (chrome snapshots in `CiMLovableDesign/reference/chrome/`).
 
 ---
 
@@ -260,4 +262,4 @@ Check: dialog footers, table alignment, chart crosshair, Account email, schedule
 
 ---
 
-*For business workflow and release gates, see `docs/handoff/USER_REQUIREMENTS.md`. For ops/runbooks, see `docs/handoff/PROJECT_HANDOFF.md`.*
+*Implementation code: `packages/browser/`. Design package: `CiMLovableDesign/` on GitHub.*

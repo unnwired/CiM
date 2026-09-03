@@ -115,6 +115,12 @@ See [.gitignore](.gitignore). In short: local databases, user data, build output
 
 ---
 
+## Lovable / external UI design
+
+All design handoff files for Lovable live in **[CiMLovableDesign/](CiMLovableDesign/)** at the repo root (not under `docs/`). Start with `CiMLovableDesign/README.md`.
+
+---
+
 ## Stack
 
 | Layer | Technology |

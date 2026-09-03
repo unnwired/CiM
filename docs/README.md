@@ -6,16 +6,16 @@ All project markdown lives under `docs/` except the GitHub-facing **[README.md](
 
 | Document | Purpose |
 |----------|---------|
-| [handoff/PROJECT_HANDOFF.md](handoff/PROJECT_HANDOFF.md) | Full technical handoff — architecture, bugs, runbooks, P&L, showcase |
-| [handoff/PROJECT_HANDOFF_EXEC_SUMMARY.md](handoff/PROJECT_HANDOFF_EXEC_SUMMARY.md) | Short executive summary and risks |
-| [handoff/USER_REQUIREMENTS.md](handoff/USER_REQUIREMENTS.md) | Product-owner release workflow |
-| [handoff/LOVABLE_DESIGN_HANDOFF.md](handoff/LOVABLE_DESIGN_HANDOFF.md) | **Lovable / external UI** — structure, tokens, pages, chrome modules |
+| [../CiMLovableDesign/README.md](../CiMLovableDesign/README.md) | **Lovable / external UI** — design handoff package (start here for design work) |
+| [handoff/PROJECT_HANDOFF.md](handoff/PROJECT_HANDOFF.md) | Full technical handoff — architecture, bugs, runbooks, P&L, showcase *(local/gitignored)* |
+| [handoff/PROJECT_HANDOFF_EXEC_SUMMARY.md](handoff/PROJECT_HANDOFF_EXEC_SUMMARY.md) | Short executive summary and risks *(local/gitignored)* |
+| [handoff/USER_REQUIREMENTS.md](handoff/USER_REQUIREMENTS.md) | Product-owner release workflow *(local/gitignored)* |
 
 ## Standards
 
 | Document | Purpose |
 |----------|---------|
-| [standards/CIM_UI_STANDARD.md](standards/CIM_UI_STANDARD.md) | Browser UI tokens, buttons, dialogs, tables |
+| [standards/CIM_UI_STANDARD.md](standards/CIM_UI_STANDARD.md) | Browser UI tokens, buttons, dialogs, tables (canonical; mirrored in `CiMLovableDesign/`) |
 
 ## Change log and run guides
 
