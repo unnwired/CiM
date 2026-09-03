@@ -6,16 +6,17 @@ All project markdown lives under `docs/` except the GitHub-facing **[README.md](
 
 | Document | Purpose |
 |----------|---------|
-| [../CiMLovableDesign/README.md](../CiMLovableDesign/README.md) | **Lovable / external UI** — design handoff package (start here for design work) |
 | [handoff/PROJECT_HANDOFF.md](handoff/PROJECT_HANDOFF.md) | Full technical handoff — architecture, bugs, runbooks, P&L, showcase *(local/gitignored)* |
 | [handoff/PROJECT_HANDOFF_EXEC_SUMMARY.md](handoff/PROJECT_HANDOFF_EXEC_SUMMARY.md) | Short executive summary and risks *(local/gitignored)* |
 | [handoff/USER_REQUIREMENTS.md](handoff/USER_REQUIREMENTS.md) | Product-owner release workflow *(local/gitignored)* |
+
+**Lovable / external UI:** separate repo [unnwired/CiMLovableDesign](https://github.com/unnwired/CiMLovableDesign) (full CiM copy for design work).
 
 ## Standards
 
 | Document | Purpose |
 |----------|---------|
-| [standards/CIM_UI_STANDARD.md](standards/CIM_UI_STANDARD.md) | Browser UI tokens, buttons, dialogs, tables (canonical; mirrored in `CiMLovableDesign/`) |
+| [standards/CIM_UI_STANDARD.md](standards/CIM_UI_STANDARD.md) | Browser UI tokens, buttons, dialogs, tables |
 
 ## Change log and run guides
 
