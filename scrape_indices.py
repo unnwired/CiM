@@ -150,6 +150,103 @@ def _scrape_history_from_upstox(symbol, start, end, cursor, category, usd_inr, c
     return written
 
 
+def _scrape_history_yahoo_range(symbol, start, end, cursor, category, usd_inr, conn) -> int:
+    """Yahoo daily candles for [start, end) into index_history."""
+    try:
+        df = yf.download(symbol, start=start, end=end, progress=False, auto_adjust=True)
+    except Exception as exc:
+        _log(f"    Yahoo download failed: {exc}")
+        return 0
+    if df is None or getattr(df, "empty", True):
+        return 0
+
+    df = df.reset_index()
+    df.columns = [c if isinstance(c, str) else c[0] for c in df.columns]
+    y_rows = []
+    for _, row in df.iterrows():
+        try:
+            date_str = (
+                row["Date"].strftime("%Y-%m-%d")
+                if hasattr(row["Date"], "strftime")
+                else str(row["Date"])[:10]
+            )
+            y_rows.append(
+                (
+                    date_str,
+                    float(row["Open"]),
+                    float(row["High"]),
+                    float(row["Low"]),
+                    float(row["Close"]),
+                    float(row.get("Volume", 0) or 0),
+                )
+            )
+        except Exception:
+            continue
+    rows = _write_index_ohlc_rows(cursor, symbol, y_rows, category, usd_inr)
+    if rows:
+        conn.commit()
+    return rows
+
+
+def backfill_equity_index_gaps(
+    symbol,
+    name,
+    category,
+    usd_inr,
+    conn,
+    *,
+    min_gap_days: int = 5,
+) -> int:
+    """
+    Fill interior calendar holes in index_history (not just the tail).
+
+    Upstox per gap window, then Yahoo, then NSE indicesHistory for any range still open.
+    """
+    if str(category or "").strip().lower() != "equity":
+        return 0
+
+    import nse_index_history as nih
+
+    gaps = nih.find_index_history_gaps(conn, symbol, min_gap_days=min_gap_days)
+    if not gaps:
+        return 0
+
+    cursor = conn.cursor()
+    nse_name = NSE_NAME_MAP.get(symbol) or name
+    written = 0
+    _log(f"    Backfilling {len(gaps)} interior gap range(s) for {name}...")
+
+    for gap_start, gap_end in gaps:
+        start = (gap_start - timedelta(days=3)).strftime("%Y-%m-%d")
+        end = (gap_end + timedelta(days=4)).strftime("%Y-%m-%d")
+        try:
+            written += _scrape_history_from_upstox(
+                symbol, start, end, cursor, category, usd_inr, conn
+            )
+        except Exception as exc:
+            _log(f"    Upstox gap fill failed: {exc}")
+        try:
+            written += _scrape_history_yahoo_range(
+                symbol, start, end, cursor, category, usd_inr, conn
+            )
+        except Exception as exc:
+            _log(f"    Yahoo gap fill failed: {exc}")
+
+    remaining = nih.find_index_history_gaps(conn, symbol, min_gap_days=min_gap_days)
+    if remaining:
+        for gap_start, gap_end in remaining:
+            try:
+                raw = nih.fetch_nse_index_history(nse_name, gap_start, gap_end)
+                nse_rows = nih.write_index_history_rows(conn, symbol, raw)
+                if nse_rows:
+                    _log(f"    [OK] {nse_rows} rows from NSE for {gap_start}..{gap_end}")
+                written += nse_rows
+            except Exception as exc:
+                _log(f"    NSE gap fill failed ({gap_start}..{gap_end}): {exc}")
+
+    return written
+
+
 def scrape_history(symbol, name, category, usd_inr, conn):
     _log(f"  Scraping {name} ({symbol})...")
     cursor = conn.cursor()
@@ -164,55 +261,34 @@ def scrape_history(symbol, name, category, usd_inr, conn):
 
     end = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
+    total = 0
     # 1) Upstox primary for equity indices (and any symbol with an Upstox key).
     if category == "equity":
         try:
             up_rows = _scrape_history_from_upstox(symbol, start, end, cursor, category, usd_inr, conn)
             if up_rows:
-                _log(f"    [OK] {up_rows} rows from Upstox")
-                return up_rows
+                _log(f"    [OK] {up_rows} rows from Upstox (tail)")
+                total += up_rows
         except Exception as exc:
             _log(f"    Upstox history failed: {exc}")
 
-    # 2) Yahoo secondary (commodities + Upstox miss).
-    yahoo_sym = symbol
-    try:
-        df = yf.download(yahoo_sym, start=start, end=end, progress=False, auto_adjust=True)
-    except Exception as exc:
-        _log(f"    Yahoo download failed: {exc}")
-        df = None
+    # 2) Yahoo secondary when tail still empty (commodities + Upstox miss).
+    if total == 0:
+        yahoo_rows = _scrape_history_yahoo_range(symbol, start, end, cursor, category, usd_inr, conn)
+        if yahoo_rows:
+            _log(f"    [OK] {yahoo_rows} rows from Yahoo (tail)")
+            total += yahoo_rows
+        elif category != "equity":
+            _log("    No data returned")
 
-    if df is None or getattr(df, "empty", True):
-        _log("    No data returned")
-        return 0
+    # 3) Interior gaps — daily tail updates alone cannot heal multi-week holes.
+    if category == "equity":
+        gap_rows = backfill_equity_index_gaps(symbol, name, category, usd_inr, conn)
+        if gap_rows:
+            _log(f"    [OK] {gap_rows} rows from gap backfill")
+            total += gap_rows
 
-    df = df.reset_index()
-    df.columns = [c if isinstance(c, str) else c[0] for c in df.columns]
-
-    y_rows = []
-    for _, row in df.iterrows():
-        try:
-            date_str = row["Date"].strftime("%Y-%m-%d") if hasattr(row["Date"], "strftime") else str(row["Date"])[:10]
-            y_rows.append(
-                (
-                    date_str,
-                    float(row["Open"]),
-                    float(row["High"]),
-                    float(row["Low"]),
-                    float(row["Close"]),
-                    float(row.get("Volume", 0) or 0),
-                )
-            )
-        except Exception:
-            continue
-
-    rows = _write_index_ohlc_rows(cursor, symbol, y_rows, category, usd_inr)
-    if rows:
-        conn.commit()
-        _log(f"    [OK] {rows} rows from Yahoo (fallback)")
-    else:
-        _log("    No data returned")
-    return rows
+    return total
 
 
 def get_nse_chart_token(symbol: str):

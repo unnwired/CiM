@@ -286,7 +286,14 @@ def repair_index_gaps(
         log(f"{name} ({symbol}): {len(gaps)} gap range(s)")
         try:
             if category == "equity":
-                written = int(
+                written = 0
+                if gaps:
+                    gap_fn = getattr(scrape, "backfill_equity_index_gaps", None)
+                    if callable(gap_fn):
+                        written += int(
+                            gap_fn(symbol, name, "equity", usd_inr, conn) or 0
+                        )
+                written += int(
                     scrape.scrape_history(symbol, name, "equity", usd_inr, conn) or 0
                 )
                 rows_inserted += written

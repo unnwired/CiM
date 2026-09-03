@@ -78,14 +78,15 @@ class IndexHistoryIntegrityTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_repair_invokes_scrape_history_for_equity_gaps(self):
+    def test_repair_invokes_gap_backfill_for_equity_gaps(self):
         conn = self._memory_conn()
         scrape = MagicMock()
         scrape.INDICES = [("^CNXNXT50", "Nifty Next 50", "equity")]
         scrape.NSE_NAME_MAP = {"^CNXNXT50": "NIFTY NEXT 50"}
         scrape.NSE_INDEX_HISTORY_START = {}
         scrape.get_usd_inr.return_value = 86.0
-        scrape.scrape_history.return_value = 42
+        scrape.backfill_equity_index_gaps.return_value = 30
+        scrape.scrape_history.return_value = 12
 
         with patch.object(self.mod, "_load_scrape_indices", return_value=scrape):
             try:
@@ -93,6 +94,7 @@ class IndexHistoryIntegrityTest(unittest.TestCase):
                     conn, symbols=["^CNXNXT50"], log_fn=lambda _m: None
                 )
                 self.assertGreaterEqual(result["rows_inserted"], 42)
+                scrape.backfill_equity_index_gaps.assert_called()
                 scrape.scrape_history.assert_called()
                 self.assertIn("^CNXNXT50", result["repaired_symbols"])
             finally:
