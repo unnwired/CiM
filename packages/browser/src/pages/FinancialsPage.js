@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { formatMarketCap, formatINRFromCrores } from '../utils/formatMarketCap';
+import { isTypingContext } from '../utils/isTypingTarget';
 
 const API = '';
 
@@ -88,6 +89,7 @@ export default function FinancialsPage({ onOpenChart, selectedSymbol, onSelectSy
   useEffect(() => {
     function handleKey(e) {
       if (!['ArrowUp','ArrowDown'].includes(e.key)) return;
+      if (isTypingContext(e)) return;
       e.preventDefault();
       const idx = filtered.findIndex(s => s.Symbol === selected);
       if (idx === -1) return;

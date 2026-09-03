@@ -403,7 +403,13 @@ def license_status_for_client(
         if label:
             base_status["showcase_label"] = label
 
-    if _crypto.is_development_tree(base_dir) and not require_online_auth():
+    # Showcase testbed installs copy server.py from the repo (dev tree) but still use
+    # per-browser sign-in — keep session identity when host_mode is web.
+    if (
+        _crypto.is_development_tree(base_dir)
+        and not require_online_auth()
+        and not (host_mode == "web" and session)
+    ):
         return {**base_status, "mode": "dev", "valid": True, "plan": "free"}
     if not _crypto.is_online_only_distribution(base_dir) and _crypto.license_valid(base_dir):
         return {**base_status, "mode": "offline_key", "valid": True, "plan": "free"}

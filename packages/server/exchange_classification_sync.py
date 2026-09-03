@@ -322,7 +322,7 @@ def refresh_canonical_sectors_from_db(data_dir: Path, db_path: Path) -> None:
 
 
 def update_sector_mapping_canonicals(data_dir: Path, industries: Set[str]) -> None:
-    """Keep sector_mapping canonical_sectors aligned with macro list + auto sub-sectors + Unclassified."""
+    """Keep sector_mapping canonical_sectors aligned with index∪industry tags + Unclassified."""
     _ = industries  # Kept for callers; Market Sector is remapped at resolve time.
     ms = market_sectors
     ms.ensure_default_mapping_file(data_dir)

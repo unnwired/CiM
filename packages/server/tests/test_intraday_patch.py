@@ -54,7 +54,7 @@ class IntradayPatchTests(unittest.TestCase):
         ]
         snap = {
             "price": 782.3,
-            "open": 0,
+            "open": 770.0,
             "high": 0,
             "low": 0,
             "previous_close": 772,
@@ -62,12 +62,33 @@ class IntradayPatchTests(unittest.TestCase):
             "updated_at": movers_live._iso_now(),
         }
         with patch.object(movers_live, "get_symbol_live_snapshot", return_value=snap):
-            out, chg = movers_live.merge_live_into_daily_bars("HDFCBANK", bars, "1D")
+            with patch.object(movers_live, "_is_after_nse_cash_open", return_value=True):
+                out, chg = movers_live.merge_live_into_daily_bars("HDFCBANK", bars, "1D")
         last = out[-1]
         self.assertTrue(last.get("live"))
         self.assertGreater(last["low"], 0)
         self.assertGreater(last["open"], 0)
         self.assertIsNotNone(chg)
+
+    def test_merge_daily_bars_skips_before_cash_open(self):
+        bars = [
+            {"time": "2026-07-21", "open": 770, "high": 775, "low": 768, "close": 772, "volume": 1e6},
+        ]
+        snap = {
+            "price": 782.3,
+            "open": 770.0,
+            "high": 785.0,
+            "low": 768.0,
+            "previous_close": 772,
+            "volume": 500000,
+            "updated_at": movers_live._iso_now(),
+        }
+        with patch.object(movers_live, "get_symbol_live_snapshot", return_value=snap):
+            with patch.object(movers_live, "_is_after_nse_cash_open", return_value=False):
+                out, chg = movers_live.merge_live_into_daily_bars("HDFCBANK", bars, "1D")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["time"], "2026-07-21")
+        self.assertIsNone(chg)
 
 
 if __name__ == "__main__":

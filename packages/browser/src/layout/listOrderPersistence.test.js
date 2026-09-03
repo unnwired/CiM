@@ -12,6 +12,20 @@ describe('listOrderPersistence', () => {
     localStorage.clear();
   });
 
+  it('hydrates equityNseIndexSymbolOrder from server', () => {
+    const { orders } = hydrateListOrderFields({
+      equityNseIndexSymbolOrder: ['INDIA VIX', 'NIFTY MIDCAP 50'],
+    }, null);
+    expect(orders.equityNseIndexSymbolOrder).toEqual(['INDIA VIX', 'NIFTY MIDCAP 50']);
+  });
+
+  it('buildListOrderPayload includes equityNseIndexSymbolOrder', () => {
+    const { payload } = buildListOrderPayload({
+      [LIST_ORDER_KEYS.equityNseIndexSymbolOrder]: ['INDIA VIX'],
+    });
+    expect(payload.equityNseIndexSymbolOrder).toEqual(['INDIA VIX']);
+  });
+
   it('prefers server equity index order when server is newer', () => {
     saveLocalListOrders('user@test.com', {
       equityIndexSymbolOrder: ['OLD'],

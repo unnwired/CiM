@@ -49,10 +49,32 @@ export function sanitizeBarsForDisplay(bars) {
   });
 }
 
+function istHourMinute(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(now);
+  const h = Number(parts.find((p) => p.type === 'hour')?.value);
+  const m = Number(parts.find((p) => p.type === 'minute')?.value);
+  return { mins: h * 60 + m };
+}
+
+/** True from 09:15 IST — pre-open quotes must not paint today's daily candle. */
+export function isAfterNseCashOpen(now = new Date()) {
+  const { mins } = istHourMinute(now);
+  return mins >= 9 * 60 + 15;
+}
+
 /** Port of server/movers_live.merge_live_into_daily_bars for client-side overlay. */
-export function mergeLiveIntoDailyBars(bars, snapshot) {
+export function mergeLiveIntoDailyBars(bars, snapshot, now = new Date()) {
   if (!Array.isArray(bars) || !bars.length || !snapshot) {
     return { bars: bars || [], dayChangePct: null };
+  }
+  // Pre-open quotes often reuse prior-session OHLC/volume as "today".
+  if (!isAfterNseCashOpen(now)) {
+    return { bars, dayChangePct: null };
   }
   const today = istTodayYmd();
   let px = positiveFinite(snapshot.price);
@@ -77,10 +99,23 @@ export function mergeLiveIntoDailyBars(bars, snapshot) {
 
   let hi = positiveFinite(snapshot.high);
   let lo = positiveFinite(snapshot.low);
-  // Never use previous_close as today's open — paints green when stock is red intraday.
+  // Never use previous_close or LTP as today's open — wait for session seed (9:15).
   let op = positiveFinite(snapshot.open);
   if (op == null && lastDay === today && lastOpen != null) op = lastOpen;
-  if (op == null) op = px;
+  if (op == null) {
+    if (lastDay === today && lastOpen != null) {
+      last.close = px;
+      const hiTouch = positiveFinite(snapshot.high) ?? px;
+      const loTouch = positiveFinite(snapshot.low) ?? px;
+      last.high = round2(Math.max(lastHigh ?? px, hiTouch, px));
+      last.low = round2(Math.min(lastLow ?? px, loTouch, px));
+      if (vol > 0) last.volume = round2(vol);
+      last.live = true;
+      const dayChangePct = pctChange(px, prev) ?? finite(snapshot.change_pct);
+      return { bars: out, dayChangePct };
+    }
+    return { bars, dayChangePct: pctChange(px, prev) ?? finite(snapshot.change_pct) };
+  }
   if (hi == null) hi = px;
   if (lo == null) lo = px;
   hi = Math.max(hi, px, op);
@@ -88,9 +123,10 @@ export function mergeLiveIntoDailyBars(bars, snapshot) {
 
   if (lastDay === today) {
     last.close = px;
-    last.open = round2(lastOpen ?? op);
-    last.high = round2(Math.max(lastHigh ?? px, hi, px));
-    last.low = round2(Math.min(lastLow ?? px, lo, px));
+    // Prefer live/session snapshot open (9:15) over a prior LTP stub on the bar.
+    last.open = round2(op ?? lastOpen ?? px);
+    last.high = round2(Math.max(lastHigh ?? px, hi, px, op));
+    last.low = round2(Math.min(lastLow ?? px, lo, px, op));
     if (vol > 0) last.volume = round2(vol);
     last.live = true;
   } else {
@@ -110,27 +146,15 @@ export function mergeLiveIntoDailyBars(bars, snapshot) {
 }
 
 /** Port of server session 4H buckets for client-side overlay (09:15 / 13:15 IST). */
-function istHourMinute() {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Kolkata',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(new Date());
-  const h = Number(parts.find((p) => p.type === 'hour')?.value);
-  const m = Number(parts.find((p) => p.type === 'minute')?.value);
-  return { mins: h * 60 + m };
-}
-
 function session4hBarStartUnix(sessionDate, bucket) {
   const h = bucket === 1 ? 9 : 13;
   const iso = `${sessionDate}T${String(h).padStart(2, '0')}:15:00+05:30`;
   return Math.floor(new Date(iso).getTime() / 1000);
 }
 
-function current4hSessionTarget() {
+function current4hSessionTarget(now = new Date()) {
   const today = istTodayYmd();
-  const { mins } = istHourMinute();
+  const { mins } = istHourMinute(now);
   const open = 9 * 60 + 15;
   const mid = 13 * 60 + 15;
   const close = 15 * 60 + 30;
@@ -168,7 +192,20 @@ export function mergeLiveInto4hBars(bars, snapshot) {
   let lo = positiveFinite(snapshot.low);
   let op = positiveFinite(snapshot.open);
   if (op == null && lastOpen != null) op = lastOpen;
-  if (op == null) op = px;
+  if (op == null) {
+    if (Number(bar.time) === barUnix && lastOpen != null) {
+      bar.close = px;
+      const hiTouch = positiveFinite(snapshot.high) ?? px;
+      const loTouch = positiveFinite(snapshot.low) ?? px;
+      bar.high = round2(Math.max(lastHigh ?? px, hiTouch, px));
+      bar.low = round2(Math.min(lastLow ?? px, loTouch, px));
+      if (vol > 0) bar.volume = round2(vol);
+      bar.live = true;
+      const dayChangePct = pctChange(px, prev) ?? finite(snapshot.change_pct);
+      return { bars: out, dayChangePct };
+    }
+    return { bars, dayChangePct: pctChange(px, prev) ?? finite(snapshot.change_pct) };
+  }
   if (hi == null) hi = px;
   if (lo == null) lo = px;
   hi = Math.max(hi, px, op);

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from tradingview_earnings import is_beat_report_row
+
 # Portfolio/watchlist row highlights use a rolling window; Market Map badges use the
 # latest reported quarter (same persistence model as Earnings+ on the tile).
 
@@ -13,22 +15,8 @@ def _normalize_symbol(symbol: str | None) -> str:
 
 
 def is_dual_beat_report_row(row: dict) -> bool:
-    """Matches frontend portfolioEarnings.isDualBeatRow / server _is_dual_beat_report_row."""
-    try:
-        eps = float(row.get("eps_surprise_pct"))
-        rev = float(row.get("revenue_surprise_pct"))
-    except (TypeError, ValueError):
-        return False
-    if eps < 0 or rev < 0:
-        return False
-    if (
-        row.get("eps_actual") is None
-        and row.get("revenue_actual") is None
-        and eps == 0
-        and rev == 0
-    ):
-        return False
-    return True
+    """Matches frontend portfolioEarnings.isDualBeatRow / server chart beat events."""
+    return is_beat_report_row(row)
 
 
 def _latest_reported_row_by_symbol(rows: list[dict]) -> dict[str, dict]:

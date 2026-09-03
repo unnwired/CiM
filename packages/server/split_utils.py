@@ -125,6 +125,7 @@ def mark_pending(
             (sym, sd, rat, source, STATUS_PENDING, now),
         )
     conn.commit()
+    _sync_split_corp_action(sym, sd, rat, source)
     return True
 
 
@@ -249,6 +250,75 @@ def count_by_status(conn: sqlite3.Connection) -> dict[str, int]:
     return counts
 
 
+def _sync_split_corp_action(symbol: str, split_date: str, ratio: float, source: str) -> None:
+    """Register split in install corp_actions.json for Upstox OHLC back-adjustment."""
+    try:
+        from server.core.install_root import get_data_dir
+        from server.corp_actions import upsert_split_corp_action
+
+        upsert_split_corp_action(
+            get_data_dir(),
+            symbol=symbol,
+            ex_date=split_date,
+            ratio=ratio,
+            source=source,
+        )
+    except Exception:
+        pass
+
+
+def history_has_split_discontinuity(
+    conn: sqlite3.Connection,
+    symbol: str,
+    split_date: str,
+    ratio: float,
+    *,
+    tolerance: float = 0.08,
+) -> bool:
+    """
+    True when stored daily closes show an unadjusted split jump near split_date.
+    Used to avoid marking splits 'applied' when history still has a nominal gap.
+    """
+    sym = _norm_symbol(symbol)
+    sd = _norm_split_date(split_date)
+    if not sym or not sd:
+        return False
+    try:
+        rat = float(ratio)
+    except (TypeError, ValueError):
+        return False
+    if rat <= 1.0001:
+        return False
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT substr(Date, 1, 10) AS d, Close
+        FROM historical_data
+        WHERE Symbol = ?
+          AND substr(Date, 1, 10) BETWEEN date(?, '-5 day') AND date(?, '+2 day')
+        ORDER BY Date ASC
+        """,
+        (sym, sd, sd),
+    )
+    rows = cur.fetchall()
+    if len(rows) < 2:
+        return False
+
+    inv = 1.0 / rat
+    for i in range(1, len(rows)):
+        prev_c = float(rows[i - 1][1] or 0)
+        cur_c = float(rows[i][1] or 0)
+        if prev_c <= 0 or cur_c <= 0:
+            continue
+        move = cur_c / prev_c
+        if abs(move - inv) <= tolerance:
+            return True
+        if abs(move - rat) <= tolerance:
+            return True
+    return False
+
+
 def symbol_has_historical_bars(conn: sqlite3.Connection, symbol: str, min_rows: int = 50) -> bool:
     cur = conn.cursor()
     cur.execute(
@@ -339,54 +409,90 @@ def detect_recent_split(sym: str, cutoff: datetime) -> Optional[dict[str, Any]]:
 def apply_symbol_history_refresh(
     conn: sqlite3.Connection,
     sym: str,
+    *,
+    split_date: Optional[str] = None,
+    split_ratio: Optional[float] = None,
 ) -> tuple[bool, str]:
     """
     Download max adjusted history, replace historical_data for symbol.
+    Upstox-first (self-adjusted); Yahoo auto_adjust fallback.
     Returns (ok, error_message).
     """
-    import yfinance as yf
-
     sym = _norm_symbol(sym)
+    if split_date and split_ratio:
+        _sync_split_corp_action(
+            sym,
+            _norm_split_date(split_date),
+            float(split_ratio),
+            "split_apply",
+        )
     insert_sql = """
         INSERT INTO historical_data
         (Symbol, Date, Open, High, Low, Close, AdjClose, Volume, MarketCap)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
     """
-    df = yf.download(f"{sym}.NS", period="max", progress=False, auto_adjust=True, threads=False)
-    if df is None or df.empty:
-        return False, "empty_download"
+    rows: list[tuple] = []
+    source = "none"
 
-    if getattr(df.columns, "nlevels", 1) > 1:
-        try:
-            df = df.copy()
-            df.columns = [
-                c[0] if isinstance(c, tuple) and len(c) > 0 else c for c in df.columns
-            ]
-        except Exception:
-            return False, "bad_columns"
+    try:
+        from datetime import date as date_cls
 
-    required = {"Open", "High", "Low", "Close", "Volume"}
-    if not required.issubset(set(df.columns)):
-        return False, "missing_ohlcv"
+        from server import upstox_config, upstox_history
 
-    rows = []
-    row_parse_errors = 0
-    for dt_idx, row in df.iterrows():
-        try:
-            ds = dt_idx.strftime("%Y-%m-%d") + " 00:00:00+05:30"
-            o = round(float(row["Open"]), 2)
-            h = round(float(row["High"]), 2)
-            l = round(float(row["Low"]), 2)
-            c = round(float(row["Close"]), 2)
-            v = round(float(row["Volume"]), 2)
-            if c <= 0:
-                continue
-            rows.append((sym, ds, o, h, l, c, c, v))
-        except Exception:
-            row_parse_errors += 1
-            continue
+        if upstox_config.market_data_enabled():
+            ux_rows, ux_err = upstox_history.fetch_daily_for_symbol(
+                sym,
+                date_cls(2000, 1, 1),
+                date_cls.today(),
+                adjust=True,
+            )
+            if ux_rows:
+                for date_str, o, h, l, c, v in ux_rows:
+                    rows.append((sym, date_str, o, h, l, c, c, v))
+                source = "upstox"
+            elif ux_err:
+                source = f"upstox_miss:{ux_err}"
+    except Exception as e:
+        source = f"upstox_err:{e}"
+
     if not rows:
-        return False, f"no_rows_after_parse({row_parse_errors})"
+        import yfinance as yf
+
+        df = yf.download(f"{sym}.NS", period="max", progress=False, auto_adjust=True, threads=False)
+        if df is None or df.empty:
+            return False, f"empty_download({source})"
+
+        if getattr(df.columns, "nlevels", 1) > 1:
+            try:
+                df = df.copy()
+                df.columns = [
+                    c[0] if isinstance(c, tuple) and len(c) > 0 else c for c in df.columns
+                ]
+            except Exception:
+                return False, "bad_columns"
+
+        required = {"Open", "High", "Low", "Close", "Volume"}
+        if not required.issubset(set(df.columns)):
+            return False, "missing_ohlcv"
+
+        row_parse_errors = 0
+        for dt_idx, row in df.iterrows():
+            try:
+                ds = dt_idx.strftime("%Y-%m-%d") + " 00:00:00+05:30"
+                o = round(float(row["Open"]), 2)
+                h = round(float(row["High"]), 2)
+                l = round(float(row["Low"]), 2)
+                c = round(float(row["Close"]), 2)
+                v = round(float(row["Volume"]), 2)
+                if c <= 0:
+                    continue
+                rows.append((sym, ds, o, h, l, c, c, v))
+            except Exception:
+                row_parse_errors += 1
+                continue
+        if not rows:
+            return False, f"no_rows_after_parse({row_parse_errors})"
+        source = "yfinance"
 
     cur = conn.cursor()
     cur.execute("DELETE FROM historical_data WHERE Symbol = ?", (sym,))

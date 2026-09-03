@@ -1,0 +1,38 @@
+{
+  "files.eol": "\n",
+  "files.insertFinalNewline": true,
+  "files.encoding": "utf8",
+  "editor.formatOnSave": false,
+
+  // CiM uses PowerShell deploy/build — disable IDE npm/task auto-scan (parse noise, installer clutter).
+  "npm.autoDetect": "off",
+  "task.autoDetect": "off",
+
+  // Less watcher churn → fewer Windows file-lock conflicts when Agent + IDE share the tree.
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/node_modules/**": true,
+    "**/installer/**": true,
+    "**/zDelete/**": true,
+    "**/runtime/**": true,
+    "**/backups/**": true,
+    "**/backups_full/**": true,
+    "**/packages/browser/build/**": true,
+    "**/packages/browser/node_modules/**": true,
+    "**/license-api/node_modules/**": true,
+    "**/data/*.db": true,
+    "**/data/*.db-wal": true,
+    "**/data/*.db-shm": true,
+    "**/data/users/**": true,
+    "**/.cursor/**": true
+  },
+
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/installer": true,
+    "**/zDelete": true,
+    "**/runtime": true,
+    "**/packages/browser/build": true,
+    "**/license-api/node_modules": true
+  }
+}

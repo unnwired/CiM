@@ -72,6 +72,14 @@ class YahooPrimaryPipelineTests(unittest.TestCase):
             with patch.dict("os.environ", {"CIM_YAHOO_PRIMARY_PIPELINE": "0"}, clear=True):
                 self.assertFalse(yahoo_primary_pipeline(base))
 
+    def test_desktop_default_skips_nse_bulk(self):
+        """No showcase_host.json (desktop install) must still skip NSE universe scrape."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "config").mkdir()
+            with patch.dict("os.environ", {}, clear=True):
+                self.assertTrue(yahoo_primary_pipeline(base))
+
 
 if __name__ == "__main__":
     unittest.main()

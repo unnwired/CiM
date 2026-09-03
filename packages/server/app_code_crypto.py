@@ -41,6 +41,9 @@ PLAINTEXT_BOOTSTRAP_STEMS = frozenset(
         "user_data_paths",
         "web_auth",
         "showcase_host_gate",
+        "http_ssl",
+        "client_user_agent",
+        "auth_social_proof",
     }
 )
 

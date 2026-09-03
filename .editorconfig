@@ -1,0 +1,12 @@
+# Keep editor line endings aligned with agent/git writes (LF).
+# Prevents Windows Cursor from marking every file dirty on open.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = false
+
+[*.{bat,cmd,ps1}]
+end_of_line = crlf

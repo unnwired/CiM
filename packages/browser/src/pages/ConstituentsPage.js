@@ -1,11 +1,11 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
+import BasketToolbarButton from '../components/Basket';
 import axios from 'axios';
 import { APP_DATA_REFRESH_EVENT } from '../chartEvents';
 import ChartContainer from '../components/chart/ChartContainer';
 import { DrawingWorkspaceProvider } from '../components/chart/drawing/DrawingWorkspaceContext';
 import { DrawingToolbarConnected, DrawingFloatPaletteConnected } from '../components/chart/drawing/DrawingToolbar';
-import DrawingToolsDesignControl from '../components/chart/drawing/DrawingToolsDesignControl';
 import EMAControls    from '../components/chart/EMAControls';
 import ChartHeaderBar from '../components/chart/ChartHeaderBar';
 import {
@@ -23,17 +23,36 @@ import {
 import {
   STOCK_LIST_ROW_HEIGHT,
   stockListHeaderStripStyle,
-  stockListFooterStripStyle,
   stockListGridTrackStyle,
   stockListRowSelectShadow,
 } from '../components/stockTableChrome';
+import StockListSplitBody from '../components/StockListSplitBody';
 import StockListColumnHeader from '../components/StockListColumnHeader';
 import StockListGridCell from '../components/StockListGridCell';
 import { useStockListColumnWidths } from '../hooks/useStockListColumnWidths';
 import { columnWidthKey } from '../hooks/stockListColumnStorage';
-import InstrumentNotesIcon from '../components/InstrumentNotesIcon';
 import ExternalFinancialsLinks from '../components/ExternalFinancialsLinks';
+import PortfolioEarningsModal from '../components/PortfolioEarningsModal';
+import EarningsPlusInlineMark from '../components/EarningsPlusInlineMark';
 import { formatMarketCap } from '../utils/formatMarketCap';
+import {
+  buildDualBeatEarningsMap,
+  buildUpcomingEarningsMap,
+  EARNINGS_PRIORITY_DEFAULT_DIR,
+  formatEarningsBadgeDate,
+  PORTFOLIO_EARNINGS_BORDER,
+  PORTFOLIO_EARNINGS_ROW_BG,
+  PORTFOLIO_EARNINGS_ROW_HEIGHT,
+  PORTFOLIO_EARNINGS_ROW_HOVER,
+  PORTFOLIO_EARNINGS_LABEL_COLOR,
+  PORTFOLIO_EARNINGS_WINDOW_DAYS,
+  DUAL_BEAT_ROW_BG,
+  DUAL_BEAT_BORDER,
+  DUAL_BEAT_ROW_HOVER,
+  DUAL_BEAT_LABEL_COLOR,
+  resolveEarningsRowHighlight,
+  sortItemsByEarningsPriority,
+} from '../utils/portfolioEarnings';
 import {
   DEFAULT_CHART_LAYOUT,
   DEFAULT_CHART_TIMEFRAME_1,
@@ -49,9 +68,11 @@ import {
 import { useIndicatorPanelAutoSave } from '../chartPrefs/useIndicatorPanelAutoSave';
 import { usePatchOverlay } from '../intraday/usePatchOverlay';
 import { useRegisterFocusedSymbol } from '../intraday/useRegisterFocusedSymbol';
+import { useRegisterIntradaySymbols } from '../intraday/useRegisterIntradaySymbols';
 import { symbolsForConstituents } from '../intraday/intradayRefreshScopes';
 import { isIntradayLiveTimeframe } from '../intraday/patchOverlay';
 import { usePageLive } from '../intraday/pageLiveContext';
+import { isTypingContext } from '../utils/isTypingTarget';
 import { useSyncedPanelHeights, columnCountForChartLayout, multiColumnHeightProps } from '../hooks/useSyncedPanelHeights';
 
 const API = '';
@@ -62,25 +83,14 @@ const LAYOUTS = [
   { key: '3h',     label: '3 — Multi Timeframe', desc: 'Same stock, three timeframes' },
 ];
 
-/** Grid aligned with Pulse / Portfolio stock table (extra 30D / 1Y / Vol columns). */
+/** Grid aligned with Pulse / Portfolio stock table. */
 const COLS = [
   { key: 'symbol', widthKey: 'symbol', label: 'Symbol', width: 90 },
   { key: 'market_cap', widthKey: 'market_cap', label: 'Mkt Cap', width: 110 },
-  { key: 'note', widthKey: 'note', label: '', width: 36 },
   { key: 'last_price', widthKey: 'price', label: 'Price', width: 85 },
   { key: 'change_pct', widthKey: 'change_1d', label: '1D Chg %', width: 80 },
-  { key: 'change_30d', widthKey: 'change_30d', label: '30D %', width: 80 },
-  { key: 'change_1y', widthKey: 'change_1y', label: '1Y %', width: 80 },
-  { key: 'volume', widthKey: 'volume', label: 'Volume', width: 100 },
+  { key: 'change_30d', widthKey: 'change_1m', label: '1M Chg %', width: 80 },
 ];
-
-function formatVolume(val) {
-  if (val == null || isNaN(val)) return '—';
-  if (val >= 1e9) return (val / 1e9).toFixed(2) + ' B';
-  if (val >= 1e6) return (val / 1e6).toFixed(2) + ' M';
-  if (val >= 1e3) return (val / 1e3).toFixed(2) + ' K';
-  return String(Math.round(val));
-}
 
 function ChangeCell({ value }) {
   if (value === null || value === undefined) return <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>—</span>;
@@ -97,8 +107,7 @@ function CellValue({ col, value }) {
   if (value === null || value === undefined) return <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>—</span>;
   if (col === 'market_cap') return <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>{formatMarketCap(value)}</span>;
   if (col === 'last_price') return <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-primary)' }}>₹{Number(value).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>;
-  if (col === 'volume')     return <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>{formatVolume(value)}</span>;
-  if (['change_pct', 'change_30d', 'change_1y'].includes(col)) return <ChangeCell value={value} />;
+  if (['change_pct', 'change_30d'].includes(col)) return <ChangeCell value={value} />;
   return <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{value}</span>;
 }
 
@@ -106,7 +115,7 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
   const [stocks, setStocks]           = useState([]);
   const intradayPageId = `constituents-${index?.symbol || 'index'}`;
   const { liveActive, liveTick } = usePageLive(intradayPageId);
-  const { overlayGenericRow, refreshTick: patchRefreshTick } = usePatchOverlay(intradayPageId);
+  const { overlayGenericRow, refreshTick: patchRefreshTick, getSnapshot } = usePatchOverlay(intradayPageId);
   const liveStocks = useMemo(
     () => stocks.map((s) => overlayGenericRow(s)),
     [stocks, overlayGenericRow, patchRefreshTick],
@@ -117,11 +126,19 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [search, setSearch]           = useState('');
   const [chartSymbol, setChartSymbol] = useState(null);
-  const [tableWidth, setTableWidth]   = useState(640);
+  const [paneWidth, setPaneWidth]     = useState(640);
+  const [earningsBySymbol, setEarningsBySymbol] = useState(() => new Map());
+  const [beatBySymbol, setBeatBySymbol] = useState(() => new Map());
+  /** Earnings+ qualified symbols (gold E+ beside symbol name). */
+  const [plusSymbols, setPlusSymbols] = useState(() => new Set());
+  const [earningsModal, setEarningsModal] = useState(null);
+  const [earningsPriorityEnabled, setEarningsPriorityEnabled] = useState(true);
+  const [earningsPriorityDir, setEarningsPriorityDir] = useState(EARNINGS_PRIORITY_DEFAULT_DIR);
   const [emas, setEmas]               = useState(() => getPersistedEmaSet());
   const [visiblePanels, setVisiblePanels] = useState(() => getPersistedVisiblePanels());
   const [panelOrder, setPanelOrder]   = useState(['stochrsi', 'macd']);
   const [lastCandleChange, setLastCandleChange] = useState(null);
+  const [lastCandlePrice, setLastCandlePrice] = useState(null);
   const [timeframe,  setTimeframe]    = useState(DEFAULT_CHART_TIMEFRAME_1);
   const [timeframe2, setTimeframe2]   = useState(DEFAULT_CHART_TIMEFRAME_2);
   const [timeframe3, setTimeframe3]   = useState(DEFAULT_CHART_TIMEFRAME_3);
@@ -143,18 +160,22 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
   });
 
   useRegisterFocusedSymbol(intradayPageId, useMemo(
+    () => (chartSymbol ? [chartSymbol] : []),
+    [chartSymbol, intradayPageId],
+  ));
+  useRegisterIntradaySymbols(intradayPageId, useMemo(
     () => symbolsForConstituents(stocks, chartSymbol),
     [stocks, chartSymbol, intradayPageId],
   ));
 
   const { layoutHydrated, indicatorsHydrated } = useWebChartLayoutMount(CHART_PAGE_IDS.constituents, {
-    setChartLayout, setTimeframe, setTimeframe2, setTimeframe3,
+    setChartLayout, setTimeframe, setTimeframe2, setTimeframe3, setPaneWidth,
   }, (data, fromPrefs, globalIndicator) => {
     hydrateIndicatorPanels(data, fromPrefs, globalIndicator, { applyLayoutHeights, setPanelOrder });
   });
 
   useWebChartLayoutAutoSave(CHART_PAGE_IDS.constituents, {
-    chartLayout, timeframe, timeframe2, timeframe3,
+    chartLayout, timeframe, timeframe2, timeframe3, paneWidth,
   }, layoutHydrated, true, indicatorsHydrated);
 
   const onHeightsChangePersist = useIndicatorPanelAutoSave({
@@ -191,6 +212,12 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
   }, [loadConstituents]);
 
   useEffect(() => {
+    setEarningsPriorityEnabled(true);
+    setEarningsPriorityDir(EARNINGS_PRIORITY_DEFAULT_DIR);
+    setEarningsModal(null);
+  }, [index?.symbol]);
+
+  useEffect(() => {
     if (liveStocks.length === 0 || chartSymbol !== null) return;
     const firstSorted = [...liveStocks].sort((a, b) => {
       const av = a[sortBy], bv = b[sortBy];
@@ -202,7 +229,80 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
     if (firstSorted.length > 0) { setChartSymbol(firstSorted[0].symbol); setSelectedIdx(0); }
   }, [liveStocks]);
 
-  const sorted = [...liveStocks]
+  const constituentSymbolsKey = useMemo(() => (
+    liveStocks
+      .map((s) => String(s.symbol || '').trim().toUpperCase())
+      .filter(Boolean)
+      .sort()
+      .join(',')
+  ), [liveStocks]);
+
+  const constituentSymbols = useMemo(
+    () => new Set(constituentSymbolsKey ? constituentSymbolsKey.split(',') : []),
+    [constituentSymbolsKey],
+  );
+
+  useEffect(() => {
+    if (!constituentSymbolsKey) {
+      setEarningsBySymbol(new Map());
+      setBeatBySymbol(new Map());
+      setPlusSymbols(new Set());
+      return undefined;
+    }
+    let cancelled = false;
+    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    (async () => {
+      const [upcomingSettled, beatSettled, plusSettled] = await Promise.allSettled([
+        axios.get(`${API}/api/earnings-beats`, {
+          params: { mode: 'upcoming', period: 'rolling_30_days', limit: 2000 },
+          signal: ac?.signal,
+        }),
+        axios.get(`${API}/api/earnings-beats`, {
+          params: {
+            mode: 'reported',
+            report_window: 'rolling_10_days',
+            limit: 2000,
+            symbols: constituentSymbolsKey,
+          },
+          signal: ac?.signal,
+        }),
+        axios.get(`${API}/api/earnings-plus-flags`, {
+          params: { symbols: constituentSymbolsKey },
+          signal: ac?.signal,
+        }),
+      ]);
+      if (cancelled) return;
+      if (upcomingSettled.status === 'fulfilled') {
+        setEarningsBySymbol(
+          buildUpcomingEarningsMap(
+            upcomingSettled.value.data?.rows || [],
+            constituentSymbols,
+            PORTFOLIO_EARNINGS_WINDOW_DAYS,
+          ),
+        );
+      } else {
+        setEarningsBySymbol(new Map());
+      }
+      if (beatSettled.status === 'fulfilled') {
+        setBeatBySymbol(
+          buildDualBeatEarningsMap(beatSettled.value.data?.rows || [], constituentSymbols),
+        );
+      } else {
+        setBeatBySymbol(new Map());
+      }
+      if (plusSettled.status === 'fulfilled') {
+        setPlusSymbols(new Set(plusSettled.value.data?.qualified || []));
+      } else {
+        setPlusSymbols(new Set());
+      }
+    })();
+    return () => {
+      cancelled = true;
+      try { ac?.abort(); } catch (_) {}
+    };
+  }, [constituentSymbolsKey, constituentSymbols]);
+
+  const baseSorted = useMemo(() => [...liveStocks]
     .filter(s => !search || s.symbol.includes(search.toUpperCase()) || (s.company_name||'').toUpperCase().includes(search.toUpperCase()))
     .sort((a, b) => {
       const av = a[sortBy], bv = b[sortBy];
@@ -210,10 +310,34 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
       return sortDir === 'asc'
         ? (typeof av === 'string' ? av.localeCompare(bv) : av - bv)
         : (typeof av === 'string' ? bv.localeCompare(av) : bv - av);
+    }), [liveStocks, search, sortBy, sortDir]);
+
+  const sorted = useMemo(() => {
+    if (!earningsPriorityEnabled) return baseSorted;
+    return sortItemsByEarningsPriority(baseSorted, {
+      getSymbol: s => s.symbol,
+      beatBySymbol,
+      upcomingBySymbol: earningsBySymbol,
+      dir: earningsPriorityDir,
     });
+  }, [baseSorted, earningsPriorityEnabled, beatBySymbol, earningsBySymbol, earningsPriorityDir]);
+
+  const earningsCount = useMemo(() => {
+    let n = 0;
+    for (const sym of earningsBySymbol.keys()) {
+      const highlight = resolveEarningsRowHighlight(
+        beatBySymbol.get(sym),
+        earningsBySymbol.get(sym),
+      );
+      if (highlight.kind === 'upcoming') n += 1;
+    }
+    return n;
+  }, [earningsBySymbol, beatBySymbol]);
 
   useEffect(() => {
     function handleKey(e) {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      if (isTypingContext(e)) return;
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         setSelectedIdx(prev => {
@@ -238,7 +362,9 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
     return () => window.removeEventListener('keydown', handleKey);
   }, [sorted]);
 
-  useEffect(() => { setSelectedIdx(0); }, [sortBy, sortDir, search]);
+  useEffect(() => {
+    setSelectedIdx(0);
+  }, [sortBy, sortDir, search, earningsPriorityEnabled, earningsPriorityDir]);
 
   useEffect(() => {
     persistEmaSet(emas);
@@ -283,9 +409,42 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
   }, []);
 
   function handleSort(col) {
-    if (col === 'note') return;
+    setEarningsPriorityEnabled(false);
     if (sortBy === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
     else { setSortBy(col); setSortDir(col === 'symbol' ? 'asc' : 'desc'); }
+  }
+
+  function handleEarningsPriorityControlClick() {
+    if (!earningsPriorityEnabled) {
+      setEarningsPriorityEnabled(true);
+      return;
+    }
+    setEarningsPriorityDir(d => (d === 'asc' ? 'desc' : 'asc'));
+  }
+
+  function openEarningsModalFromSymbol(stock) {
+    const sym = String(stock?.symbol || '').trim().toUpperCase();
+    if (!sym) return;
+    const highlight = resolveEarningsRowHighlight(
+      beatBySymbol.get(sym),
+      earningsBySymbol.get(sym),
+    );
+    if (!highlight.info) return;
+    if (highlight.kind === 'beat') {
+      setEarningsModal({
+        symbol: sym,
+        variant: 'beat',
+        earningsDate: highlight.info.earnings_release_date,
+        daysSinceReport: highlight.info.days_since_report,
+      });
+      return;
+    }
+    setEarningsModal({
+      symbol: sym,
+      variant: 'upcoming',
+      earningsDate: highlight.info.earnings_release_next_date,
+      daysUntil: highlight.info.days_until,
+    });
   }
 
   useEffect(() => {
@@ -305,22 +464,23 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
     const rowsEl = rowsScrollRef.current;
     if (!headerEl || !rowsEl) return;
     headerEl.scrollLeft = rowsEl.scrollLeft;
-  }, [sorted.length, tableWidth, gridTemplateColumns]);
+  }, [sorted.length, paneWidth, gridTemplateColumns]);
 
   function handleRowClick(stock, idx) {
     setSelectedIdx(idx);
     setChartSymbol(stock.symbol);
     setLastCandleChange(null);
+    setLastCandlePrice(null);
     setCrosshairTime(null);
   }
 
   function onDividerMouseDown(e) {
     e.preventDefault();
-    draggingRef.current = true; startXRef.current = e.clientX; startWidthRef.current = tableWidth;
+    draggingRef.current = true; startXRef.current = e.clientX; startWidthRef.current = paneWidth;
     function onMouseMove(ev) {
       if (!draggingRef.current) return;
       const total = wrapperRef.current?.clientWidth || 1200;
-      setTableWidth(Math.max(300, Math.min(total - 400, startWidthRef.current + ev.clientX - startXRef.current)));
+      setPaneWidth(Math.max(300, Math.min(total - 400, startWidthRef.current + ev.clientX - startXRef.current)));
     }
     function onMouseUp() { draggingRef.current = false; window.removeEventListener('mousemove', onMouseMove); window.removeEventListener('mouseup', onMouseUp); }
     window.addEventListener('mousemove', onMouseMove);
@@ -338,6 +498,19 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
   }
 
   const selectedStock = sorted[selectedIdx] || null;
+  const focusSnap = chartSymbol ? getSnapshot(chartSymbol) : null;
+  const headerPrice = (() => {
+    const fromSnap = focusSnap?.price;
+    if (fromSnap != null && Number.isFinite(Number(fromSnap))) return Number(fromSnap);
+    if (lastCandlePrice != null && Number.isFinite(Number(lastCandlePrice))) return Number(lastCandlePrice);
+    const rowPx = selectedStock?.last_price ?? selectedStock?.price;
+    return rowPx != null && Number.isFinite(Number(rowPx)) ? Number(rowPx) : null;
+  })();
+  const headerChange = (() => {
+    const fromSnap = focusSnap?.change_pct;
+    if (fromSnap != null && Number.isFinite(Number(fromSnap))) return Number(fromSnap);
+    return lastCandleChange;
+  })();
 
   // Render a single chart panel — all panels share crosshairTime
   function renderPanel(symbol, tf, setTf, onLastChange, cacheKey, hasBorderRight, columnIndex) {
@@ -394,12 +567,14 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
           <>
             <div style={{ width:1, height:20, backgroundColor:'var(--border)' }} />
             <span style={{ fontFamily:'var(--font-mono)', fontWeight:700, fontSize:14, color:'var(--accent-blue)', flexShrink:0 }}>{selectedStock.symbol}</span>
-            <span style={{ fontFamily:'var(--font-mono)', fontSize:13, color:'var(--text-primary)', flexShrink:0 }}>
-              ₹{Number(selectedStock.last_price).toLocaleString('en-IN', { minimumFractionDigits:2 })}
-            </span>
-            {lastCandleChange !== null && (
-              <span style={{ fontFamily:'var(--font-mono)', fontSize:11, fontWeight:600, color: lastCandleChange>=0?'var(--accent-green)':'var(--accent-red)', backgroundColor: lastCandleChange>=0?'rgba(63,185,80,0.12)':'rgba(248,81,73,0.12)', border:`1px solid ${lastCandleChange>=0?'#3fb95044':'#f8514944'}`, borderRadius:4, padding:'1px 6px', flexShrink:0 }}>
-                {lastCandleChange>=0?'+':''}{lastCandleChange.toFixed(2)}%
+            {headerPrice != null && (
+              <span style={{ fontFamily:'var(--font-mono)', fontSize:13, color:'var(--text-primary)', flexShrink:0 }}>
+                ₹{headerPrice.toLocaleString('en-IN', { minimumFractionDigits:2 })}
+              </span>
+            )}
+            {headerChange !== null && Number.isFinite(headerChange) && (
+              <span style={{ fontFamily:'var(--font-mono)', fontSize:11, fontWeight:600, color: headerChange>=0?'var(--accent-green)':'var(--accent-red)', backgroundColor: headerChange>=0?'rgba(63,185,80,0.12)':'rgba(248,81,73,0.12)', border:`1px solid ${headerChange>=0?'#3fb95044':'#f8514944'}`, borderRadius:4, padding:'1px 6px', flexShrink:0 }}>
+                {headerChange>=0?'+':''}{headerChange.toFixed(2)}%
               </span>
             )}
           </>
@@ -419,7 +594,7 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
 
         <div style={{ flex:1 }} />
 
-        <DrawingToolsDesignControl />
+        <BasketToolbarButton />
 
         {/* View dropdown */}
         <div ref={viewRef} style={{ position:'relative', flexShrink:0 }}>
@@ -466,14 +641,45 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
       </div>
 
       {/* ── Body ── */}
-      <div ref={wrapperRef} style={{ flex:1, display:'flex', overflow:'hidden' }}>
-
+      <StockListSplitBody
+        splitRef={wrapperRef}
+        footer={(
+          <>
+            {sorted.length} stocks
+            <button
+              type="button"
+              onClick={handleEarningsPriorityControlClick}
+              aria-pressed={earningsPriorityEnabled}
+              aria-label={`Earnings priority sort ${earningsPriorityEnabled ? 'enabled' : 'disabled'}, ${earningsPriorityDir === 'asc' ? 'nearest dates first' : 'furthest dates first'}`}
+              title={earningsPriorityEnabled
+                ? 'Toggle earnings-priority date direction'
+                : 'Re-enable earnings-priority sorting'}
+              style={{
+                marginLeft: 8,
+                padding: 0,
+                border: 'none',
+                background: 'none',
+                color: earningsPriorityEnabled ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                cursor: 'pointer',
+                font: 'inherit',
+              }}
+            >
+              · Earnings priority {earningsPriorityDir === 'asc' ? '▲' : '▼'}
+            </button>
+            {earningsCount > 0 && (
+              <span style={{ marginLeft: 8, color: PORTFOLIO_EARNINGS_LABEL_COLOR }}>
+                · {earningsCount} reporting in {PORTFOLIO_EARNINGS_WINDOW_DAYS} days
+              </span>
+            )}
+          </>
+        )}
+      >
         {/* Table */}
-        <div style={{ width:tableWidth, minWidth:300, flexShrink:0, display:'flex', flexDirection:'column', overflow:'hidden' }}>
+        <div style={{ width:paneWidth, minWidth:300, flexShrink:0, display:'flex', flexDirection:'column', overflow:'hidden' }}>
           <div ref={headerScrollRef} style={{ ...stockListHeaderStripStyle, overflowX: 'hidden', overflowY: 'hidden' }}>
             <div style={stockListGridTrackStyle(gridTemplateColumns)}>
             {COLS.map((col, colIdx) => {
-              const sortable = col.key !== 'note';
+              const sortable = true;
               const activeSort = sortable && sortBy === col.key;
               const wk = columnWidthKey(col);
               return (
@@ -501,6 +707,30 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
               <div style={{ padding:16, color:'var(--text-muted)', fontSize:12 }}>Loading...</div>
             ) : sorted.map((stock, idx) => {
               const isSelected = idx === selectedIdx;
+              const symKey = String(stock.symbol || '').trim().toUpperCase();
+              const rowHighlight = resolveEarningsRowHighlight(
+                beatBySymbol.get(symKey),
+                earningsBySymbol.get(symKey),
+              );
+              const beatInfo = rowHighlight.kind === 'beat' ? rowHighlight.info : null;
+              const upcomingInfo = rowHighlight.kind === 'upcoming' ? rowHighlight.info : null;
+              const earningsHighlight = beatInfo || upcomingInfo;
+              const isBeatHighlight = !!beatInfo;
+              const hasPlusBadge = plusSymbols.has(String(stock.symbol || '').trim().toUpperCase());
+              const rowBg = isSelected
+                ? 'rgba(56,139,253,0.08)'
+                : isBeatHighlight
+                  ? DUAL_BEAT_ROW_BG
+                  : upcomingInfo
+                    ? PORTFOLIO_EARNINGS_ROW_BG
+                    : 'transparent';
+              const rowBorderLeft = isSelected
+                ? '2px solid var(--accent-blue)'
+                : isBeatHighlight
+                  ? `2px solid ${DUAL_BEAT_BORDER}`
+                  : upcomingInfo
+                    ? `2px solid ${PORTFOLIO_EARNINGS_BORDER}`
+                    : '2px solid transparent';
               return (
                 <div key={stock.symbol} ref={el => rowRefs.current[idx]=el}
                   onClick={() => handleRowClick(stock, idx)}
@@ -508,18 +738,92 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
                     e.preventDefault();
                     if (onContextMenuRequest) onContextMenuRequest({ x: e.clientX, y: e.clientY, symbol: stock.symbol, type: 'stock', sourcePage: 'constituents' });
                   }}
-                  style={{ ...stockListGridTrackStyle(gridTemplateColumns), height: STOCK_LIST_ROW_HEIGHT, borderBottom:'1px solid var(--border-light)', cursor:'pointer', backgroundColor: isSelected?'rgba(56,139,253,0.08)':'transparent', ...stockListRowSelectShadow(isSelected?'2px solid var(--accent-blue)':'2px solid transparent') }}
-                  onMouseEnter={e => { if (!isSelected) e.currentTarget.style.backgroundColor='var(--bg-hover)'; }}
-                  onMouseLeave={e => { if (!isSelected) e.currentTarget.style.backgroundColor='transparent'; }}
+                  style={{
+                    ...stockListGridTrackStyle(gridTemplateColumns),
+                    height: earningsHighlight ? PORTFOLIO_EARNINGS_ROW_HEIGHT : STOCK_LIST_ROW_HEIGHT,
+                    borderBottom:'1px solid var(--border-light)',
+                    cursor:'pointer',
+                    backgroundColor: rowBg,
+                    ...stockListRowSelectShadow(rowBorderLeft),
+                  }}
+                  onMouseEnter={e => {
+                    if (!isSelected) {
+                      e.currentTarget.style.backgroundColor = isBeatHighlight
+                        ? DUAL_BEAT_ROW_HOVER
+                        : upcomingInfo
+                          ? PORTFOLIO_EARNINGS_ROW_HOVER
+                          : 'var(--bg-hover)';
+                    }
+                  }}
+                  onMouseLeave={e => {
+                    if (!isSelected) {
+                      e.currentTarget.style.backgroundColor = isBeatHighlight
+                        ? DUAL_BEAT_ROW_BG
+                        : upcomingInfo
+                          ? PORTFOLIO_EARNINGS_ROW_BG
+                          : 'transparent';
+                    }
+                  }}
                 >
                   {COLS.map((col, colIdx) => (
-                    <StockListGridCell key={col.key} colKey={col.key} isLast={colIdx === COLS.length - 1} onClick={col.key === 'note' ? e => e.stopPropagation() : undefined}>
-                      {col.key === 'note' ? (
-                        <InstrumentNotesIcon symbol={stock.symbol} instrumentType="stock" />
-                      ) : col.key === 'symbol' ? (
-                        <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, fontSize: 11, color: stock.change_pct > 0 ? 'var(--accent-green)' : stock.change_pct < 0 ? 'var(--accent-red)' : 'var(--text-primary)' }}>
-                          {stock.symbol}
-                        </span>
+                    <StockListGridCell key={col.key} colKey={col.key} isLast={colIdx === COLS.length - 1}>
+                      {col.key === 'symbol' ? (
+                        <div
+                          style={{
+                            minWidth: 0,
+                            flex: 1,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            justifyContent: 'center',
+                            gap: earningsHighlight ? 1 : 0,
+                            cursor: earningsHighlight ? 'pointer' : undefined,
+                          }}
+                          onClick={earningsHighlight ? (e) => {
+                            e.stopPropagation();
+                            handleRowClick(stock, idx);
+                            openEarningsModalFromSymbol(stock);
+                          } : undefined}
+                          title={earningsHighlight ? 'Click for quarterly results and company profile' : stock.symbol}
+                        >
+                          <span style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+                            <span style={{
+                              fontFamily: 'var(--font-mono)',
+                              fontWeight: 600,
+                              fontSize: 11,
+                              color: stock.change_pct > 0 ? 'var(--accent-green)' : stock.change_pct < 0 ? 'var(--accent-red)' : 'var(--text-primary)',
+                              whiteSpace: 'nowrap',
+                              textOverflow: 'ellipsis',
+                              overflow: 'hidden',
+                              lineHeight: 1.2,
+                            }}>
+                              {stock.symbol}
+                            </span>
+                            {hasPlusBadge ? <EarningsPlusInlineMark /> : null}
+                          </span>
+                          {isBeatHighlight ? (
+                            <span style={{
+                              fontSize: 9,
+                              fontWeight: 600,
+                              fontFamily: 'var(--font-mono)',
+                              color: DUAL_BEAT_LABEL_COLOR,
+                              lineHeight: 1.15,
+                              whiteSpace: 'nowrap',
+                            }}>
+                              Beat EPS+Rev
+                            </span>
+                          ) : upcomingInfo ? (
+                            <span style={{
+                              fontSize: 9,
+                              fontWeight: 600,
+                              fontFamily: 'var(--font-mono)',
+                              color: PORTFOLIO_EARNINGS_LABEL_COLOR,
+                              lineHeight: 1.15,
+                              whiteSpace: 'nowrap',
+                            }}>
+                              E {formatEarningsBadgeDate(upcomingInfo.earnings_release_next_date)}
+                            </span>
+                          ) : null}
+                        </div>
                       ) : (
                         <CellValue col={col.key} value={stock[col.key]} />
                       )}
@@ -528,9 +832,6 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
                 </div>
               );
             })}
-          </div>
-          <div style={stockListFooterStripStyle}>
-            {sorted.length} stocks · ↑↓ navigate · click row for chart
           </div>
         </div>
 
@@ -554,14 +855,26 @@ export default function ConstituentsPage({ index, onOpenChart, onBack, onContext
             </div>
           ) : (
             <>
-              {renderPanel(chartSymbol, timeframe,  tf => { setTimeframe(tf); setLastCandleChange(null); }, pct => setLastCandleChange(pct), chartSymbol+'-p1-'+timeframe,  chartLayout!=='single', 0)}
+              {renderPanel(chartSymbol, timeframe,  tf => { setTimeframe(tf); setLastCandleChange(null); setLastCandlePrice(null); }, (pct, price) => { setLastCandleChange(pct); setLastCandlePrice(price ?? null); }, chartSymbol+'-p1-'+timeframe,  chartLayout!=='single', 0)}
               {(chartLayout==='2h'||chartLayout==='3h') && renderPanel(chartSymbol, timeframe2, tf => setTimeframe2(tf), ()=>{}, chartSymbol+'-p2-'+timeframe2, chartLayout==='3h', 1)}
               {chartLayout==='3h' && renderPanel(chartSymbol, timeframe3, tf => setTimeframe3(tf), ()=>{}, chartSymbol+'-p3-'+timeframe3, false, 2)}
             </>
           )}
         </div>
         </DrawingWorkspaceProvider>
-      </div>
+      </StockListSplitBody>
+
+      {earningsModal && (
+        <PortfolioEarningsModal
+          symbol={earningsModal.symbol}
+          variant={earningsModal.variant}
+          earningsDate={earningsModal.earningsDate}
+          daysUntil={earningsModal.daysUntil}
+          daysSinceReport={earningsModal.daysSinceReport}
+          onClose={() => setEarningsModal(null)}
+          onOpenChart={onOpenChart}
+        />
+      )}
     </div>
   );
 }

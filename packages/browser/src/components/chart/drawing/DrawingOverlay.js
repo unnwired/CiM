@@ -4,6 +4,7 @@ import { createDrawing } from './drawingTypes';
 import { hitTestSegments } from './hitTest';
 import { segmentsForDrawing, handlePositions } from './drawingSegments';
 import { xToTime, yToPrice, timeToX as tx, priceToY as py } from './drawingGeometry';
+import { isTypingContext } from '../../../utils/isTypingTarget';
 
 /**
  * @param {{
@@ -266,6 +267,7 @@ export default function DrawingOverlay({
     if (!isDrawingTarget) return;
     const del = (ev) => {
       if (ev.key !== 'Delete' && ev.key !== 'Backspace') return;
+      if (isTypingContext(ev)) return;
       if (!selectedId) return;
       ev.preventDefault();
       setDrawings((prev) => prev.filter((d) => d.id !== selectedId));

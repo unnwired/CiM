@@ -28,6 +28,7 @@ from server.pnl_ledger import (  # noqa: E402
     load_ledger,
     parse_sale_date,
     patch_placeholder_or_position,
+    repair_closed_qty_bought,
     purge_dead_positions,
     reconcile_pnl_portfolio_sync,
     remove_symbol_from_portfolio_items,
@@ -73,10 +74,47 @@ class TestPnlLedger(unittest.TestCase):
         self.assertEqual(trade["realized_pl"], 100.0)
         self.assertEqual(trade["sale_date"], "2026-01-10")
         self.assertEqual(trade["cycle_id"], 1)
+        self.assertEqual(trade["qty_bought"], 5)
+        self.assertEqual(trade["qty_sold"], 5)
         self.assertEqual(ledger["positions"][0]["qty"], 5)
         split = build_closed_rows(ledger["closed_trades"])
         self.assertEqual(len(split["profit"]), 1)
         self.assertEqual(len(split["loss"]), 0)
+
+    def test_repair_closed_qty_bought_matches_sold(self):
+        ledger = {
+            "positions": [],
+            "closed_trades": [
+                {
+                    "id": "bad-paras",
+                    "symbol": "PARAS",
+                    "qty_bought": 12,
+                    "qty_sold": 5,
+                    "entry_price": 100,
+                    "exit_price": 110,
+                    "realized_pl": 50,
+                },
+                {
+                    "id": "ok",
+                    "symbol": "TRENT",
+                    "qty_bought": 25,
+                    "qty_sold": 25,
+                    "entry_price": 100,
+                    "exit_price": 110,
+                    "realized_pl": 250,
+                },
+            ],
+        }
+        fixed = repair_closed_qty_bought(ledger)
+        self.assertEqual(fixed, 1)
+        self.assertEqual(ledger["closed_trades"][0]["qty_bought"], 5)
+        self.assertEqual(ledger["closed_trades"][0]["qty_sold"], 5)
+        self.assertEqual(ledger["closed_trades"][1]["qty_bought"], 25)
+        # build_closed_rows also normalizes for display
+        rows = build_closed_rows(
+            [{"symbol": "X", "qty_bought": 25, "qty_sold": 3, "realized_pl": 1}]
+        )
+        self.assertEqual(rows["profit"][0]["qty_bought"], 3)
 
     def test_two_partial_books_same_cycle(self):
         ledger = {"positions": [], "closed_trades": [], "cycle_seq": {}, "active_cycle": {}}
@@ -317,9 +355,11 @@ class TestPnlLedger(unittest.TestCase):
         )
         self.assertEqual(len(trades), 2)
         self.assertEqual(trades[0]["qty_sold"], 30)
+        self.assertEqual(trades[0]["qty_bought"], 30)
         self.assertEqual(trades[0]["entry_price"], 900.0)
         self.assertEqual(trades[0]["entry_date"], "2026-06-10")
         self.assertEqual(trades[1]["qty_sold"], 10)
+        self.assertEqual(trades[1]["qty_bought"], 10)
         self.assertEqual(trades[1]["entry_price"], 950.0)
         self.assertEqual(trades[1]["entry_date"], "2026-06-27")
         self.assertEqual(symbol_open_qty(ledger, "LICI"), 20)

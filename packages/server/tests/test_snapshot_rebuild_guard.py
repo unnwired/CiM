@@ -43,24 +43,10 @@ class SnapshotRebuildGuardTests(unittest.TestCase):
         ajs.set_scheduler_blocked_fn(None)
         self._tmpdir.cleanup()
 
-    def test_interval_ohlcv_not_imminent_only_due_now_blocks(self):
+    def test_daily_ohlcv_not_imminent_outside_window(self):
         now = datetime(2026, 6, 26, 10, 0, tzinfo=IST)
         cfg = ajs._normalize_config({
-            "ohlcv": {"enabled": True, "scheduleType": "interval", "intervalMinutes": 60},
-        })
-        state = {"lastOhlcvAt": now.isoformat()}
-        conflicts = srg.collect_scheduler_conflicts(job_running_fn=lambda: False)
-        self.assertFalse(any(c.get("task") == "ohlcv" for c in conflicts))
-
-    def test_daily_filter_rebuild_imminent_within_window(self):
-        now = datetime(2026, 6, 26, 15, 20, tzinfo=IST)
-        cfg = ajs._normalize_config({
-            "filterRebuildDaily": {
-                "enabled": True,
-                "scheduleType": "daily",
-                "afterHourIst": 15,
-                "afterMinuteIst": 30,
-            },
+            "ohlcv": {"enabled": True, "scheduleType": "daily", "afterHourIst": 15, "afterMinuteIst": 30},
         })
         with mock.patch.object(ajs, "load_config", return_value=cfg), mock.patch.object(
             ajs, "load_state", return_value={}
@@ -69,7 +55,27 @@ class SnapshotRebuildGuardTests(unittest.TestCase):
             dt_cls.fromisoformat = datetime.fromisoformat
             dt_cls.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
             conflicts = srg.collect_scheduler_conflicts(job_running_fn=lambda: False)
-        self.assertTrue(any(c.get("type") == "imminent" and c.get("task") == "filterRebuildDaily" for c in conflicts))
+        self.assertFalse(any(c.get("task") == "ohlcv" for c in conflicts))
+
+    def test_daily_filter_rebuild_imminent_within_window(self):
+        now = datetime(2026, 6, 26, 15, 20, tzinfo=IST)
+        cfg = ajs._normalize_config({
+            "filterSchedules": [{
+                "id": "filterRebuildDaily",
+                "enabled": True,
+                "afterHourIst": 15,
+                "afterMinuteIst": 30,
+                "weekdaysIst": list(range(7)),
+            }],
+        })
+        with mock.patch.object(ajs, "load_config", return_value=cfg), mock.patch.object(
+            ajs, "load_state", return_value={}
+        ), mock.patch("server.snapshot_rebuild_guard.datetime") as dt_cls:
+            dt_cls.now.return_value = now
+            dt_cls.fromisoformat = datetime.fromisoformat
+            dt_cls.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+            conflicts = srg.collect_scheduler_conflicts(job_running_fn=lambda: False)
+        self.assertTrue(any(c.get("type") == "imminent" and c.get("task") == "filter:filterRebuildDaily" for c in conflicts))
 
     def test_scheduler_frozen_skips_run_task_now(self):
         srg.acquire_full_rebuild_hold()
@@ -92,17 +98,16 @@ class SnapshotRebuildGuardTests(unittest.TestCase):
             srg.release_full_rebuild_hold()
         self.assertFalse(srg.hold_path().is_file())
 
-    def test_task_is_due_now_daily_after_target(self):
+    def test_filter_schedule_is_due_now_after_target(self):
         now = datetime(2026, 6, 26, 16, 0, tzinfo=IST)
-        cfg = ajs._normalize_config({
-            "filterRebuildDaily": {
-                "enabled": True,
-                "scheduleType": "daily",
-                "afterHourIst": 15,
-                "afterMinuteIst": 30,
-            },
-        })
-        self.assertTrue(ajs.task_is_due_now("filterRebuildDaily", cfg, {}, now))
+        entry = ajs._normalize_filter_schedule_entry({
+            "id": "fs-due",
+            "enabled": True,
+            "afterHourIst": 15,
+            "afterMinuteIst": 30,
+            "weekdaysIst": list(range(7)),
+        }, 0)
+        self.assertTrue(ajs._fs_is_due_now(entry, {}, now))
 
 
 if __name__ == "__main__":

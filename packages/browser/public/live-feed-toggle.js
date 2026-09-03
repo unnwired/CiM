@@ -1,0 +1,1 @@
+(function () { const oldPanel = document.getElementById("cim-live-feed-toggle"); if (oldPanel && oldPanel.parentNode) oldPanel.parentNode.removeChild(oldPanel); window.CiMLegacyLiveFeedToggleDisabled = true; })();

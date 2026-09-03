@@ -129,6 +129,88 @@ def _prepare_sys_path() -> Path:
     return cache_or_base
 
 
+def _bind_namespace_package(name: str, directory: Path):
+    """Register a package whose code lives under a decrypted cache directory."""
+    init_py = directory / "__init__.py"
+    init_pyc = directory / "__init__.pyc"
+    if init_py.is_file():
+        pkg_spec = importlib.util.spec_from_file_location(
+            name,
+            init_py,
+            submodule_search_locations=[str(directory)],
+        )
+    elif init_pyc.is_file():
+        loader = importlib.machinery.SourcelessFileLoader(name, str(init_pyc))
+        pkg_spec = importlib.util.spec_from_loader(name, loader)
+        pkg_spec.submodule_search_locations = [str(directory)]
+    else:
+        pkg_spec = importlib.util.spec_from_file_location(
+            name,
+            directory,
+            submodule_search_locations=[str(directory)],
+        )
+    pkg_mod = importlib.util.module_from_spec(pkg_spec)
+    sys.modules[name] = pkg_mod
+    if pkg_spec.loader:
+        pkg_spec.loader.exec_module(pkg_mod)
+    # Ensure submodule imports resolve to this directory (not install *.pyc.enc).
+    pkg_mod.__path__ = [str(directory)]
+    return pkg_mod
+
+
+def _preload_pyc_modules(parent_name: str, directory: Path, parent_mod) -> None:
+    """Load every *.pyc beside a package so `from parent import sibling` works."""
+    dir_s = str(directory)
+    if dir_s not in sys.path:
+        sys.path.insert(0, dir_s)
+
+    pending = []
+    for mod_pyc in sorted(directory.glob("*.pyc")):
+        stem = mod_pyc.stem
+        if stem == "__init__":
+            continue
+        if parent_name == "server" and stem == "server":
+            continue  # loaded explicitly as server.server below
+        pending.append(mod_pyc)
+
+    last_err = None
+    while pending:
+        progress = []
+        next_pending = []
+        for mod_pyc in pending:
+            stem = mod_pyc.stem
+            mod_name = f"{parent_name}.{stem}"
+            if mod_name in sys.modules and getattr(sys.modules[mod_name], "__file__", None):
+                # Already fully loaded
+                setattr(parent_mod, stem, sys.modules[mod_name])
+                progress.append(mod_pyc)
+                continue
+            mod_loader = importlib.machinery.SourcelessFileLoader(mod_name, str(mod_pyc))
+            mod_spec = importlib.util.spec_from_loader(mod_name, mod_loader)
+            mod_obj = importlib.util.module_from_spec(mod_spec)
+            # Do not publish incomplete modules: only insert after successful exec,
+            # except we must insert before exec_module (importlib contract). Use a
+            # private name during exec then publish under real names on success.
+            staging_name = f"_cim_loading_{mod_name}"
+            sys.modules[staging_name] = mod_obj
+            try:
+                mod_loader.exec_module(mod_obj)
+            except Exception as exc:
+                sys.modules.pop(staging_name, None)
+                last_err = exc
+                next_pending.append(mod_pyc)
+                continue
+            sys.modules.pop(staging_name, None)
+            sys.modules[mod_name] = mod_obj
+            if parent_name == "server":
+                sys.modules[stem] = mod_obj
+            setattr(parent_mod, stem, mod_obj)
+            progress.append(mod_pyc)
+        if not progress:
+            raise last_err
+        pending = next_pending
+
+
 def _load_server_module_from_cache(cache_root: Path):
     """Load server.server from decrypted server.pyc (plain import does not find .pyc-only modules)."""
     cache_server = cache_root / "server"
@@ -136,75 +218,36 @@ def _load_server_module_from_cache(cache_root: Path):
     if not pyc_path.is_file():
         raise ModuleNotFoundError("server.server (missing decrypted server.pyc)")
 
-    if "server" not in sys.modules:
-        init_py = cache_server / "__init__.py"
-        init_pyc = cache_server / "__init__.pyc"
-        if init_py.is_file():
-            pkg_spec = importlib.util.spec_from_file_location(
-                "server",
-                init_py,
-                submodule_search_locations=[str(cache_server)],
-            )
-        elif init_pyc.is_file():
-            loader = importlib.machinery.SourcelessFileLoader("server", str(init_pyc))
-            pkg_spec = importlib.util.spec_from_loader("server", loader)
-            pkg_spec.submodule_search_locations = [str(cache_server)]
-        else:
-            pkg_spec = importlib.util.spec_from_file_location(
-                "server",
-                cache_server,
-                submodule_search_locations=[str(cache_server)],
-            )
-        pkg_mod = importlib.util.module_from_spec(pkg_spec)
-        sys.modules["server"] = pkg_mod
-        if pkg_spec.loader:
-            pkg_spec.loader.exec_module(pkg_mod)
+    # Auth-only mode may already have imported install-tree `server` (*.pyc.enc only).
+    # Always rebind the package to the decrypted cache before loading the full app.
+    for key in list(sys.modules):
+        if key == "server" or key.startswith("server."):
+            del sys.modules[key]
+
+    cache_server_s = str(cache_server)
+    if cache_server_s not in sys.path:
+        sys.path.insert(0, cache_server_s)
+
+    pkg_mod = _bind_namespace_package("server", cache_server)
 
     for subpkg in ("core", "routers"):
         subdir = cache_server / subpkg
         if not subdir.is_dir():
             continue
         pkg_name = f"server.{subpkg}"
-        if pkg_name in sys.modules:
-            continue
-        init_py = subdir / "__init__.py"
-        init_pyc = subdir / "__init__.pyc"
-        if init_py.is_file():
-            sub_spec = importlib.util.spec_from_file_location(
-                pkg_name,
-                init_py,
-                submodule_search_locations=[str(subdir)],
-            )
-        elif init_pyc.is_file():
-            sub_loader = importlib.machinery.SourcelessFileLoader(pkg_name, str(init_pyc))
-            sub_spec = importlib.util.spec_from_loader(pkg_name, sub_loader)
-            sub_spec.submodule_search_locations = [str(subdir)]
-        else:
-            sub_spec = importlib.util.spec_from_file_location(
-                pkg_name,
-                subdir,
-                submodule_search_locations=[str(subdir)],
-            )
-        sub_mod = importlib.util.module_from_spec(sub_spec)
-        sys.modules[pkg_name] = sub_mod
-        if sub_spec.loader:
-            sub_spec.loader.exec_module(sub_mod)
-        for mod_pyc in sorted(subdir.glob("*.pyc")):
-            if mod_pyc.stem == "__init__":
-                continue
-            mod_name = f"{pkg_name}.{mod_pyc.stem}"
-            if mod_name in sys.modules:
-                continue
-            mod_loader = importlib.machinery.SourcelessFileLoader(mod_name, str(mod_pyc))
-            mod_spec = importlib.util.spec_from_loader(mod_name, mod_loader)
-            mod_obj = importlib.util.module_from_spec(mod_spec)
-            sys.modules[mod_name] = mod_obj
-            mod_loader.exec_module(mod_obj)
+        sub_mod = _bind_namespace_package(pkg_name, subdir)
+        setattr(pkg_mod, subpkg, sub_mod)
+        _preload_pyc_modules(pkg_name, subdir, sub_mod)
+
+    # Do not preload every top-level sibling up front: with cache_server on sys.path
+    # and server.__path__ pointing at the decrypt cache, `from server import X` and
+    # bare `import X` resolve decrypted *.pyc on demand (correct dependency order).
 
     loader = importlib.machinery.SourcelessFileLoader("server.server", str(pyc_path))
     spec = importlib.util.spec_from_loader("server.server", loader)
     mod = importlib.util.module_from_spec(spec)
     sys.modules["server.server"] = mod
+    setattr(pkg_mod, "server", mod)
     loader.exec_module(mod)
     _repoint_server_install_paths(mod)
     return mod
@@ -235,6 +278,22 @@ def _repoint_server_install_paths(mod) -> None:
     movers_live = sys.modules.get("nse_pulse_movers_live")
     if movers_live is not None and hasattr(movers_live, "configure_paths"):
         movers_live.configure_paths(data_dir=install / "data")
+    upstox_instruments = sys.modules.get("server.upstox_instruments")
+    if upstox_instruments is None:
+        try:
+            from server import upstox_instruments as _ui
+
+            _ui.configure_paths(data_dir=install / "data")
+        except Exception:
+            pass
+    elif hasattr(upstox_instruments, "configure_paths"):
+        upstox_instruments.configure_paths(data_dir=install / "data")
+    try:
+        from server import upstox_history as _uh
+
+        _uh.configure_paths(data_dir=install / "data")
+    except Exception:
+        pass
     try:
         from server.license_routes import configure_base_dir
 

@@ -72,6 +72,31 @@ class LicenseClientTests(unittest.TestCase):
             base = Path(tmp)
             self.assertFalse(crypto.access_granted(base))
 
+    @patch("server.product_config.require_online_auth", return_value=False)
+    @patch.object(crypto, "is_development_tree", return_value=True)
+    @patch.object(crypto, "is_online_only_distribution", return_value=True)
+    def test_license_status_web_dev_tree_includes_session_email(self, *_mocks):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            session = {
+                "email": "sandeep@example.com",
+                "access_expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            }
+            status = lc.license_status_for_client(base, session, host_mode="web")
+            self.assertTrue(status["valid"])
+            self.assertEqual(status["mode"], "online")
+            self.assertEqual(status["email"], "sandeep@example.com")
+
+    @patch("server.product_config.require_online_auth", return_value=False)
+    @patch.object(crypto, "is_development_tree", return_value=True)
+    def test_license_status_web_dev_tree_without_session_stays_dev(self, *_mocks):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            status = lc.license_status_for_client(base, None, host_mode="web")
+            self.assertTrue(status["valid"])
+            self.assertEqual(status["mode"], "dev")
+            self.assertNotIn("email", status)
+
 
 if __name__ == "__main__":
     unittest.main()

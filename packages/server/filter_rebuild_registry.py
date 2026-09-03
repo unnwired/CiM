@@ -18,8 +18,19 @@ RANGE_CHANNEL_CANONICAL_PARAMS: dict[str, Any] = {
 VOLUME_STATS_PERIODS = (10, 20, 30)
 
 SNAPSHOT_TIMEFRAME_OPTIONS = (
-    "4H", "1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W", "4W", "1M",
+    "30m", "4H", "1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W", "4W", "1M",
 )
+
+
+def normalize_snapshot_timeframe(raw: Any) -> str:
+    """Canonicalize TF tokens. Keep ``30m`` lowercase so it never becomes month ``30M``."""
+    tf = str(raw or "").strip()
+    if not tf:
+        return ""
+    if tf.lower() == "30m":
+        return "30m"
+    return tf.upper()
+
 
 _REGISTRY: tuple[dict[str, Any], ...] = (
     {

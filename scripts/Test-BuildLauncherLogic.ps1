@@ -38,6 +38,42 @@ Assert-Equal 50 (Get-PipelineSegmentPercent -StepCurrent 1 -StepTotal 2) 'step 1
 Assert-Equal 66 (ConvertTo-OverallBuildPercent -PipelinePercent 66 -Both $false -PipelineSlot 0) 'single dist 66'
 Assert-Equal 83 (ConvertTo-OverallBuildPercent -PipelinePercent 66 -Both $true -PipelineSlot 1) 'both plaintext half'
 
+$workerScript = Join-Path $PSScriptRoot '..\Batch Files\Build-CiM-GUI-Worker.ps1'
+$worker = Get-Content -LiteralPath $workerScript -Raw
+foreach ($needle in @('Kinds to build', 'installer EXE missing after build', 'CiM.staging means export did not promote', 'Resolve-CiMDistributionDbSource', 'DbSource', 'Write-Error -Message')) {
+    if ($worker -notmatch [regex]::Escape($needle)) {
+        Write-Host "FAIL Worker missing $needle" -ForegroundColor Red
+        $fail++
+    } else {
+        Write-Host "OK   Worker has $needle" -ForegroundColor Green
+    }
+}
+
+$exportScript = Join-Path $PSScriptRoot '..\export_cim.ps1'
+$export = Get-Content -LiteralPath $exportScript -Raw
+# Regression: bare `Test-Path ... -or $DbSource` is parsed as Test-Path -or (breaks Full Build → CiM.staging only).
+if ($export -match 'Test-Path -LiteralPath \(Join-Path \$SourceRoot "data\\nse_data\.db"\) -or') {
+    Write-Host 'FAIL export_cim.ps1 still has bare Test-Path ... -or (PowerShell -or parameter bug)' -ForegroundColor Red
+    $fail++
+} elseif ($export -match '\(\(Test-Path -LiteralPath \(Join-Path \$SourceRoot "data\\nse_data\.db"\)\) -or') {
+    Write-Host 'OK   export_cim.ps1 DB gate uses parenthesized -or' -ForegroundColor Green
+} else {
+    Write-Host 'FAIL export_cim.ps1 DB snapshot gate pattern not found' -ForegroundColor Red
+    $fail++
+}
+$workerParse = $null
+$null = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Resolve-Path -LiteralPath $workerScript).Path,
+    [ref]$null,
+    [ref]$workerParse
+)
+if ($workerParse -and $workerParse.Count -gt 0) {
+    Write-Host "FAIL Worker parse errors: $($workerParse.Count)" -ForegroundColor Red
+    $fail++
+} else {
+    Write-Host 'OK   Worker script parses' -ForegroundColor Green
+}
+
 $updateScript = Join-Path $PSScriptRoot 'Build-CiM-UpdateOnly.ps1'
 $content = Get-Content -LiteralPath $updateScript -Raw
 if ($content -notmatch 'function Log') { Write-Host 'FAIL UpdateOnly missing Log function' -ForegroundColor Red; $fail++ }

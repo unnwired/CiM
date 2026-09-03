@@ -36,6 +36,65 @@ class TestIsDualBeatReportRow(unittest.TestCase):
             )
         )
 
+    def test_partial_beat_revenue_only_when_eps_actual_present(self):
+        # GMDC-style: no EPS estimate, revenue beat, reported EPS exists.
+        self.assertTrue(
+            is_dual_beat_report_row(
+                {
+                    "eps_surprise_pct": None,
+                    "revenue_surprise_pct": 3.5,
+                    "eps_actual": 1.2,
+                    "revenue_actual": 500,
+                }
+            )
+        )
+
+    def test_partial_beat_eps_only_when_revenue_actual_present(self):
+        self.assertTrue(
+            is_dual_beat_report_row(
+                {
+                    "eps_surprise_pct": 2.0,
+                    "revenue_surprise_pct": None,
+                    "eps_actual": 10,
+                    "revenue_actual": 100,
+                }
+            )
+        )
+
+    def test_partial_beat_rejects_missing_sibling_actual(self):
+        self.assertFalse(
+            is_dual_beat_report_row(
+                {
+                    "eps_surprise_pct": None,
+                    "revenue_surprise_pct": 3.5,
+                    "eps_actual": None,
+                    "revenue_actual": 500,
+                }
+            )
+        )
+        self.assertFalse(
+            is_dual_beat_report_row(
+                {
+                    "eps_surprise_pct": 2.0,
+                    "revenue_surprise_pct": None,
+                    "eps_actual": 10,
+                    "revenue_actual": None,
+                }
+            )
+        )
+
+    def test_partial_beat_rejects_negative_measurable_surprise(self):
+        self.assertFalse(
+            is_dual_beat_report_row(
+                {
+                    "eps_surprise_pct": None,
+                    "revenue_surprise_pct": -1.0,
+                    "eps_actual": 1.2,
+                    "revenue_actual": 500,
+                }
+            )
+        )
+
 
 class TestLatestReportedRowBySymbol(unittest.TestCase):
     def test_keeps_newest_date(self):

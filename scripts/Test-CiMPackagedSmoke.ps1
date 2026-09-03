@@ -45,12 +45,12 @@ function Ensure-TestLicense {
     $repoRoot = Split-Path -Parent $ScriptDir
     $secret = Get-CiMVendorSecret -RepoRoot $repoRoot
     if (-not $secret) { throw "Missing config\.build_license_secret for smoke test license" }
-    $repoEsc = $repoRoot.Replace("'", "''")
+    $packagesEsc = (Join-Path $repoRoot "packages").Replace("'", "''")
     $rootEsc = $Root.Replace("'", "''")
     $secretEsc = $secret.Replace("'", "''")
     & $py -s -c @"
 import sys
-sys.path.insert(0, r'$repoEsc')
+sys.path.insert(0, r'$packagesEsc')
 from pathlib import Path
 from server.app_code_crypto import current_machine_code, install_key_for_machine, validate_install_key
 root = Path(r'$rootEsc')
@@ -103,21 +103,28 @@ function Invoke-OnlineSmokeActivation {
     param([string]$Root, [int]$ListenPort)
     $testEmail = "cim-smoke-{0}@example.com" -f ([Guid]::NewGuid().ToString("N").Substring(0, 10))
     $testPassword = "CiM-Smoke-Password-123!"
+    # Keep auth cookies across signup/login/status (browser session cookie).
+    $web = New-Object Microsoft.PowerShell.Commands.WebRequestSession
     Write-Host "Online-only smoke: signup $testEmail"
     Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:$ListenPort/api/auth/signup" `
+        -WebSession $web `
         -ContentType "application/json" `
         -Body (@{ email = $testEmail; password = $testPassword } | ConvertTo-Json) | Out-Null
-    $before = Invoke-RestMethod -Uri "http://127.0.0.1:$ListenPort/api/license/status" -TimeoutSec 15
+    $before = Invoke-RestMethod -Uri "http://127.0.0.1:$ListenPort/api/license/status" `
+        -WebSession $web -TimeoutSec 15
     if ($before.valid) {
         throw "License must stay invalid after signup until sign-in (mode=$($before.mode))"
     }
     Write-Host "Online-only smoke: login $testEmail"
     Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:$ListenPort/api/auth/login" `
+        -WebSession $web `
         -ContentType "application/json" `
         -Body (@{ email = $testEmail; password = $testPassword } | ConvertTo-Json) | Out-Null
-    $st = Invoke-RestMethod -Uri "http://127.0.0.1:$ListenPort/api/license/status" -TimeoutSec 15
+    $st = Invoke-RestMethod -Uri "http://127.0.0.1:$ListenPort/api/license/status" `
+        -WebSession $web -TimeoutSec 15
     if (-not $st.valid) { throw "Online activation failed after login (mode=$($st.mode))" }
-    Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:$ListenPort/api/auth/complete" -TimeoutSec 15 | Out-Null
+    Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:$ListenPort/api/auth/complete" `
+        -WebSession $web -TimeoutSec 15 | Out-Null
 }
 
 $root = (Resolve-Path -LiteralPath $InstallRoot).Path

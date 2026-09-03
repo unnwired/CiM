@@ -15,6 +15,11 @@ export function useRegisterIntradaySymbols(pageId, symbols) {
   useEffect(() => {
     if (!pageId) return undefined;
     setPageIntradaySymbols(pageId, symKey ? symKey.split(',') : []);
+    try {
+      window.dispatchEvent(new CustomEvent('cim:page-symbols-changed', {
+        detail: { pageId, count: symKey ? symKey.split(',').length : 0 },
+      }));
+    } catch { /* ignore */ }
     return () => clearPageIntradaySymbols(pageId);
   }, [pageId, symKey]);
 }

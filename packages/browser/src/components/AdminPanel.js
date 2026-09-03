@@ -276,7 +276,7 @@ export default function AdminPanel({
                 <div style={descStyle}>
                   Appends missing daily candles for all stocks and indices, then updates live prices,
                   <strong>market cap</strong> from <strong>Screener.in</strong> company pages when the HTML parse succeeds (optional <code style={{ fontSize: 11 }}>data/screener_session.json</code> cookies), otherwise from the NSE quote,
-                  PE and recalculates all change % values. Run daily after market close (3:30 PM IST).
+                  PE and recalculates all change % values. Mid-session: skips full-universe 4H/30m (live 4H overlay); after 15:30 IST builds 4H and 30m when needed. Market data: Upstox only.
                 </div>
                 <button onClick={handleFetchAll} disabled={isRunning} style={{ ...btnBase, backgroundColor: isRunning ? 'var(--bg-active)' : '#6e40c9' }}>
                   {isRunning && status?.job === 'ohlcv' ? 'Updating...' : 'Fetch Latest Chart + Price Data'}
@@ -395,16 +395,40 @@ export default function AdminPanel({
                       checked={mapping.use_exchange_labels !== false}
                       onChange={e => setUseExchangeLabels(e.target.checked)}
                     />
-                    Use exchange industry as <strong>Market Sector</strong> when rules do not match (recommended after sync)
+                    Use exchange / Screener industry to expand Market Sector tags beyond index constituents (recommended)
                   </label>
                 </div>
               </div>
 
               <div style={sectionStyle}>
-                <div style={labelStyle}>Raw screener labels (feeds rule matching)</div>
+                <div style={labelStyle}>Index sector cores</div>
                 <div style={descStyle}>
-                  Set optional <strong>NSE sector</strong> and <strong>NSE industry</strong> text per symbol, or use sync above.
-                  Rules below match against these fields; overrides win over rules.
+                  Each Market Sector tag = Nifty index constituents ∪ industry matches. Refresh pulls NSE constituent lists for Auto, IT, Banks, Defence, etc.
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      setMapMsg('Refreshing index sector cores…');
+                      const r = await axios.post(`${API}/api/sector-index-cores/refresh`);
+                      const counts = r.data?.counts || {};
+                      const n = Object.values(counts).reduce((a, b) => a + (Number(b) || 0), 0);
+                      setMapMsg(`Index cores refreshed (${n} symbol links). Hard-refresh Dashboard if filters look stale.`);
+                    } catch (e) {
+                      setMapMsg(e.response?.data?.detail || e.message);
+                    }
+                  }}
+                  style={{ ...btnBase, backgroundColor: '#1f6feb', height: 34 }}
+                >
+                  Refresh index sector cores
+                </button>
+              </div>
+
+              <div style={sectionStyle}>
+                <div style={labelStyle}>Raw screener labels (feeds industry expansion)</div>
+                <div style={descStyle}>
+                  Optional <strong>NSE sector</strong> / <strong>NSE industry</strong> text per symbol (or use sync above).
+                  Industry keywords expand tags; symbol overrides add a tag; index cores add index members.
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: 8, alignItems: 'end' }}>
                   <div>

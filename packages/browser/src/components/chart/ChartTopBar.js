@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
+import BasketToolbarButton from '../Basket';
 import { fetchStockDetail, searchStocks } from '../../api/client';
 import EMAControls from './EMAControls';
-import DrawingToolsDesignControl from './drawing/DrawingToolsDesignControl';
 import ExternalFinancialsLinks from '../ExternalFinancialsLinks';
+import { useWheelHorizontalScroll } from '../../hooks/useWheelHorizontalScroll';
 
 const INDICATOR_OPTIONS = [
   { key: 'stochrsi', label: 'StochRSI' },
@@ -29,6 +30,8 @@ export default function ChartTopBar({
   const indBtnRef                     = useRef(null);
   const indMenuRef                    = useRef(null);
   const debounceRef                   = useRef(null);
+  const toolbarScrollRef              = useRef(null);
+  useWheelHorizontalScroll(toolbarScrollRef);
 
   useEffect(() => {
     if (!symbol) return;
@@ -83,7 +86,7 @@ export default function ChartTopBar({
     : change >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
 
   return (
-    <div className="chart-app-toolbar" style={{
+    <div ref={toolbarScrollRef} className="chart-app-toolbar" style={{
       height:          52,
       minHeight:       52,
       backgroundColor: 'var(--bg-secondary)',
@@ -209,7 +212,7 @@ export default function ChartTopBar({
 
       <div style={{ flex: 1, minWidth: 8 }} />
 
-      <DrawingToolsDesignControl />
+      <BasketToolbarButton />
 
       {/* Indicators dropdown */}
       <div style={{ position: 'relative', flexShrink: 0 }}>

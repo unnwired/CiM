@@ -1,5 +1,7 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
+import BasketToolbarButton from '../components/Basket';
+import { startBasketSymbolDrag } from '../utils/basketDnD';
 import axios from 'axios';
 import ChartContainer        from '../components/chart/ChartContainer';
 import ChartHeaderBar        from '../components/chart/ChartHeaderBar';
@@ -13,15 +15,17 @@ import StochRSIFilterBuilder from '../components/StochRSIFilterBuilder';
 import PriceFilterBuilder    from '../components/PriceFilterBuilder';
 import MarketCapFilterBuilder from '../components/MarketCapFilterBuilder';
 import EarningsFilterBuilder from '../components/EarningsFilterBuilder';
+import AnnualVsTtmFilterBuilder, { buildAnnualVsTtmFilterLabel } from '../components/AnnualVsTtmFilterBuilder';
+import ScreenerFilterBuilder, { buildScreenerFilterLabel } from '../components/ScreenerFilterBuilder';
 import EMAControls           from '../components/chart/EMAControls';
 import IndexTopBar           from '../components/chart/IndexTopBar';
 import IndexChartContainer   from '../components/chart/IndexChartContainer';
 import DashboardFilterChip from '../components/DashboardFilterChip';
-import DrawingToolsDesignControl from '../components/chart/drawing/DrawingToolsDesignControl';
 import { DrawingMirrorProvider } from '../components/chart/drawing/DrawingMirrorContext';
 import { DrawingWorkspaceProvider } from '../components/chart/drawing/DrawingWorkspaceContext';
 import { DrawingToolbarConnected, DrawingFloatPaletteConnected } from '../components/chart/drawing/DrawingToolbar';
 import { searchUniverse, addPortfolioItem } from '../api/client';
+import { isTypingContext, typingFieldKeyProps } from '../utils/isTypingTarget';
 import { formatMarketCap, formatCompactCount } from '../utils/formatMarketCap';
 import {
   DEFAULT_CHART_LAYOUT,
@@ -62,6 +66,7 @@ import { useIndicatorPanelAutoSave } from '../chartPrefs/useIndicatorPanelAutoSa
 import { usePatchOverlay } from '../intraday/usePatchOverlay';
 import { symbolsForChartFocus } from '../intraday/intradayRefreshScopes';
 import { useRegisterFocusedSymbol } from '../intraday/useRegisterFocusedSymbol';
+import { useRegisterIntradaySymbols } from '../intraday/useRegisterIntradaySymbols';
 import { isIntradayLiveTimeframe } from '../intraday/patchOverlay';
 import { usePageLive } from '../intraday/pageLiveContext';
 import { useSyncedPanelHeights, columnCountForChartLayout, multiColumnHeightProps } from '../hooks/useSyncedPanelHeights';
@@ -70,10 +75,10 @@ import { setListDragImage, DropInsetLine, DropInsetLineVertical } from '../utils
 import {
   STOCK_LIST_ROW_HEIGHT,
   stockListHeaderStripStyle,
-  stockListFooterStripStyle,
   stockListGridTrackStyle,
   stockListRowSelectShadow,
 } from '../components/stockTableChrome';
+import StockListSplitBody from '../components/StockListSplitBody';
 import StockListColumnHeader from '../components/StockListColumnHeader';
 import StockListGridCell from '../components/StockListGridCell';
 import { useStockListColumnWidths } from '../hooks/useStockListColumnWidths';
@@ -84,11 +89,11 @@ import {
 } from '../layout/listOrderPersistence';
 import ExternalFinancialsLinks from '../components/ExternalFinancialsLinks';
 import PortfolioEarningsModal from '../components/PortfolioEarningsModal';
+import EarningsPlusInlineMark from '../components/EarningsPlusInlineMark';
 import {
   buildDualBeatEarningsMap,
   buildUpcomingEarningsMap,
   PORTFOLIO_EARNINGS_WINDOW_DAYS,
-  DUAL_BEAT_WINDOW_DAYS,
   EARNINGS_PRIORITY_DEFAULT_DIR,
   formatEarningsBadgeDate,
   PORTFOLIO_EARNINGS_BORDER,
@@ -159,6 +164,8 @@ const FILTER_MENU_ITEMS = [
   { key: 'price',     label: 'Price'      },
   { key: 'marketcap', label: 'Market Cap' },
   { key: 'earnings',  label: 'Earnings'   },
+  { key: 'annual_vs_ttm', label: 'Annual vs TTM' },
+  { key: 'screener', label: 'Screener' },
 ];
 
 const MONTH_NAMES = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -223,9 +230,30 @@ function buildFilterLabel(f) {
   }
   if (f.filter_type === 'earnings') {
     const parts = ['Earnings'];
-    const rw = f.report_window || 'month_range';
-    if (rw === 'this_week') parts.push('This week');
-    else if (rw === 'prev_week') parts.push('Prev week');
+    const scope = f.earnings_scope || 'reported';
+    if (scope === 'upcoming') parts.push('Upcoming');
+    else if (scope === 'both') parts.push('Reported + upcoming');
+    const rwRaw = String(f.report_window || 'month_range').trim().toLowerCase();
+    const rw = (
+      rwRaw === 'today' || rwRaw === 'today_yesterday' || rwRaw === 'today_and_yesterday'
+        ? 'current_trading_day'
+        : rwRaw === 'yesterday'
+          ? 'previous_day'
+          : rwRaw === 'previous_week'
+            ? 'prev_week'
+            : rwRaw
+    );
+    const windowLabels = {
+      current_trading_day: 'Current trading day',
+      previous_day: 'Previous day',
+      previous_5_days: 'Previous 5 days',
+      next_day: 'Next day',
+      next_5_days: 'Next 5 days',
+      this_week: 'This week',
+      prev_week: 'Prev week',
+      next_week: 'Next week',
+    };
+    if (windowLabels[rw]) parts.push(windowLabels[rw]);
     else {
       const fm = MONTH_NAMES[f.from_month] || f.from_month;
       const tm = MONTH_NAMES[f.to_month] || f.to_month;
@@ -238,6 +266,12 @@ function buildFilterLabel(f) {
     if (f.revenue_surprise_max != null && f.revenue_surprise_max !== '') bounds.push(`Rev ≤ ${f.revenue_surprise_max}%`);
     if (bounds.length) parts.push(bounds.join(', '));
     return parts.join(' · ');
+  }
+  if (f.filter_type === 'annual_vs_ttm') {
+    return buildAnnualVsTtmFilterLabel(f);
+  }
+  if (f.filter_type === 'screener') {
+    return buildScreenerFilterLabel(f);
   }
   // EMA
   const cond = { above:'>',above_eq:'≥',below:'<',below_eq:'≤',crosses_up:'↑✕',crosses_down:'↓✕',above_pct:`>${f.pct_value}%`,below_pct:`<${f.pct_value}%` }[f.condition] || '>';
@@ -274,7 +308,7 @@ export default function DashboardPage({
   const chartPrefs = useChartPrefsContext();
   const intradayPageId = pageMode === 'portfolio' ? 'portfolio-dashboard' : 'dashboard';
   const { liveActive, liveTick } = usePageLive(intradayPageId);
-  const { overlayStockRows, refreshTick: patchRefreshTick } = usePatchOverlay(intradayPageId);
+  const { overlayStockRows, refreshTick: patchRefreshTick, getSnapshot } = usePatchOverlay(intradayPageId);
   const [lastCandleChange, setLastCandleChange] = useState(null);
   const [lastCandlePrice,  setLastCandlePrice]  = useState(null);
 
@@ -320,6 +354,8 @@ export default function DashboardPage({
   const [priceFilterOpen,      setPriceFilterOpen]      = useState(false);
   const [marketcapFilterOpen,  setMarketcapFilterOpen]  = useState(false);
   const [earningsFilterOpen,   setEarningsFilterOpen]   = useState(false);
+  const [annualVsTtmFilterOpen, setAnnualVsTtmFilterOpen] = useState(false);
+  const [screenerFilterOpen, setScreenerFilterOpen] = useState(false);
 
   // Presets
   const [presets,         setPresets]         = useState([]);
@@ -369,6 +405,7 @@ export default function DashboardPage({
   const [chartResizeDrag, setChartResizeDrag] = useState(false);
   useEffect(() => subscribeChartPanelResizeDrag(setChartResizeDrag), []);
   const rowRefs                     = useRef({});
+  const scrolledSelectedRef         = useRef(null);
   const pfDragIdxRef                = useRef(null);
   const pfDropGapRef                = useRef(null);
   const [pfDropGap, setPfDropGap]   = useState(null);
@@ -391,19 +428,29 @@ export default function DashboardPage({
   /** Portfolio-only: upcoming earnings within rolling 30 days (stocks only). */
   const [portfolioEarningsBySymbol, setPortfolioEarningsBySymbol] = useState(() => new Map());
   const [portfolioBeatBySymbol, setPortfolioBeatBySymbol] = useState(() => new Map());
+  /** Portfolio-only: Earnings+ qualified symbols (gold E+ beside symbol name). */
+  const [portfolioPlusSymbols, setPortfolioPlusSymbols] = useState(() => new Set());
   const [portfolioEarningsModal, setPortfolioEarningsModal] = useState(null);
   const [portfolioEarningsPriorityEnabled, setPortfolioEarningsPriorityEnabled] = useState(true);
   const [portfolioEarningsPriorityDir, setPortfolioEarningsPriorityDir] = useState(EARNINGS_PRIORITY_DEFAULT_DIR);
+  const [portfolioNotifyEnabled, setPortfolioNotifyEnabled] = useState(false);
+  const [portfolioNotifyPct, setPortfolioNotifyPct] = useState('3');
+  const [portfolioNotifyBusy, setPortfolioNotifyBusy] = useState(false);
 
-  const portfolioStockSymbols = useMemo(() => {
-    if (pageMode !== 'portfolio') return new Set();
-    return new Set(
-      stocks
-        .filter(s => s.instrumentType !== 'index')
-        .map(s => String(s.Symbol || '').trim().toUpperCase())
-        .filter(Boolean),
-    );
+  const portfolioStockSymbolsKey = useMemo(() => {
+    if (pageMode !== 'portfolio') return '';
+    return stocks
+      .filter((s) => s.instrumentType !== 'index')
+      .map((s) => String(s.Symbol || '').trim().toUpperCase())
+      .filter(Boolean)
+      .sort()
+      .join(',');
   }, [pageMode, stocks]);
+
+  const portfolioStockSymbols = useMemo(
+    () => new Set(portfolioStockSymbolsKey ? portfolioStockSymbolsKey.split(',') : []),
+    [portfolioStockSymbolsKey],
+  );
 
   const portfolioEarningsCount = useMemo(() => {
     if (pageMode !== 'portfolio') return 0;
@@ -418,19 +465,6 @@ export default function DashboardPage({
     return n;
   }, [pageMode, portfolioEarningsBySymbol, portfolioBeatBySymbol]);
 
-  const portfolioBeatCount = useMemo(() => {
-    if (pageMode !== 'portfolio') return 0;
-    let n = 0;
-    for (const sym of portfolioBeatBySymbol.keys()) {
-      const highlight = resolveEarningsRowHighlight(
-        portfolioBeatBySymbol.get(sym),
-        portfolioEarningsBySymbol.get(sym),
-      );
-      if (highlight.kind === 'beat') n += 1;
-    }
-    return n;
-  }, [pageMode, portfolioEarningsBySymbol, portfolioBeatBySymbol]);
-
   useEffect(() => {
     if (pageMode !== 'portfolio') return;
     setPortfolioEarningsPriorityEnabled(true);
@@ -441,17 +475,19 @@ export default function DashboardPage({
     if (pageMode !== 'portfolio') {
       setPortfolioEarningsBySymbol(new Map());
       setPortfolioBeatBySymbol(new Map());
+      setPortfolioPlusSymbols(new Set());
       setPortfolioEarningsModal(null);
       return undefined;
     }
-    if (portfolioStockSymbols.size === 0) {
+    if (!portfolioStockSymbolsKey) {
       setPortfolioEarningsBySymbol(new Map());
       setPortfolioBeatBySymbol(new Map());
+      setPortfolioPlusSymbols(new Set());
       return undefined;
     }
     let cancelled = false;
     (async () => {
-      const [upcomingSettled, beatSettled] = await Promise.allSettled([
+      const [upcomingSettled, beatSettled, plusSettled] = await Promise.allSettled([
         axios.get(`${API}/api/earnings-beats`, {
           params: { mode: 'upcoming', period: 'rolling_30_days', limit: 2000 },
         }),
@@ -460,8 +496,11 @@ export default function DashboardPage({
             mode: 'reported',
             report_window: 'rolling_10_days',
             limit: 2000,
-            symbols: [...portfolioStockSymbols].join(','),
+            symbols: portfolioStockSymbolsKey,
           },
+        }),
+        axios.get(`${API}/api/earnings-plus-flags`, {
+          params: { symbols: portfolioStockSymbolsKey },
         }),
       ]);
       if (cancelled) return;
@@ -483,9 +522,14 @@ export default function DashboardPage({
       } else {
         setPortfolioBeatBySymbol(new Map());
       }
+      if (plusSettled.status === 'fulfilled') {
+        setPortfolioPlusSymbols(new Set(plusSettled.value.data?.qualified || []));
+      } else {
+        setPortfolioPlusSymbols(new Set());
+      }
     })();
     return () => { cancelled = true; };
-  }, [pageMode, portfolioStockSymbols]);
+  }, [pageMode, portfolioStockSymbolsKey, portfolioStockSymbols]);
 
   const updateChipsScrollEdges = useCallback(() => {
     const el = chipsRailRef.current;
@@ -1191,14 +1235,50 @@ export default function DashboardPage({
     intradayPageId,
     useMemo(() => symbolsForChartFocus(selectedSymbol), [selectedSymbol]),
   );
+  useRegisterIntradaySymbols(
+    intradayPageId,
+    useMemo(() => {
+      if (pageMode === 'portfolio') {
+        return stocks
+          .filter((s) => s.instrumentType !== 'index')
+          .map((s) => s.Symbol)
+          .filter(Boolean);
+      }
+      // Pulse/screener list: subscribe live quotes for every visible row (not chart focus only).
+      return displayStocks.map((s) => s.Symbol).filter(Boolean).slice(0, 750);
+    }, [pageMode, stocks, displayStocks]),
+  );
+
+  useEffect(() => {
+    const sym = String(selectedSymbol || '').trim().toUpperCase();
+    if (!sym || typeof window === 'undefined') return undefined;
+    window.dispatchEvent(new CustomEvent('cim:chart-focus-symbol', {
+      detail: { symbol: sym, source: pageMode === 'portfolio' ? 'portfolio' : 'dashboard' },
+    }));
+    return undefined;
+  }, [selectedSymbol, pageMode]);
 
   const selectedStock = liveDisplayStocks.find((s) => s.Symbol === selectedSymbol)
     || stocks.find((s) => s.Symbol === selectedSymbol);
+  const focusSnap = selectedSymbol ? getSnapshot(selectedSymbol) : null;
+  const headerPrice = (() => {
+    const fromSnap = focusSnap?.price;
+    if (fromSnap != null && Number.isFinite(Number(fromSnap))) return Number(fromSnap);
+    if (lastCandlePrice != null && Number.isFinite(Number(lastCandlePrice))) return Number(lastCandlePrice);
+    const rowPx = selectedStock?.Price ?? selectedStock?.last_price;
+    return rowPx != null && Number.isFinite(Number(rowPx)) ? Number(rowPx) : null;
+  })();
+  const headerChange = (() => {
+    const fromRow = selectedStock?.['Change %'];
+    if (fromRow != null && Number.isFinite(Number(fromRow))) return Number(fromRow);
+    return lastCandleChange;
+  })();
 
   useEffect(() => {
     function handleKey(e) {
       if (!['ArrowUp','ArrowDown'].includes(e.key)) return;
       if (indOpen || sectorOpen) return;
+      if (isTypingContext(e)) return;
       e.preventDefault();
       setSelectedSymbol(sym => {
         const idx  = displayStocks.findIndex(s => s.Symbol === sym);
@@ -1239,6 +1319,34 @@ export default function DashboardPage({
     }
     if (sortBy === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
     else { setSortBy(col); setSortDir(col === 'Symbol' ? 'asc' : 'desc'); }
+  }
+
+  useEffect(() => {
+    if (pageMode !== 'portfolio') return undefined;
+    let cancelled = false;
+    axios.get(`${API}/api/alert-settings`)
+      .then((r) => {
+        if (cancelled) return;
+        setPortfolioNotifyEnabled(!!r.data?.portfolio_notifications_enabled);
+        const pct = Number(r.data?.portfolio_day_move_pct);
+        if (Number.isFinite(pct)) setPortfolioNotifyPct(String(pct));
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [pageMode]);
+
+  async function patchPortfolioNotify(patch) {
+    setPortfolioNotifyBusy(true);
+    try {
+      const r = await axios.put(`${API}/api/alert-settings`, patch);
+      setPortfolioNotifyEnabled(!!r.data?.portfolio_notifications_enabled);
+      const pct = Number(r.data?.portfolio_day_move_pct);
+      if (Number.isFinite(pct)) setPortfolioNotifyPct(String(pct));
+    } catch (e) {
+      alert(e.response?.data?.detail || e.message || 'Failed to save portfolio notifications');
+    } finally {
+      setPortfolioNotifyBusy(false);
+    }
   }
 
   function handlePortfolioEarningsPriorityControlClick() {
@@ -1382,6 +1490,8 @@ export default function DashboardPage({
     else if (f.filter_type === 'price')     setPriceFilterOpen(true);
     else if (f.filter_type === 'marketcap') setMarketcapFilterOpen(true);
     else if (f.filter_type === 'earnings') setEarningsFilterOpen(true);
+    else if (f.filter_type === 'annual_vs_ttm') setAnnualVsTtmFilterOpen(true);
+    else if (f.filter_type === 'screener') setScreenerFilterOpen(true);
     else setEmaFilterOpen(true);
   }
 
@@ -1395,6 +1505,8 @@ export default function DashboardPage({
     setPriceFilterOpen(false);
     setMarketcapFilterOpen(false);
     setEarningsFilterOpen(false);
+    setAnnualVsTtmFilterOpen(false);
+    setScreenerFilterOpen(false);
     setEditingIdx(null);
   }
 
@@ -1441,7 +1553,13 @@ export default function DashboardPage({
     if (!selectedSymbol || displayStocks.length === 0) return;
     const idx = displayStocks.findIndex(s => s.Symbol === selectedSymbol);
     if (idx < 0) return;
-    rowRefs.current[idx]?.scrollIntoView({ block: 'nearest' });
+    const el = rowRefs.current[idx];
+    if (!el) return;
+    // Only scroll when the selection changes — not on every live list refresh
+    // (otherwise browsing the list fights scrollIntoView back to the chart row).
+    if (scrolledSelectedRef.current === selectedSymbol) return;
+    scrolledSelectedRef.current = selectedSymbol;
+    el.scrollIntoView({ block: 'nearest' });
   }, [displayStocks, selectedSymbol]);
 
   function handleRowSelect(stock, idx, e) {
@@ -1585,14 +1703,14 @@ export default function DashboardPage({
                 ? (selectedStock?.indexName || selectedSymbol)
                 : selectedSymbol}
             </span>
-            {(lastCandlePrice != null || selectedStock?.Price != null) && (
+            {(headerPrice != null) && (
               <span style={{ fontFamily:'var(--font-mono)', fontSize:13, color:'var(--text-primary)', flexShrink:0 }}>
-                ₹{(lastCandlePrice ?? selectedStock?.Price)?.toLocaleString('en-IN', { minimumFractionDigits:2 })}
+                ₹{headerPrice.toLocaleString('en-IN', { minimumFractionDigits:2 })}
               </span>
             )}
-            {lastCandleChange !== null && (
-              <span style={{ fontFamily:'var(--font-mono)', fontSize:11, fontWeight:600, flexShrink:0, color: lastCandleChange>=0?'var(--accent-green)':'var(--accent-red)', backgroundColor: lastCandleChange>=0?'rgba(63,185,80,0.12)':'rgba(248,81,73,0.12)', border:`1px solid ${lastCandleChange>=0?'#3fb95044':'#f8514944'}`, borderRadius:4, padding:'1px 6px' }}>
-                {lastCandleChange>=0?'+':''}{lastCandleChange.toFixed(2)}%
+            {headerChange !== null && Number.isFinite(headerChange) && (
+              <span style={{ fontFamily:'var(--font-mono)', fontSize:11, fontWeight:600, flexShrink:0, color: headerChange>=0?'var(--accent-green)':'var(--accent-red)', backgroundColor: headerChange>=0?'rgba(63,185,80,0.12)':'rgba(248,81,73,0.12)', border:`1px solid ${headerChange>=0?'#3fb95044':'#f8514944'}`, borderRadius:4, padding:'1px 6px' }}>
+                {headerChange>=0?'+':''}{headerChange.toFixed(2)}%
               </span>
             )}
             <div style={{ width:1, height:20, backgroundColor:'var(--border)', flexShrink:0 }} />
@@ -1659,7 +1777,7 @@ export default function DashboardPage({
 
         <div style={{ flex:1, minWidth:8 }} />
 
-        <DrawingToolsDesignControl />
+        <BasketToolbarButton />
 
         {/* Indicators — menu is position:fixed so it is not clipped by toolbar overflow-x:auto */}
         <div ref={indRef} style={{ position:'relative', flexShrink:0 }}>
@@ -1960,6 +2078,8 @@ export default function DashboardPage({
                       if (f.key === 'price')     setPriceFilterOpen(true);
                       if (f.key === 'marketcap') setMarketcapFilterOpen(true);
                       if (f.key === 'earnings') setEarningsFilterOpen(true);
+                      if (f.key === 'annual_vs_ttm') setAnnualVsTtmFilterOpen(true);
+                      if (f.key === 'screener') setScreenerFilterOpen(true);
                     }}
                     style={{ padding:'9px 14px', cursor:'pointer', fontSize:13, color:'var(--text-primary)', display:'flex', alignItems:'center' }}
                     onMouseEnter={e => e.currentTarget.style.backgroundColor='var(--bg-hover)'}
@@ -2224,7 +2344,109 @@ export default function DashboardPage({
       </div>
 
       {/* ── Body ── */}
-      <div ref={wrapperRef} style={{ flex:1, display:'flex', overflow:'hidden', position:'relative', zIndex:0 }}>
+      <StockListSplitBody
+        splitRef={wrapperRef}
+        splitStyle={{ position: 'relative', zIndex: 0 }}
+        footer={(
+          <>
+            {displayTotal} {pageMode === 'portfolio' ? 'rows' : 'stocks'}
+            {pageMode === 'portfolio' && (
+              <span
+                data-cim-no-typeahead="1"
+                style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}
+              >
+                <button
+                  type="button"
+                  disabled={portfolioNotifyBusy}
+                  onClick={() => {
+                    const v = Number(portfolioNotifyPct);
+                    patchPortfolioNotify({
+                      portfolio_notifications_enabled: !portfolioNotifyEnabled,
+                      portfolio_day_move_pct: Number.isFinite(v) ? v : 3,
+                    });
+                  }}
+                  title={portfolioNotifyEnabled
+                    ? 'Portfolio notifications ON — day moves and results reported today (Portfolio Update)'
+                    : 'Turn on for day-move alerts and portfolio earnings Telegram updates'}
+                  style={{
+                    padding: '0 6px', height: 20, borderRadius: 4, cursor: portfolioNotifyBusy ? 'default' : 'pointer',
+                    border: `1px solid ${portfolioNotifyEnabled ? 'var(--accent-blue)' : 'var(--border)'}`,
+                    background: portfolioNotifyEnabled ? 'rgba(56,139,253,0.12)' : 'var(--bg-tertiary)',
+                    color: portfolioNotifyEnabled ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                    fontSize: 11, font: 'inherit',
+                  }}
+                >
+                  {portfolioNotifyEnabled ? '🔔 Notifications ON' : 'Notifications OFF'}
+                </button>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--text-secondary)', fontSize: 11 }}>
+                  +1D ≥
+                  <input
+                    type="number"
+                    min={0.5}
+                    max={50}
+                    step={0.5}
+                    autoComplete="off"
+                    disabled={portfolioNotifyBusy}
+                    value={portfolioNotifyPct}
+                    onChange={(e) => setPortfolioNotifyPct(e.target.value)}
+                    {...typingFieldKeyProps()}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    onBlur={() => {
+                      const v = Number(portfolioNotifyPct);
+                      if (!Number.isFinite(v)) {
+                        setPortfolioNotifyPct('3');
+                        return;
+                      }
+                      patchPortfolioNotify({
+                        portfolio_notifications_enabled: portfolioNotifyEnabled,
+                        portfolio_day_move_pct: v,
+                      });
+                    }}
+                    style={{
+                      width: 56, height: 20, fontSize: 11, padding: '0 4px', borderRadius: 4,
+                      border: '1px solid var(--border)', background: 'var(--bg-tertiary)', color: 'var(--text-primary)',
+                    }}
+                  />
+                  %
+                </label>
+              </span>
+            )}
+            {pageMode === 'portfolio' && (
+              <button
+                type="button"
+                onClick={handlePortfolioEarningsPriorityControlClick}
+                aria-pressed={portfolioEarningsPriorityEnabled}
+                aria-label={`Earnings priority sort ${portfolioEarningsPriorityEnabled ? 'enabled' : 'disabled'}, ${portfolioEarningsPriorityDir === 'asc' ? 'nearest dates first' : 'furthest dates first'}`}
+                title={portfolioEarningsPriorityEnabled
+                  ? 'Toggle earnings-priority date direction'
+                  : 'Re-enable earnings-priority sorting'}
+                style={{
+                  marginLeft: 8,
+                  padding: 0,
+                  border: 'none',
+                  background: 'none',
+                  color: portfolioEarningsPriorityEnabled ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                  cursor: 'pointer',
+                  font: 'inherit',
+                }}
+              >
+                · Earnings priority {portfolioEarningsPriorityDir === 'asc' ? '▲' : '▼'}
+              </button>
+            )}
+            {pageMode === 'portfolio' && portfolioEarningsCount > 0 && (
+              <span style={{ marginLeft: 8, color: PORTFOLIO_EARNINGS_LABEL_COLOR }}>
+                · {portfolioEarningsCount} reporting in {PORTFOLIO_EARNINGS_WINDOW_DAYS} days
+              </span>
+            )}
+          </>
+        )}
+      >
         <div style={{ width:paneWidth, minWidth:200, flexShrink:0, display:'flex', flexDirection:'column', overflow:'hidden' }}>
           <div
             ref={headerScrollRef}
@@ -2283,6 +2505,9 @@ export default function DashboardPage({
               const upcomingInfo = rowHighlight.kind === 'upcoming' ? rowHighlight.info : null;
               const earningsHighlight = beatInfo || upcomingInfo;
               const isBeatHighlight = !!beatInfo;
+              const hasPlusBadge = pageMode === 'portfolio'
+                && stock.instrumentType !== 'index'
+                && portfolioPlusSymbols.has(stock.Symbol);
               const rowBg = isSel
                 ? 'rgba(56,139,253,0.08)'
                 : isMultiSel
@@ -2376,7 +2601,22 @@ export default function DashboardPage({
                       } : undefined}
                       title={earningsHighlight ? 'Click for quarterly results and company profile' : stock.Symbol}
                     >
-                      <span title={stock.Symbol} style={{ fontFamily:'var(--font-mono)', fontWeight:600, fontSize:11, color: symC, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', lineHeight: 1.2 }}>{symLabel}</span>
+                      <span style={{ display:'flex', alignItems:'center', gap:4, minWidth:0 }}>
+                        <span
+                          title={`${stock.Symbol} — drag to Basket`}
+                          draggable
+                          onDragStart={(e) => {
+                            e.stopPropagation();
+                            startBasketSymbolDrag(
+                              e,
+                              stock.Symbol,
+                              stock.instrumentType === 'index' ? 'index' : 'stock',
+                            );
+                          }}
+                          style={{ fontFamily:'var(--font-mono)', fontWeight:600, fontSize:11, color: symC, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', lineHeight: 1.2, cursor: 'grab' }}
+                        >{symLabel}</span>
+                        {hasPlusBadge ? <EarningsPlusInlineMark /> : null}
+                      </span>
                       {isBeatHighlight ? (
                         <span
                           style={{
@@ -2431,41 +2671,6 @@ export default function DashboardPage({
             </>
             )}
           </div>
-          <div style={stockListFooterStripStyle}>
-            {displayTotal} {pageMode === 'portfolio' ? 'rows' : 'stocks'}
-            {pageMode === 'portfolio' && (
-              <button
-                type="button"
-                onClick={handlePortfolioEarningsPriorityControlClick}
-                aria-pressed={portfolioEarningsPriorityEnabled}
-                aria-label={`Earnings priority sort ${portfolioEarningsPriorityEnabled ? 'enabled' : 'disabled'}, ${portfolioEarningsPriorityDir === 'asc' ? 'nearest dates first' : 'furthest dates first'}`}
-                title={portfolioEarningsPriorityEnabled
-                  ? 'Toggle earnings-priority date direction'
-                  : 'Re-enable earnings-priority sorting'}
-                style={{
-                  marginLeft: 8,
-                  padding: 0,
-                  border: 'none',
-                  background: 'none',
-                  color: portfolioEarningsPriorityEnabled ? 'var(--accent-blue)' : 'var(--text-secondary)',
-                  cursor: 'pointer',
-                  font: 'inherit',
-                }}
-              >
-                · Earnings priority {portfolioEarningsPriorityDir === 'asc' ? '▲' : '▼'}
-              </button>
-            )}
-            {pageMode === 'portfolio' && portfolioBeatCount > 0 && (
-              <span style={{ marginLeft: 8, color: DUAL_BEAT_LABEL_COLOR }}>
-                · {portfolioBeatCount} beat EPS+Rev ({DUAL_BEAT_WINDOW_DAYS}d)
-              </span>
-            )}
-            {pageMode === 'portfolio' && portfolioEarningsCount > 0 && (
-              <span style={{ marginLeft: 8, color: PORTFOLIO_EARNINGS_LABEL_COLOR }}>
-                · {portfolioEarningsCount} reporting in {PORTFOLIO_EARNINGS_WINDOW_DAYS} days
-              </span>
-            )}
-          </div>
         </div>
 
         <div onMouseDown={onDividerMouseDown}
@@ -2494,7 +2699,7 @@ export default function DashboardPage({
                 selectedSymbol,
                 timeframe,
                 tf => { setTimeframe(tf); setLastCandleChange(null); setLastCandlePrice(null); },
-                (pct) => { setLastCandleChange(pct); setLastCandlePrice(null); },
+                (pct, price) => { setLastCandleChange(pct); setLastCandlePrice(price ?? null); },
                 selectedSymbol + '-ip1-' + timeframe,
                 chartLayout !== 'single',
                 { symbol: selectedStock.Symbol, name: selectedStock.indexName || selectedStock.Symbol, category: selectedStock.indexCategory || 'equity' },
@@ -2504,7 +2709,7 @@ export default function DashboardPage({
                 selectedSymbol,
                 timeframe2,
                 tf => setTimeframe2(tf),
-                (pct) => setLastCandleChange(pct),
+                (pct, price) => { setLastCandleChange(pct); setLastCandlePrice(price ?? null); },
                 selectedSymbol + '-ip2-' + timeframe2,
                 chartLayout === '3h',
                 { symbol: selectedStock.Symbol, name: selectedStock.indexName || selectedStock.Symbol, category: selectedStock.indexCategory || 'equity' },
@@ -2514,7 +2719,7 @@ export default function DashboardPage({
                 selectedSymbol,
                 timeframe3,
                 tf => setTimeframe3(tf),
-                (pct) => setLastCandleChange(pct),
+                (pct, price) => { setLastCandleChange(pct); setLastCandlePrice(price ?? null); },
                 selectedSymbol + '-ip3-' + timeframe3,
                 false,
                 { symbol: selectedStock.Symbol, name: selectedStock.indexName || selectedStock.Symbol, category: selectedStock.indexCategory || 'equity' },
@@ -2531,7 +2736,7 @@ export default function DashboardPage({
         </div>
         </DrawingWorkspaceProvider>
         </DrawingMirrorProvider>
-      </div>
+      </StockListSplitBody>
 
       {/* Filter modals */}
       {emaFilterOpen       && <EMAFilterBuilder       onApply={applyFilter} onCancel={closeFilterBuilders} initialValues={editingIdx!==null?activeFilters[editingIdx]:null} />}
@@ -2543,6 +2748,8 @@ export default function DashboardPage({
       {priceFilterOpen     && <PriceFilterBuilder     onApply={applyFilter} onCancel={closeFilterBuilders} initialValues={editingIdx!==null?activeFilters[editingIdx]:null} />}
       {marketcapFilterOpen && <MarketCapFilterBuilder onApply={applyFilter} onCancel={closeFilterBuilders} initialValues={editingIdx!==null?activeFilters[editingIdx]:null} />}
       {earningsFilterOpen && <EarningsFilterBuilder onApply={applyFilter} onCancel={closeFilterBuilders} initialValues={editingIdx!==null?activeFilters[editingIdx]:null} />}
+      {annualVsTtmFilterOpen && <AnnualVsTtmFilterBuilder onApply={applyFilter} onCancel={closeFilterBuilders} initialValues={editingIdx!==null?activeFilters[editingIdx]:null} />}
+      {screenerFilterOpen && <ScreenerFilterBuilder onApply={applyFilter} onCancel={closeFilterBuilders} initialValues={editingIdx!==null?activeFilters[editingIdx]:null} />}
 
       {pageMode === 'portfolio' && portfolioEarningsModal && (
         <PortfolioEarningsModal

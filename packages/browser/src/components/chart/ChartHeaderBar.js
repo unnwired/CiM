@@ -1,7 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
+import { useWheelHorizontalScroll } from '../../hooks/useWheelHorizontalScroll';
 
-const TF_GROUPS = {
-  D: ['4H','1D','2D','3D','4D','5D','6D','7D'],
+const TF_GROUPS_FULL = {
+  D: ['30m','4H','1D','2D','3D','4D','5D','6D','7D'],
+  W: ['1W','2W','3W','4W'],
+  M: ['1M','2M','3M','4M','5M','6M','7M','8M','9M','10M','11M','12M'],
+};
+
+const TF_GROUPS_DAILY_ONLY = {
+  D: ['1D','2D','3D','4D','5D','6D','7D'],
   W: ['1W','2W','3W','4W'],
   M: ['1M','2M','3M','4M','5M','6M','7M','8M','9M','10M','11M','12M'],
 };
@@ -14,14 +21,18 @@ function getTFGroupKey(tf) {
   return 'M';
 }
 
-function defaultTfForGroup(g) {
-  return g === 'D' ? '1D' : TF_GROUPS[g][0];
+function defaultTfForGroup(g, groups) {
+  return g === 'D' ? (groups.D.includes('1D') ? '1D' : groups.D[0]) : groups[g][0];
 }
 
 // ChartHeaderBar — D / W / M group switcher + timeframe buttons.
 // symbol is optional (shown when provided).
-export default function ChartHeaderBar({ symbol, timeframe, onTimeframeChange }) {
+// hideIntraday: omit 30m/4H (mutual fund daily NAV charts).
+export default function ChartHeaderBar({ symbol, timeframe, onTimeframeChange, hideIntraday = false }) {
+  const TF_GROUPS = hideIntraday ? TF_GROUPS_DAILY_ONLY : TF_GROUPS_FULL;
   const [activeGroup, setActiveGroup] = useState(() => getTFGroupKey(timeframe));
+  const tfScrollRef = useRef(null);
+  useWheelHorizontalScroll(tfScrollRef);
 
   // Keep activeGroup in sync when timeframe is changed from outside
   // (e.g. top bar dropdown on panel 1)
@@ -31,7 +42,7 @@ export default function ChartHeaderBar({ symbol, timeframe, onTimeframeChange })
 
   function handleGroupClick(g) {
     setActiveGroup(g);
-    onTimeframeChange(defaultTfForGroup(g));
+    onTimeframeChange(defaultTfForGroup(g, TF_GROUPS));
   }
 
   return (
@@ -91,7 +102,9 @@ export default function ChartHeaderBar({ symbol, timeframe, onTimeframeChange })
       <span style={{ color: 'var(--border)', fontSize: 11, flexShrink: 0 }}>|</span>
 
       {/* Timeframe buttons for active group — scroll when many (e.g. 1M…12M) */}
-      <div style={{
+      <div
+        ref={tfScrollRef}
+        style={{
         flex:                   1,
         minWidth:               0,
         display:                'flex',

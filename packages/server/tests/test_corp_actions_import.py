@@ -60,6 +60,35 @@ class TestCorpActionsImport(unittest.TestCase):
         apply_pending_corp_actions(ledger, {"TRENT"}, actions, as_of="2026-06-10")
         self.assertEqual(symbol_open_qty(ledger, "TRENT"), qty_after_first)
 
+    def test_no_double_apply_after_manual_bonus(self):
+        """Manual bonus repair sets the lot flag but not the registry key.
+
+        Regression: the registry must not re-apply a bonus that lot flags already
+        reflect (otherwise cost basis halves and gains inflate on the next import).
+        """
+        ledger = _empty_ledger()
+        items: list = []
+        tb = (FIXTURES / "tradebook_trent_partial.csv").read_text(encoding="utf-8")
+        merge_zerodha_tradebook(ledger, items, tb, quote_map={})
+        self.assertEqual(symbol_open_qty(ledger, "TRENT"), 17)
+
+        # Simulate the manual /api/pnl/repair/bonus-1-2 path: flag set, no registry key.
+        apply_bonus(ledger, "TRENT", ratio_num=1, ratio_den=2)
+        self.assertEqual(symbol_open_qty(ledger, "TRENT"), 25)
+        self.assertNotIn("corp_actions_applied", {k: v for k, v in ledger.items() if k == "corp_actions_applied" and v})
+        entry_after_manual = ledger["positions"][0]["entry_price"]
+
+        actions = load_corp_actions()
+        applied = apply_pending_corp_actions(ledger, {"TRENT"}, actions, as_of="2026-06-10")
+        # Nothing should actually re-apply.
+        self.assertTrue(all(a.get("skipped") for a in applied) or applied == [])
+        self.assertEqual(symbol_open_qty(ledger, "TRENT"), 25)
+        self.assertAlmostEqual(ledger["positions"][0]["entry_price"], entry_after_manual, places=2)
+
+        # And the registry key is now backfilled so future imports stay idempotent.
+        keys = ledger.get("corp_actions_applied", {}).get("keys", [])
+        self.assertTrue(any(k.startswith("TRENT:bonus:") for k in keys))
+
     def test_split_1_5(self):
         ledger = {
             "positions": [{

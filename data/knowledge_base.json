@@ -132,7 +132,7 @@
         {
           "heading": "Notes and layout",
           "paragraphs": [
-            "The notes icon in the Symbol column opens a per-instrument memo (saved to your account). A filled icon means a note already exists.",
+            "The notes icon in the Symbol column opens a per-instrument memo (saved on this device for your account). A filled icon means a note already exists.",
             "Drag the vertical divider between the stock table and chart to resize the list pane. Click Save Layout to remember that width together with your View and timeframe choices."
           ]
         }
@@ -153,7 +153,7 @@
           "paragraphs": [
             "The Equity section lists chartable equity indices with name, latest level, and session change %. The selected row is highlighted in blue.",
             "Drag the ⋮⋮ handle to reorder indices in the list. Your custom order is saved when you click Save Layout.",
-            "The notes icon on each row opens a memo for that index. Right-click a row for quick actions such as adding the index to Portfolio or a Watchlist."
+            "The notes icon on each row opens a private memo for that index (stored on this device for your account). Right-click a row for quick actions such as adding the index to Portfolio or a Watchlist."
           ]
         },
         {
@@ -582,7 +582,7 @@
           "paragraphs": [
             "Columns include Symbol, Market Cap (M/B/T), Price, 1-day change %, 30-day change %, 1-year change %, and Volume. Click a column header to sort; click again to reverse direction.",
             "The Filter… box narrows rows by symbol or company name. The footer shows how many stocks match and reminds you that ↑↓ keys move selection.",
-            "The notes icon opens a per-stock memo. Right-click a row to add the stock to Portfolio or a Watchlist."
+            "The notes icon opens a private per-stock memo (stored on this device for your account). Right-click a row to add the stock to Portfolio or a Watchlist."
           ]
         },
         {

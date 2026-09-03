@@ -122,6 +122,7 @@ $promoteRelPaths = @(
     "nse_bhavcopy.py",
     "scrape_daily.py",
     "scrape_4h.py",
+    "scrape_30m.py",
     "requirements_runtime.txt",
     "Admin-Showcase.bat",
     "start_showcase_tailscale.bat",

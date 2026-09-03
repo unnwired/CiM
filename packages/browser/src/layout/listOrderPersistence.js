@@ -4,6 +4,7 @@ import { saveChartPrefs } from '../chartPrefs/chartPrefsStore';
 /** Canonical layout.json / local backup keys for user-defined list ordering. */
 export const LIST_ORDER_KEYS = {
   equityIndexSymbolOrder: 'equityIndexSymbolOrder',
+  equityNseIndexSymbolOrder: 'equityNseIndexSymbolOrder',
   indexStarTags: 'indexStarTags',
   portfolioRowOrder: 'portfolioRowOrder',
   portfolioUseCustomRowOrder: 'portfolioUseCustomRowOrder',
@@ -171,6 +172,10 @@ export function hydrateListOrderFields(serverData = {}, email = null, backupData
     [LIST_ORDER_KEYS.equityIndexSymbolOrder]: pickEquityIndexOrder(
       mergedServer, local, preferLocal, markLocal,
     ),
+    [LIST_ORDER_KEYS.equityNseIndexSymbolOrder]: pickScalar(
+      LIST_ORDER_KEYS.equityNseIndexSymbolOrder,
+      hasArrayContent,
+    ),
     [LIST_ORDER_KEYS.portfolioRowOrder]: pickScalar(
       LIST_ORDER_KEYS.portfolioRowOrder,
       hasArrayContent,
@@ -200,6 +205,9 @@ export function buildListOrderPayload(fields = {}) {
 
   if (hasArrayContent(fields[LIST_ORDER_KEYS.equityIndexSymbolOrder])) {
     payload[LIST_ORDER_KEYS.equityIndexSymbolOrder] = fields[LIST_ORDER_KEYS.equityIndexSymbolOrder];
+  }
+  if (hasArrayContent(fields[LIST_ORDER_KEYS.equityNseIndexSymbolOrder])) {
+    payload[LIST_ORDER_KEYS.equityNseIndexSymbolOrder] = fields[LIST_ORDER_KEYS.equityNseIndexSymbolOrder];
   }
   if (hasArrayContent(fields[LIST_ORDER_KEYS.portfolioRowOrder])) {
     payload[LIST_ORDER_KEYS.portfolioRowOrder] = fields[LIST_ORDER_KEYS.portfolioRowOrder];

@@ -9,6 +9,7 @@ from typing import Any
 KB_PAGE_IDS = (
     "dashboard",
     "indices",
+    "funds",
     "market-map",
     "market-pulse",
     "market-movers",
@@ -25,6 +26,7 @@ KB_PAGE_IDS = (
 KB_PAGE_LABELS: dict[str, str] = {
     "dashboard": "NSE",
     "indices": "Indices",
+    "funds": "Funds",
     "market-map": "Market Map",
     "market-pulse": "Market Pulse",
     "market-movers": "Market Movers",
@@ -41,6 +43,7 @@ KB_PAGE_LABELS: dict[str, str] = {
 KB_PAGE_GROUPS: dict[str, str] = {
     "dashboard": "main",
     "indices": "main",
+    "funds": "main",
     "market-map": "main",
     "market-pulse": "main",
     "market-movers": "main",
@@ -55,6 +58,105 @@ KB_PAGE_GROUPS: dict[str, str] = {
 }
 
 PAGE_STUBS: dict[str, dict[str, Any]] = {
+    "funds": {
+        "title": "Funds",
+        "sections": [
+            {
+                "heading": "What the Funds page is for",
+                "paragraphs": [
+                    "Funds is Charts In Motion's mutual fund workspace. It brings Indian open-ended mutual fund schemes into the same chart-and-list layout you already use for stocks, so you can study a fund's NAV history with candles, EMAs, and indicators instead of reading a static returns table on a fund house website.",
+                    "The layout matches the rest of the app: a searchable fund list on the left, a daily NAV chart on the right, and a draggable divider between them.",
+                    "Use it to compare how a fund has actually behaved over months and years — trend, drawdowns, recovery, momentum — rather than judging it only by a headline 1Y or 3Y return number.",
+                ],
+            },
+            {
+                "heading": "Where the fund data comes from",
+                "paragraphs": [
+                    "The scheme catalog and daily NAVs come from AMFI (Association of Mutual Funds in India) — the industry body every Indian AMC reports NAVs to. Charts In Motion downloads AMFI's open-ended NAV file and stores each scheme's code, name, AMC, category, ISIN, and latest NAV.",
+                    "NAV history for a fund you open is backfilled on demand (roughly the last 90 days to start) and then grows day by day as each AMFI refresh lands. The longer you run Charts In Motion, the deeper your own NAV history becomes.",
+                    "Only open-ended schemes are listed. Close-ended and interval schemes are excluded because they are not continuously purchasable and their NAV series is not comparable.",
+                    "NAVs are end-of-day only. There is no intraday or live fund data anywhere in the market — a mutual fund publishes one NAV per business day after markets close — so Funds refreshes only after 15:30 IST. Intraday Update runs for stocks do not touch funds by design.",
+                ],
+            },
+            {
+                "heading": "Which schemes are listed (Direct–Growth)",
+                "paragraphs": [
+                    "By default the list shows Direct–Growth plans only. AMFI publishes several plan variants of the same fund — Regular vs Direct, and Growth vs IDCW (dividend) — which would otherwise flood the list with four or more near-identical rows per scheme.",
+                    "Direct plans carry no distributor commission, so their NAV series reflects the fund manager's performance rather than the sales channel. Growth plans reinvest gains instead of paying them out, so the NAV line is continuous and not broken by dividend payouts.",
+                    "That combination — Direct plus Growth — gives the cleanest, most chartable series for technical study, which is why it is the default view. The footer under the list confirms the active scope: Direct–Growth · daily NAV.",
+                ],
+            },
+            {
+                "heading": "Fund categories you will see",
+                "paragraphs": [
+                    "Categories follow SEBI's scheme classification as published by AMFI, normalised into readable labels. Use the All categories dropdown in the toolbar to narrow the list to one group.",
+                    "Equity Scheme — funds that invest mainly in shares: Large Cap, Mid Cap, Small Cap, Large & Mid Cap, Multi Cap, Flexi Cap, Focused, Value / Contra, Dividend Yield, Sectoral / Thematic, and ELSS (tax-saving). Highest growth potential, highest volatility.",
+                    "Hybrid Scheme — funds that mix equity and debt: Aggressive Hybrid, Conservative Hybrid, Balanced Advantage / Dynamic Asset Allocation, Multi Asset Allocation, Equity Savings, and Arbitrage. Smoother NAV lines than pure equity because the debt or hedged portion cushions falls.",
+                    "Debt Scheme — bond and money-market funds: Liquid, Overnight, Ultra Short, Low Duration, Money Market, Short / Medium / Long Duration, Corporate Bond, Banking & PSU, Gilt, Credit Risk, Dynamic Bond, and Floater. NAV lines are near-straight and gently rising; the interesting signal is a break in that slope.",
+                    "Other Scheme — Index Funds, ETFs, Fund of Funds (Domestic), and Overseas Fund of Funds. These track a benchmark, a commodity such as gold, or an offshore basket rather than being actively picked.",
+                    "Solution Oriented — retirement and children's funds, which carry a mandatory lock-in.",
+                ],
+            },
+            {
+                "heading": "How funds differ from standalone stock symbols",
+                "paragraphs": [
+                    "A stock has a traded price set continuously by buyers and sellers. A fund has a NAV — the fund's total assets divided by units outstanding, computed once after market close. Nothing trades at an intraday fund price, so a NAV series has no true open, high, or low.",
+                    "Charts In Motion therefore plots one NAV point per business day. Candles on a fund chart are flat by construction, and the volume pane stays empty because AMFI publishes no traded quantity for a scheme. The chart's price pane is labelled NAV rather than Price.",
+                    "Timeframes start at 1D. There is no 4H option on a fund chart, and the Funds tab is excluded from live session refreshes.",
+                    "A fund is a basket, not a company. There is no market cap, no P/E, no earnings date, no results beat, and no split ledger — so funds do not appear in the NSE screener, filter chips, Presets, Market Map, Market Movers, Earnings, Watchlist, Portfolio, or P&L. Those surfaces are built around per-company fundamentals that a scheme does not have.",
+                    "A fund's diversification is also its ceiling: a single stock can double on one result, while a diversified equity fund moves with dozens of holdings at once. Read fund NAV charts as trend and regime evidence, not as breakout setups.",
+                ],
+            },
+            {
+                "heading": "Finding a fund — search, category, Favorites",
+                "paragraphs": [
+                    "Search fund… matches on scheme name, AMC name, or AMFI scheme code. Typing an AMC name (for example an fund house name) lists that house's whole Direct–Growth range.",
+                    "All categories filters the list to one SEBI category — the fastest way to line up peers, for example every Mid Cap fund or every Balanced Advantage fund, before comparing their NAV charts one after another.",
+                    "Favorites (★) pins the schemes you actually track. Click the star on any row to add or remove it, then use the Favorites button in the toolbar to show only starred funds. Favorites are saved per account on the server, so they follow you across sessions and machines.",
+                    "Search, category, and Favorites combine — for example star ten funds, then filter to Equity Scheme - Flexi Cap within your favorites.",
+                ],
+            },
+            {
+                "heading": "The fund list",
+                "paragraphs": [
+                    "Each row shows the scheme name with its SEBI category underneath, the latest NAV, and the NAV date. The date column is the honest freshness check: if it is several days old, run an AMFI refresh.",
+                    "Click any row to load that scheme's NAV chart on the right. The selected fund's name and its latest day change % appear in the toolbar above the chart.",
+                    "Drag the divider between the list and the chart to give either side more room. The footer shows how many funds match your current filters.",
+                ],
+            },
+            {
+                "heading": "The NAV chart",
+                "paragraphs": [
+                    "The chart header offers D / W / M timeframe groups — 1D through 7D, 1W through 4W, and 1M through 12M. Daily NAV points are aggregated up into weekly and monthly bars, which is where fund charts become genuinely readable: a 1M view of a five-year NAV series shows regime changes that a daily line buries in noise.",
+                    "EMA overlays work exactly as on stock charts. An equity fund NAV crossing below its long EMA and staying there is a slow, deliberate signal — funds do not whipsaw the way single stocks do.",
+                    "Indicators offers StochRSI and MACD panes. On daily NAV they are slow-moving; most users read them on weekly or monthly bars.",
+                    "Vol is present for toolbar consistency but has nothing to plot — AMFI does not publish scheme-level traded volume.",
+                    "Your EMA set, volume toggle, and indicator panes are shared with the rest of the app's charts, so a fund chart opens with the same setup you use for stocks.",
+                ],
+            },
+            {
+                "heading": "How to use this page to your benefit",
+                "paragraphs": [
+                    "Compare peers honestly. Filter to one category, then click through funds in turn on the same timeframe. You are comparing shapes — depth of drawdown, speed of recovery, steadiness of trend — not marketing return tables computed from convenient start dates.",
+                    "Check what a fund actually did in a bad stretch. Switch to a monthly view and look at the last market correction. A fund that fell less and recovered faster than its category is doing something structurally different, and that shows on the chart long before it shows in a factsheet.",
+                    "Decide between direct stocks and a fund for the same idea. If you like a sector, put the sector's Thematic fund NAV next to the individual names you were considering on Market Map or NSE. The fund shows what the diversified version of the trade would have felt like.",
+                    "Sanity-check a Balanced Advantage or Hybrid claim. Those funds promise a smoother ride; the NAV chart shows whether the smoothing was real.",
+                    "Watch a debt fund for slope breaks. A Debt Scheme NAV should climb in a near-straight line. A visible dip is a credit or duration event and is worth investigating.",
+                    "Build a shortlist you revisit. Star candidate funds, then open Favorites once a month, run through the charts on 1M, and keep the shortlist honest.",
+                    "Pair it with the rest of the app. Use Market Pulse and Market Map to read what the market is doing, then use Funds to decide which vehicle — a fund or a set of stocks — you want that exposure through.",
+                ],
+            },
+            {
+                "heading": "Keeping NAVs current",
+                "paragraphs": [
+                    "Fund NAVs refresh through Admin → Scheduler → AMFI mutual fund NAVs. Use Run now for an immediate pull, or add a schedule so it runs itself.",
+                    "The job is blocked before 15:30 IST on weekdays and will tell you so — AMFI publishes after market close, so an earlier run would only re-fetch yesterday's file. Weekends run without the gate.",
+                    "If the list is empty, no AMFI download has completed yet on this install; the empty-state message points you to the same scheduler task.",
+                    "NAV history for a scheme deepens on first open and then extends with each refresh, so a fund you have followed for a while will chart further back than one you just discovered.",
+                ],
+            },
+        ],
+    },
     "market-pulse": {
         "title": "Market Pulse",
         "sections": [
@@ -382,20 +484,21 @@ PAGE_STUBS: dict[str, dict[str, Any]] = {
                     "↻ Refresh reloads the current page's live table data from the server. On NSE Dashboard that means refreshed prices, changes, and market cap for the stock list — a quick pull, not a full data rebuild.",
                     "Update opens a menu of heavier server jobs that refresh the datasets Charts In Motion charts and screeners depend on:",
                     "Update price and volume data — downloads/refreshes raw OHLCV history used by charts. This is chart data, not filter snapshots.",
-                    "Schedule filter data — configures daily and weekly rebuilds for precomputed filter snapshots such as price filter snapshots, EMA, MACD, StochRSI, average volume, and range channel.",
+                    "Repair Index Chart Gaps — on-demand scan and backfill for missing index daily bars (NSE official history, Yahoo fallback). Run when index charts show long calendar gaps; not part of the regular price/volume update.",
+                    "Filter rebuild — in Admin Scheduler, add one or more filter schedules (weekday frequency, incremental or full mode) for precomputed filter snapshots such as price OHLC, EMA, MACD, StochRSI, average volume, and range channel. Other jobs (Fetch chart data, EOD bhavcopy, etc.) also support multiple schedules at different times of day.",
                     "Apply pending split adjustments — adjusts price history for symbols in the split ledger.",
                     "Catch-up split scan (90 days) — finds recent splits and marks already-adjusted history without a full re-download.",
                     "Refresh share counts (market cap basis) — Yahoo → Screener.in issued share counts for market-cap (shares × price); run after splits or periodically.",
                     "While a job runs, the Update button shows progress; click it again to open the progress panel.",
-                    "For scheduled or off-peak jobs (chart data fetch, filter rebuild daily/weekly, EOD reconcile, split watch, earnings warm, and more), use Admin Scheduler in the Settings (⚙) menu on the showcase host. Every task is opt-in — nothing runs on a timer until you enable it and save.",
+                    "For scheduled or off-peak jobs (chart data fetch, filter rebuild, EOD reconcile, split watch, earnings warm, and more), use Admin Scheduler in the Settings (⚙) menu on the showcase host. Every task is opt-in — nothing runs on a timer until you enable it and save.",
                 ],
             },
             {
                 "heading": "Admin Scheduler (showcase host)",
                 "paragraphs": [
                     "Open Settings → Admin Scheduler (or Update → Admin Scheduler) when signed in as operator.",
-                    "Ten tasks are available: fetch chart data (OHLCV), filter rebuild daily, filter rebuild weekly, EOD reconcile, live quotes warm, split watch, earnings warm, fetch financials, screener sector fill, and expand universe.",
-                    "Run now starts a task immediately for rare forced runs. Enable saves a daily or weekly IST time (or an interval for chart data fetch) and lists the task under Enabled schedulers.",
+                    "Tasks include fetch chart data (OHLCV), filter rebuild (multiple schedules with weekday frequency and incremental/full mode), EOD reconcile, live quotes warm, split watch, earnings warm, fetch financials, screener sector fill, and expand universe.",
+                    "Run now starts a task immediately for rare forced runs. Enable saves a daily or weekly IST time (or an interval for chart data fetch) and lists the task under Active schedules. Filter rebuild supports + New Schedule for additional filter jobs.",
                     "The scheduler log and current activity appear at the top. Only one heavy job runs at a time.",
                 ],
             },
@@ -636,6 +739,7 @@ PAGE_STUBS: dict[str, dict[str, Any]] = {
                     "Import CSV on the Period panel opens the Zerodha import dialog. Attach three optional files: Tradebook (required) for historical FIFO through yesterday; Holdings for open qty and average entry (fixes bonus/split drift vs Kite); Positions for today's session only (same-day sells missing from tradebook until tomorrow).",
                     "Enable Sync open to holdings when you attach a holdings file — CiM replaces open lots to match broker qty and avg. Enable Apply today's positions when you attach Kite Positions export the same day. Corp actions (e.g. TRENT 1:2 bonus) apply automatically from the registry when enabled.",
                     "Rebuild symbols in file wipes and replays open + closed history for every symbol in the tradebook — use only with a full export to fix a bad prior import. Append mode skips trade_ids already imported.",
+                    "Replace Zerodha P&L treats the uploaded Tax/Console P&L as the complete Zerodha source of truth. After confirmation, CiM removes all existing Zerodha open and closed rows, rebuilds them from the upload, and optionally uses Holdings as the final open-position snapshot. Paytm and Manual records are not changed.",
                     "Sync holdings (without re-importing tradebook) updates open lots only from a holdings CSV — closed trades are untouched.",
                     "Same-day sells: if open qty still exceeds holdings after import, attach today's Positions CSV and enable Apply today's positions.",
                 ],

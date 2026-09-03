@@ -5,6 +5,7 @@ import { setListDragImage, DropInsetLine } from '../utils/listDnD';
 import { CHART_DATA_UPDATED_EVENT, MOVERS_REFRESH_EVENT } from '../chartEvents';
 import { usePatchOverlay } from '../intraday/usePatchOverlay';
 import { useRegisterFocusedSymbol } from '../intraday/useRegisterFocusedSymbol';
+import { useRegisterIntradaySymbols } from '../intraday/useRegisterIntradaySymbols';
 import { symbolsForMarketMap } from '../intraday/intradayRefreshScopes';
 import {
   sortMarketMapConstituents,
@@ -12,6 +13,7 @@ import {
 } from '../utils/marketMapConstituents';
 import MarketMapTreemap from '../components/MarketMapTreemap';
 import MarketMapEarningsBadges from '../components/MarketMapEarningsBadges';
+import StockListSplitBody from '../components/StockListSplitBody';
 import { useChartPrefsContext } from '../chartPrefs/useChartPrefs';
 import { loadChartPrefs } from '../chartPrefs/chartPrefsStore';
 import {
@@ -201,8 +203,14 @@ export default function MarketMapPage({ onOpenChart, isActive }) {
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
 
-  const loadSummary = useCallback((force = false) => {
-    setLoadingSummary(true);
+  const summaryLenRef = useRef(0);
+  summaryLenRef.current = summary.length;
+  const detailRef = useRef(detail);
+  detailRef.current = detail;
+
+  const loadSummary = useCallback((force = false, opts = {}) => {
+    const quiet = !!opts.quiet || summaryLenRef.current > 0;
+    if (!quiet) setLoadingSummary(true);
     setSummaryError(null);
     return axios.get(`${API}/api/market-map/summary`, { params: { period, force } })
       .then(r => {
@@ -221,12 +229,19 @@ export default function MarketMapPage({ onOpenChart, isActive }) {
       .catch(err => {
         setSummaryError(err.response?.data?.detail || 'Failed to load market map');
       })
-      .finally(() => setLoadingSummary(false));
+      .finally(() => {
+        if (!quiet) setLoadingSummary(false);
+      });
   }, [period]);
 
   const loadDetail = useCallback((symbol, opts = {}) => {
     if (!symbol) return Promise.resolve();
-    setLoadingDetail(true);
+    const quiet = !!opts.quiet || (
+      detailRef.current?.index?.symbol === symbol
+      && Array.isArray(detailRef.current?.constituents)
+      && detailRef.current.constituents.length > 0
+    );
+    if (!quiet) setLoadingDetail(true);
     const params = {
       period,
       layout: 'equal',
@@ -236,8 +251,12 @@ export default function MarketMapPage({ onOpenChart, isActive }) {
     if (opts.force) params.force = true;
     return axios.get(`${API}/api/market-map/index/${encodeURIComponent(symbol)}`, { params })
       .then(r => setDetail(r.data))
-      .catch(() => setDetail(null))
-      .finally(() => setLoadingDetail(false));
+      .catch(() => {
+        if (!quiet) setDetail(null);
+      })
+      .finally(() => {
+        if (!quiet) setLoadingDetail(false);
+      });
   }, [period, sort, alphaDesc, magnitude]);
 
   useEffect(() => {
@@ -273,13 +292,24 @@ export default function MarketMapPage({ onOpenChart, isActive }) {
     });
   }, [chartPrefs?.email]);
 
+  const prevIsActiveRef = useRef(false);
+
   useEffect(() => {
     if (!isActive) return;
-    loadSummary(true);
+    // Keep prior summary visible on tab return; only force-rebuild via Refresh.
+    if (summaryLenRef.current > 0) return;
+    loadSummary(false);
   }, [isActive, loadSummary]);
 
   useEffect(() => {
+    const becameActive = !prevIsActiveRef.current && !!isActive;
+    prevIsActiveRef.current = !!isActive;
     if (!selected?.symbol || !isActive) return;
+    const haveDetail = detailRef.current?.index?.symbol === selected.symbol
+      && Array.isArray(detailRef.current?.constituents)
+      && detailRef.current.constituents.length > 0;
+    // Tab return with detail already in memory — do not clear/reload heatmap.
+    if (becameActive && haveDetail) return;
     loadDetail(selected.symbol);
   }, [selected?.symbol, isActive, loadDetail]);
 
@@ -328,9 +358,26 @@ export default function MarketMapPage({ onOpenChart, isActive }) {
   }, [detail?.index, selected?.symbol, overlayIndexRow, patchRefreshTick]);
 
   useRegisterFocusedSymbol('market-map', useMemo(
+    () => (selected?.symbol ? [selected.symbol] : []),
+    [selected?.symbol],
+  ));
+  useRegisterIntradaySymbols('market-map', useMemo(
     () => symbolsForMarketMap(selected, detail?.constituents),
     [selected, detail?.constituents],
   ));
+
+  useEffect(() => {
+    const sym = String(selected?.symbol || '').trim().toUpperCase();
+    if (!sym || typeof window === 'undefined') return undefined;
+    window.dispatchEvent(new CustomEvent('cim:chart-focus-symbol', {
+      detail: {
+        symbol: sym,
+        source: 'market-map',
+        constituentCount: Array.isArray(detail?.constituents) ? detail.constituents.length : 0,
+      },
+    }));
+    return undefined;
+  }, [selected?.symbol, detail?.constituents]);
 
   useEffect(() => {
     if (!liveOrderedRows.length) return;
@@ -538,7 +585,14 @@ export default function MarketMapPage({ onOpenChart, isActive }) {
         <button type="button" onClick={handleSaveLayout} style={toolBtnStyle()}>Save Layout</button>
       </div>
 
-      <div ref={wrapperRef} style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
+      <StockListSplitBody
+        splitRef={wrapperRef}
+        footer={(
+          <>
+            {loadingSummary ? 'Loading…' : `${liveOrderedRows.length} ${liveOrderedRows.length === 1 ? 'index' : 'indices'}`}
+          </>
+        )}
+      >
         <div style={{
           width: paneWidth,
           minWidth: 200,
@@ -758,7 +812,7 @@ export default function MarketMapPage({ onOpenChart, isActive }) {
             </>
           )}
         </div>
-      </div>
+      </StockListSplitBody>
     </div>
   );
 }

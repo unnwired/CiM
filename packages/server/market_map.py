@@ -12,10 +12,17 @@ from datetime import datetime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-from nse_constituents import (
-    NSE_INDEX_MAP,
-    fetch_constituents_for_symbol,
-)
+try:
+    from server.nse_constituents import (
+        NSE_INDEX_MAP,
+        fetch_constituents_for_symbol,
+    )
+except Exception:
+    from nse_constituents import (  # type: ignore
+        NSE_INDEX_MAP,
+        fetch_constituents_for_symbol,
+    )
+
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -106,7 +113,10 @@ def _index_header(symbol: str, conn: sqlite3.Connection) -> dict[str, Any]:
         change_pct = round(float(row[2]), 2) if row[2] is not None else None
     if _index_day_change_pct_single:
         try:
-            from nse_constituents import _session_day_intraday_active
+            try:
+                from server.nse_constituents import _session_day_intraday_active
+            except Exception:
+                from nse_constituents import _session_day_intraday_active  # type: ignore
 
             if _session_day_intraday_active() and _index_live_day_change_map:
                 lk = _index_live_day_change_map(conn, [symbol]).get(str(symbol).strip())

@@ -447,3 +447,79 @@ def refresh_universe_nse_prices(
         "failed": failed,
         "failed_symbols": sorted(failed_syms),
     }
+
+
+def refresh_screener_from_upstox_quotes(
+    db_path: Path | str,
+    *,
+    symbols: Optional[list[str]] = None,
+    message_callback: Optional[Callable[[str], None]] = None,
+    batch_size: int = 400,
+) -> dict[str, Any]:
+    """
+    Write screener price / 1D% from Upstox OHLC quotes.
+    Falls back to empty result when Upstox is disabled (caller keeps bar sync / bhavcopy).
+    """
+    try:
+        from server import upstox_client, upstox_config
+    except Exception as e:
+        return {"skipped": True, "reason": f"import:{e}", "quote_updated": 0}
+
+    if not upstox_config.market_data_enabled():
+        return {"skipped": True, "reason": "upstox_disabled", "quote_updated": 0}
+
+    conn = sqlite3.connect(str(db_path), timeout=60.0)
+    try:
+        ensure_screener_price_columns(conn)
+        cur = conn.cursor()
+        if symbols:
+            wanted = [str(s).strip().upper() for s in symbols if str(s).strip()]
+            all_symbols = wanted
+        else:
+            cur.execute("SELECT symbol FROM screener WHERE symbol IS NOT NULL AND TRIM(symbol) != ''")
+            all_symbols = [str(r[0]).strip().upper() for r in cur.fetchall() if r and r[0]]
+        if not all_symbols:
+            return {"skipped": True, "reason": "no_symbols", "quote_updated": 0}
+
+        if message_callback:
+            message_callback(f"Refreshing screener 1D% from Upstox quotes ({len(all_symbols)} symbols)...")
+
+        written = 0
+        failed = 0
+        last_err = None
+        for i in range(0, len(all_symbols), max(1, batch_size)):
+            chunk = all_symbols[i : i + batch_size]
+            entries, err = upstox_client.fetch_quotes(chunk)
+            if err:
+                last_err = err
+            by_sym = {str(e.get("symbol") or "").upper(): e for e in entries if e}
+            rows = []
+            for sym in chunk:
+                ent = by_sym.get(sym)
+                if not ent:
+                    failed += 1
+                    continue
+                rows.append(
+                    {
+                        "symbol": sym,
+                        "price": ent.get("price"),
+                        "change_percent": ent.get("change_pct"),
+                        "previous_close": ent.get("previous_close"),
+                        "price_updated_at": _now_ist_str(),
+                    }
+                )
+            written += _write_rows(conn, rows)
+            if message_callback and (i // batch_size) % 5 == 0:
+                message_callback(f"Upstox screener quotes: {min(i + batch_size, len(all_symbols))}/{len(all_symbols)}")
+    finally:
+        conn.close()
+
+    return {
+        "skipped": False,
+        "source": "upstox",
+        "total": len(all_symbols),
+        "quote_updated": written,
+        "failed": failed,
+        "last_error": last_err,
+    }
+

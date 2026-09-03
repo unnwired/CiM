@@ -6,7 +6,8 @@
 [CmdletBinding()]
 param(
     [string]$ExportRoot = "",
-    [string]$RepoRoot = ""
+    [string]$RepoRoot = "",
+    [string]$DbSource = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,6 +42,8 @@ $copyMap = @(
     "server\product_config.py",
     "server\license_client.py",
     "server\license_routes.py",
+    "server\client_user_agent.py",
+    "server\auth_social_proof.py",
     "server\http_ssl.py",
     "config\product.json",
     "config\github_updates.json",
@@ -64,6 +67,8 @@ $copyMap = @(
     "nse_bhavcopy.py",
     "scrape_daily.py",
     "scrape_4h.py",
+    "scrape_30m.py",
+    "scrape_mf.py",
     "server\nse_bhavcopy.py",
     "server\eod_reconcile.py",
     "server\nse_constituents.py",
@@ -152,8 +157,18 @@ if (Test-Path -LiteralPath $serverSrc) {
     if (-not (Test-Path -LiteralPath $serverDst)) {
         New-Item -ItemType Directory -Force -Path $serverDst | Out-Null
     }
+    # Replace children explicitly. Copy-Item of a folder INTO an existing folder nests
+    # (server\core -> server\core\core) and leaves stale .pyc without .py sources.
     Get-ChildItem -LiteralPath $serverSrc -Force -ErrorAction SilentlyContinue | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $serverDst $_.Name) -Recurse -Force
+        $dst = Join-Path $serverDst $_.Name
+        if ($_.PSIsContainer) {
+            if (Test-Path -LiteralPath $dst) {
+                Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            Copy-Item -LiteralPath $_.FullName -Destination $dst -Recurse -Force
+        } else {
+            Copy-Item -LiteralPath $_.FullName -Destination $dst -Force
+        }
     }
     Get-ChildItem -LiteralPath $serverDst -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
         ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
@@ -171,13 +186,17 @@ if (Test-Path -LiteralPath $serverSrc) {
     }
 }
 
-$dbSrc = Join-Path $RepoRoot "data\nse_data.db"
+$dbSrc = if ($DbSource) {
+    Resolve-CiMDistributionDbSource -RepoRoot $RepoRoot -DbSource $DbSource
+} else {
+    Resolve-CiMDistributionDbSource -RepoRoot $RepoRoot
+}
 $dbDst = Join-Path $ExportRoot "data\nse_data.db"
 $dataDirDst = Join-Path $ExportRoot "data"
 if (-not (Test-Path -LiteralPath $dataDirDst)) {
     New-Item -ItemType Directory -Force -Path $dataDirDst | Out-Null
 }
-foreach ($dataJson in @("sector_mapping.json", "screener_market_sets.json")) {
+foreach ($dataJson in @("sector_mapping.json", "screener_market_sets.json", "index_industry_sector_sets.json")) {
     $jsonSrc = Join-Path $RepoRoot "data\$dataJson"
     $jsonDst = Join-Path $dataDirDst $dataJson
     if (Test-Path -LiteralPath $jsonSrc) {
@@ -187,27 +206,38 @@ foreach ($dataJson in @("sector_mapping.json", "screener_market_sets.json")) {
 }
 $snapPy = Join-Path $RepoRoot "scripts\copy_db_snapshot.py"
 $integrityPy = Join-Path $ScriptDir "check_db_integrity.py"
-if ((Test-Path -LiteralPath $dbSrc) -and (Test-Path -LiteralPath $snapPy) -and (Test-Path -LiteralPath $dbDst)) {
-    $py = Join-Path $ExportRoot "runtime\python\python.exe"
-    if (-not (Test-Path -LiteralPath $py)) {
-        $py = Join-Path $RepoRoot "runtime\python\python.exe"
-    }
-    $needsCopy = $true
-    if ((Test-Path -LiteralPath $integrityPy) -and (Test-Path -LiteralPath $py)) {
-        & $py -s $integrityPy $dbDst 2>$null
-        if ($LASTEXITCODE -eq 0) { $needsCopy = $false }
-    }
-    if ($needsCopy -and (Test-Path -LiteralPath $py)) {
+$dbSrcFull = [System.IO.Path]::GetFullPath($dbSrc)
+$dbDstFull = [System.IO.Path]::GetFullPath($dbDst)
+if ($dbSrcFull -ieq $dbDstFull) {
+    Write-Host "Skipping DB snapshot (source and export are the same file): $dbSrcFull"
+} else {
+    Assert-CiMDistributionDbSource -DbPath $dbSrc -Hint "Warm Client_Test (or pass -DbSource) before Build Launcher."
+    Write-Host "Distribution DB source: $dbSrc"
+    if ((Test-Path -LiteralPath $snapPy)) {
+        $py = Join-Path $ExportRoot "runtime\python\python.exe"
+        if (-not (Test-Path -LiteralPath $py)) {
+            $py = Join-Path $RepoRoot "runtime\python\python.exe"
+        }
+        if (-not (Test-Path -LiteralPath $py)) {
+            throw "No python.exe for DB snapshot (checked export + repo runtime\python)."
+        }
         try {
             & $py -s $snapPy $dbSrc $dbDst
             if ($LASTEXITCODE -ne 0) {
-                Write-Warning "copy_db_snapshot skipped (exit $LASTEXITCODE) - stop CiM if export DB must refresh"
-            } else {
-                Write-Host "Refreshed data\nse_data.db via SQLite backup"
+                throw "copy_db_snapshot failed (exit $LASTEXITCODE) - stop CiM on the DB host if the file is locked"
+            }
+            Write-Host "Refreshed data\nse_data.db via SQLite backup from distribution DB source"
+            if ((Test-Path -LiteralPath $integrityPy)) {
+                & $py -s $integrityPy $dbDst
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Export DB failed integrity_check after snapshot: $dbDst"
+                }
             }
         } catch {
-            Write-Warning "copy_db_snapshot failed: $_"
+            throw "copy_db_snapshot failed: $_"
         }
+    } else {
+        throw "Missing scripts\copy_db_snapshot.py"
     }
 }
 

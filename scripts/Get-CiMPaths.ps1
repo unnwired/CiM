@@ -81,6 +81,68 @@ function Get-CiMVendorSecretPath {
     return Join-Path $RepoRoot "config\.build_license_secret"
 }
 
+function Resolve-CiMDistributionDbSource {
+    <#
+    .SYNOPSIS
+      Absolute path to nse_data.db used for distribution export / Build Launcher.
+
+    .DESCRIPTION
+      Prefer an explicit -DbSource, else showcase testbed install root
+      (config\showcase_deploy.json → showcaseInstallRoot, default D:\CiM\Client_Test),
+      never the stale repo data\nse_data.db unless -AllowRepoFallback is set.
+    #>
+    param(
+        [string]$RepoRoot = "",
+        [string]$DbSource = "",
+        [string]$ShowcaseInstallRoot = "",
+        [switch]$AllowRepoFallback
+    )
+    if (-not $RepoRoot) {
+        $RepoRoot = Split-Path -Parent $PSScriptRoot
+    }
+
+    function ConvertTo-CiMDbFilePath {
+        param([string]$Raw)
+        if ([string]::IsNullOrWhiteSpace($Raw)) { return "" }
+        $p = [System.IO.Path]::GetFullPath($Raw.Trim().Trim('"').Trim("'"))
+        if ($p -match '\.db$') { return $p }
+        return Join-Path $p "data\nse_data.db"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($DbSource)) {
+        return ConvertTo-CiMDbFilePath -Raw $DbSource
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ShowcaseInstallRoot)) {
+        return ConvertTo-CiMDbFilePath -Raw $ShowcaseInstallRoot
+    }
+
+    $cfgScript = Join-Path $PSScriptRoot "Get-CiMShowcaseDeployConfig.ps1"
+    if (Test-Path -LiteralPath $cfgScript) {
+        . $cfgScript
+        $cfg = Get-CiMShowcaseDeployConfig -RepoRoot $RepoRoot
+        $fromTestbed = ConvertTo-CiMDbFilePath -Raw $cfg.showcaseInstallRoot
+        if (Test-Path -LiteralPath $fromTestbed) {
+            return $fromTestbed
+        }
+        if (-not $AllowRepoFallback) {
+            return $fromTestbed
+        }
+    }
+
+    return Join-Path $RepoRoot "data\nse_data.db"
+}
+
+function Assert-CiMDistributionDbSource {
+    param(
+        [Parameter(Mandatory)][string]$DbPath,
+        [string]$Hint = ""
+    )
+    if (Test-Path -LiteralPath $DbPath) { return }
+    $msg = "Distribution DB source missing: $DbPath"
+    if ($Hint) { $msg = "$msg`n$Hint" }
+    throw $msg
+}
+
 function Get-CiMVendorSecret {
     <#
     .SYNOPSIS
@@ -320,13 +382,24 @@ function Get-CiMUvicornPythonArgs {
         [string[]]$ExtraArgs = @()
     )
     $launcher = Join-Path $RepoRoot "runtime\run_uvicorn.py"
+    # Start-Process -ArgumentList joins args with spaces and does not quote;
+    # paths under e.g. "D:\Programs\NSE Pulse\..." must be quoted or Python sees "D:\Programs\NSE".
+    function Quote-CiMProcArg([string]$Value) {
+        if ($null -eq $Value) { return '""' }
+        if ($Value -match '[\s"]') {
+            return ('"{0}"' -f ($Value -replace '"', '\"'))
+        }
+        return $Value
+    }
     if (Test-Path -LiteralPath $launcher) {
-        $args = @("-s", $launcher, $AppModule)
+        $args = @("-s", (Quote-CiMProcArg $launcher), $AppModule)
     } else {
         $args = @("-s", "-m", "uvicorn", $AppModule)
     }
     if ($ExtraArgs -and $ExtraArgs.Count -gt 0) {
-        $args += $ExtraArgs
+        foreach ($a in $ExtraArgs) {
+            $args += ,(Quote-CiMProcArg $a)
+        }
     }
     return $args
 }

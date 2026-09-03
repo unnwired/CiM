@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
+import BasketToolbarButton from '../components/Basket';
+import { startBasketSymbolDrag } from '../utils/basketDnD';
 import { applySavedOrder, reorderByGap, insertionGapFromRowHover } from '../utils/listOrder';
 import { setListDragImage, DropInsetLine } from '../utils/listDnD';
 import axios from 'axios';
@@ -6,7 +8,7 @@ import IndexChartContainer from '../components/chart/IndexChartContainer';
 import { DrawingMirrorProvider } from '../components/chart/drawing/DrawingMirrorContext';
 import { DrawingWorkspaceProvider } from '../components/chart/drawing/DrawingWorkspaceContext';
 import { DrawingToolbarConnected, DrawingFloatPaletteConnected } from '../components/chart/drawing/DrawingToolbar';
-import DrawingToolsDesignControl from '../components/chart/drawing/DrawingToolsDesignControl';
+import StockListSplitBody from '../components/StockListSplitBody';
 import EMAControls         from '../components/chart/EMAControls';
 import ChartHeaderBar      from '../components/chart/ChartHeaderBar';
 import {
@@ -21,7 +23,6 @@ import {
   persistVisiblePanels,
   persistVolumeVisible,
 } from '../config/chartDefaults';
-import InstrumentNotesIcon from '../components/InstrumentNotesIcon';
 import IndexStarTag from '../components/IndexStarTag';
 import { sortIndicesByStarTier, normalizeStarTags } from '../utils/indexStarTags';
 import {
@@ -50,6 +51,7 @@ import { useRegisterFocusedSymbol } from '../intraday/useRegisterFocusedSymbol';
 import { symbolsForIndicesPage } from '../intraday/intradayRefreshScopes';
 import { isIntradayLiveTimeframe } from '../intraday/patchOverlay';
 import { usePageLive } from '../intraday/pageLiveContext';
+import { isTypingContext } from '../utils/isTypingTarget';
 import { useSyncedPanelHeights, columnCountForChartLayout, multiColumnHeightProps } from '../hooks/useSyncedPanelHeights';
 import {
   LIST_ORDER_KEYS,
@@ -107,11 +109,20 @@ export default function IndicesPage({ onOpenConstituents, onContextMenuRequest }
     () => symbolsForIndicesPage(selected),
     [selected],
   ));
+  useEffect(() => {
+    const sym = String(selected?.symbol || '').trim().toUpperCase();
+    if (!sym || typeof window === 'undefined') return undefined;
+    window.dispatchEvent(new CustomEvent('cim:chart-focus-symbol', {
+      detail: { symbol: sym, source: 'indices' },
+    }));
+    return undefined;
+  }, [selected?.symbol]);
   const draggingRef                   = useRef(false);
   const startXRef                     = useRef(0);
   const startWidthRef                 = useRef(0);
   const wrapperRef                    = useRef(null);
   const rowRefs                       = useRef({});
+  const scrolledSelectedRef           = useRef(null);
   const { getPanelHeights, heightsRef, handleHeightsChange, applyLayoutHeights, heightsRevision } = useSyncedPanelHeights({
     columnCount: columnCountForChartLayout(chartLayout),
   });
@@ -291,6 +302,7 @@ export default function IndicesPage({ onOpenConstituents, onContextMenuRequest }
     function handleKey(e) {
       if (!['ArrowUp','ArrowDown'].includes(e.key)) return;
       if (indOpen) return;
+      if (isTypingContext(e)) return;
       e.preventDefault();
       const idx = filteredEquity.findIndex(i => i.symbol === selected?.symbol);
       if (idx === -1) return;
@@ -310,7 +322,12 @@ export default function IndicesPage({ onOpenConstituents, onContextMenuRequest }
     if (!selected?.symbol || filteredEquity.length === 0) return;
     const idx = filteredEquity.findIndex(i => i.symbol === selected.symbol);
     if (idx < 0) return;
-    rowRefs.current[idx]?.scrollIntoView({ block: 'nearest' });
+    const el = rowRefs.current[idx];
+    if (!el) return;
+    // Only scroll when selection changes — not on every list/live refresh.
+    if (scrolledSelectedRef.current === selected.symbol) return;
+    scrolledSelectedRef.current = selected.symbol;
+    el.scrollIntoView({ block: 'nearest' });
   }, [filteredEquity, selected]);
 
   useEffect(() => {
@@ -547,7 +564,7 @@ export default function IndicesPage({ onOpenConstituents, onContextMenuRequest }
 
         <div style={{ flex:1, minWidth:8 }} />
 
-        <DrawingToolsDesignControl />
+        <BasketToolbarButton />
 
         {selected && selected.category === 'equity' && (
           <button onClick={() => onOpenConstituents && onOpenConstituents(selected)}
@@ -619,7 +636,14 @@ export default function IndicesPage({ onOpenConstituents, onContextMenuRequest }
       </div>
 
       {/* ── Body ── */}
-      <div ref={wrapperRef} style={{ flex:1, display:'flex', overflow:'hidden' }}>
+      <StockListSplitBody
+        splitRef={wrapperRef}
+        footer={(
+          <>
+            {filteredEquity.length} {filteredEquity.length === 1 ? 'index' : 'indices'}
+          </>
+        )}
+      >
         <div style={{ width:paneWidth, minWidth:160, flexShrink:0, display:'flex', flexDirection:'column', overflowY:'auto', overflowX:'hidden', borderRight:'1px solid var(--border)' }}>
           {filteredEquity.length > 0 && (
             <div style={{ flexShrink:0, borderBottom:'1px solid var(--border)', padding:'4px 0' }}>
@@ -680,7 +704,7 @@ export default function IndicesPage({ onOpenConstituents, onContextMenuRequest }
             </DrawingMirrorProvider>
           )}
         </div>
-      </div>
+      </StockListSplitBody>
     </div>
   );
 }
@@ -726,13 +750,18 @@ function IndexRow({ index, i, selected, onSelect, rowRefs, onContextMenuRequest,
         ) : null}
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap: 6 }}>
-            <span style={{ fontSize:11, fontWeight:600, color: isSelected?'var(--accent-blue)':'var(--text-primary)', flex:1, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{index.name}</span>
+            <span
+              title={`${index.symbol} — drag to Basket`}
+              draggable
+              onDragStart={(e) => {
+                e.stopPropagation();
+                startBasketSymbolDrag(e, index.symbol, 'index');
+              }}
+              style={{ fontSize:11, fontWeight:600, color: isSelected?'var(--accent-blue)':'var(--text-primary)', flex:1, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', cursor: 'grab' }}
+            >{index.name}</span>
             <span style={{ display:'flex', alignItems:'center', gap: 4, flexShrink:0 }}>
               <span onClick={e => e.stopPropagation()} style={{ display:'inline-flex' }}>
                 <IndexStarTag symbol={index.symbol} tag={starTag} onChange={onStarTagChange} />
-              </span>
-              <span onClick={e => e.stopPropagation()} style={{ display:'inline-flex' }}>
-                <InstrumentNotesIcon symbol={index.symbol} instrumentType="index" />
               </span>
               <span style={{ fontFamily:'var(--font-mono)', fontSize:11, color:chgColor, fontWeight:500 }}>{chg!=null?`${chg>0?'+':''}${chg.toFixed(2)}%`:'—'}</span>
             </span>

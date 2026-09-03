@@ -79,6 +79,8 @@ export default function ExternalFinancialsLinks({
   layout = 'dropdown',
   includeTvEarnings = false,
   onOpenChart = null,
+  /** 'consolidated' | 'standalone' — must match the quarterly sheet toggle when present. */
+  basis = 'consolidated',
   screenerLabel = 'Screener ↗',
   tradingViewLabel = 'TradingView ↗',
   tvEarningsLabel = 'TV Earnings ↗',
@@ -88,7 +90,7 @@ export default function ExternalFinancialsLinks({
   const [menuRect, setMenuRect] = useState(null);
   const anchorRef = useRef(null);
 
-  const screenerHref = screenerFinancialsUrl(sym);
+  const screenerHref = screenerFinancialsUrl(sym, basis);
   const tvHref = tradingViewFinancialsUrl(sym);
   const tvEarningsHref = includeTvEarnings ? tradingViewEarningsUrl(sym) : null;
   const hasChart = typeof onOpenChart === 'function';
@@ -148,7 +150,7 @@ export default function ExternalFinancialsLinks({
       key: 'screener',
       label: screenerLabel,
       href: screenerHref,
-      title: `Screener.in financials — ${sym}`,
+      title: `Screener.in ${basis === 'standalone' ? 'standalone' : 'consolidated'} — ${sym}`,
       tvStyle: false,
     });
   }
@@ -216,11 +218,12 @@ export default function ExternalFinancialsLinks({
                 left: menuRect.left,
                 width: menuRect.width,
                 zIndex: MENU_Z,
-                backgroundColor: 'var(--bg-secondary)',
-                border: '1px solid var(--border)',
+                backgroundColor: 'var(--bg-secondary, #161b22)',
+                border: '1px solid var(--border, #30363d)',
                 borderRadius: 6,
                 boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
                 overflow: 'hidden',
+                color: 'var(--text-secondary, #8b949e)',
               }}
             >
               {menuItems.map(item => (
@@ -259,7 +262,7 @@ export default function ExternalFinancialsLinks({
           href={screenerHref}
           target="_blank"
           rel="noopener noreferrer"
-          title={`Screener.in financials — ${sym}`}
+          title={`Screener.in ${basis === 'standalone' ? 'standalone' : 'consolidated'} — ${sym}`}
           style={linkStyle}
           onClick={e => openExternalUrl(screenerHref, e)}
           {...hover}

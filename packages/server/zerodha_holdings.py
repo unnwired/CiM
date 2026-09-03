@@ -6,6 +6,7 @@ import io
 from typing import Any, Optional
 
 from server.pnl_ledger import (
+    BROKER_ZERODHA,
     _normalize_symbol,
     compute_symbol_avg_entry,
     parse_entry_price,
@@ -141,12 +142,15 @@ def parse_zerodha_holdings_csv(text: str) -> tuple[list[dict], list[dict]]:
 
 
 def compare_ledger_to_holdings(ledger: dict, holdings_rows: list[dict]) -> list[dict]:
-    """Return mismatches between ledger open lots and holdings file."""
+    """Return mismatches between Zerodha open lots and holdings file.
+
+    Paytm/manual lots for the same symbol are ignored — holdings is Zerodha truth.
+    """
     mismatches: list[dict] = []
     for row in holdings_rows:
         sym = row["symbol"]
-        ledger_qty = symbol_open_qty(ledger, sym)
-        ledger_avg = compute_symbol_avg_entry(ledger, sym)
+        ledger_qty = symbol_open_qty(ledger, sym, brokers=(BROKER_ZERODHA,))
+        ledger_avg = compute_symbol_avg_entry(ledger, sym, brokers=(BROKER_ZERODHA,))
         holdings_qty = row["quantity"]
         holdings_avg = row["average_price"]
         qty_match = ledger_qty == holdings_qty
@@ -188,8 +192,8 @@ def reconcile_open_to_holdings(
         if sym_filter and sym not in sym_filter:
             skipped.append(sym)
             continue
-        ledger_qty = symbol_open_qty(ledger, sym)
-        ledger_avg = compute_symbol_avg_entry(ledger, sym)
+        ledger_qty = symbol_open_qty(ledger, sym, brokers=(BROKER_ZERODHA,))
+        ledger_avg = compute_symbol_avg_entry(ledger, sym, brokers=(BROKER_ZERODHA,))
         holdings_qty = row["quantity"]
         holdings_avg = row["average_price"]
         if ledger_qty == holdings_qty and _avg_prices_match(ledger_avg, holdings_avg):
@@ -210,6 +214,8 @@ def reconcile_open_to_holdings(
             qty=holdings_qty,
             entry_price=holdings_avg,
             import_source="holdings_reconcile",
+            broker="zerodha",
+            replace_brokers=("zerodha",),
         )
         reconciled.append({
             "symbol": sym,

@@ -1,275 +1,37 @@
 """
-Market sector taxonomy: 12 NSE-style macro sectors + Unclassified.
-Raw nse_sector / nse_industry (exchange, Screener, etc.) are remapped via keyword rules.
-symbol_overrides / rules in data/sector_mapping.json still apply first; outputs are always macro labels.
+Market sector taxonomy: Nifty index ∪ industry tags (multi-tag).
+
+Canonical labels come from index_industry_sectors.sector tag specs.
+symbol_overrides / rules in data/sector_mapping.json still apply.
 """
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
-UNCLASSIFIED = "Unclassified"
+try:
+    from server import index_industry_sectors as iis
+except ImportError:  # packages\server on sys.path (unit tests)
+    import index_industry_sectors as iis
 
+UNCLASSIFIED = iis.UNCLASSIFIED
+
+# Backward-compatible aliases used by older tests / Admin copy.
 AUTO_AND_AUTO_COMPONENTS = "Automobile and Auto Components"
 AUTOMOBILES = "Automobiles"
 CONSUMER_DISCRETIONARY = "Consumer Discretionary"
 
-# Twelve macro-economic sectors (NSE index style). Order is fixed for UI / docs.
-MACRO_ECONOMIC_SECTORS: List[str] = [
-    "Commodities",
-    CONSUMER_DISCRETIONARY,
-    AUTO_AND_AUTO_COMPONENTS,
-    AUTOMOBILES,
-    "Energy",
-    "Fast Moving Consumer Goods (FMCG)",
-    "Financial Services",
-    "Healthcare",
-    "Industrials",
-    "Information Technology",
-    "Services",
-    "Telecommunication",
-    "Utilities",
-    "Diversified",
-]
-
-# Persisted schema bump remaps canonical_sectors in sector_mapping.json on load.
-MACRO_SECTOR_SCHEMA_VERSION = 3
-
-# Sector dropdown grouping (Consumer Discretionary cluster).
-SECTOR_DROPDOWN_GROUPS: List[Dict[str, Any]] = [
-    {
-        "label": CONSUMER_DISCRETIONARY,
-        "sectors": [
-            CONSUMER_DISCRETIONARY,
-            AUTO_AND_AUTO_COMPONENTS,
-            AUTOMOBILES,
-        ],
-    },
-]
-
-# Backward-compatible alias (server / callers).
+# New primary taxonomy (index ∪ industry).
+MACRO_ECONOMIC_SECTORS: List[str] = list(iis.SECTOR_TAG_ORDER)
 CANONICAL_MARKET_SECTORS = MACRO_ECONOMIC_SECTORS
 
-_FMCG = "Fast Moving Consumer Goods (FMCG)"
+# Persisted schema bump remaps canonical_sectors in sector_mapping.json on load.
+MACRO_SECTOR_SCHEMA_VERSION = 5
 
-# First matching rule wins (list is ordered: more specific before broader).
-_MACRO_KEYWORD_RULES: List[Tuple[str, Tuple[str, ...]]] = [
-    ("Diversified", (" diversified ", " conglomerate ", " multi-sector ")),
-    (
-        "Telecommunication",
-        (
-            " telecommunication ",
-            " telecom ",
-            " wireless ",
-            " communication services ",
-        ),
-    ),
-    (
-        "Information Technology",
-        (
-            " information technology ",
-            " it enabled ",
-            " software & consulting ",
-            " software and consulting ",
-            " it services ",
-            " it consulting ",
-            " computers - software ",
-            " computers-software ",
-            " technology services ",
-            " electronic technology ",
-            " cyber security ",
-            " cloud ",
-            " analytics ",
-            " digital ",
-        ),
-    ),
-    (
-        "Financial Services",
-        (
-            " financial services ",
-            " financial service ",
-            " finance ",
-            " banking ",
-            " bank ",
-            " banks ",
-            " insurance ",
-            " nbfc ",
-            " asset management ",
-            " capital markets ",
-            " stock broking ",
-            " fintech ",
-            " housing finance ",
-            " mutual fund ",
-            " lending ",
-        ),
-    ),
-    (
-        "Healthcare",
-        (
-            " healthcare ",
-            " pharmaceutical ",
-            " pharma ",
-            " hospital ",
-            " diagnostic ",
-            " biotechnology ",
-            " health services ",
-            " health technology ",
-            " drugs ",
-            " drug ",
-        ),
-    ),
-    (
-        "Energy",
-        (
-            " oil, gas ",
-            " oil gas ",
-            " oil & gas ",
-            " petroleum ",
-            " refineries ",
-            " refining ",
-            " energy mineral ",
-            " exploration & production ",
-            " exploration and production ",
-            " lng ",
-            " cng ",
-            " coal ",
-            " oil gas & consumable fuels ",
-        ),
-    ),
-    (
-        AUTOMOBILES,
-        (
-            " automobiles ",
-            " passenger cars ",
-            " passenger cars & utility vehicles ",
-            " 2/3 wheelers ",
-            " 2/3 wheeler ",
-            " auto dealer ",
-        ),
-    ),
-    (
-        AUTO_AND_AUTO_COMPONENTS,
-        (
-            " auto components ",
-            " auto component ",
-            " automobile and auto components ",
-            " automobile ",
-            " tyres ",
-            " tire ",
-        ),
-    ),
-    (
-        "Utilities",
-        (
-            " utilities ",
-            " utility ",
-            " electric ",
-            " power distribution ",
-            " power transmission ",
-            " integrated power ",
-            " gas distribution ",
-            " water supply ",
-            " renewable energy ",
-            " nuclear power ",
-            " hydro ",
-            " power ",
-        ),
-    ),
-    (
-        "Fast Moving Consumer Goods (FMCG)",
-        (
-            " fmcg ",
-            " consumer non-durables ",
-            " food products ",
-            " beverages ",
-            " tobacco ",
-            " personal care ",
-            " household products ",
-            " packaged foods ",
-            " staples ",
-            " fast moving consumer ",
-        ),
-    ),
-    (
-        CONSUMER_DISCRETIONARY,
-        (
-            " consumer durables ",
-            " consumer discretionary ",
-            " retail trade ",
-            " retail ",
-            " textiles ",
-            " apparel ",
-            " leisure ",
-            " hotels ",
-            " media & ",
-            " media and ",
-            " entertainment ",
-            " realty ",
-            " construction materials ",
-            " consumer services ",
-            " wholesale ",
-        ),
-    ),
-    (
-        "Commodities",
-        (
-            " commodities ",
-            " metals & mining ",
-            " metals and mining ",
-            " steel ",
-            " aluminium ",
-            " aluminum ",
-            " zinc ",
-            " copper ",
-            " non-energy mineral ",
-            " agro commodities ",
-            " agricultural ",
-            " fertilizers ",
-            " pesticides ",
-            " mining ",
-            " petrochemical ",
-        ),
-    ),
-    (
-        "Industrials",
-        (
-            " capital goods ",
-            " industrials ",
-            " machinery ",
-            " electrical equipment ",
-            " building products ",
-            " aerospace ",
-            " defence ",
-            " defense ",
-            " cement ",
-            " chemicals ",
-            " process industries ",
-            " industrial services ",
-            " producer manufacturing ",
-            " engineering ",
-            " shipbuilding ",
-        ),
-    ),
-    (
-        "Services",
-        (
-            " commercial services ",
-            " distribution services ",
-            " transportation ",
-            " logistics ",
-            " courier ",
-            " education services ",
-            " professional services ",
-            " business services ",
-            " outsourcing ",
-            " administrative ",
-            " consulting ",
-        ),
-    ),
-]
+# No dropdown nesting in the new taxonomy.
+SECTOR_DROPDOWN_GROUPS: List[Dict[str, Any]] = []
 
 
 def mapping_path(data_dir: Path) -> Path:
@@ -323,6 +85,16 @@ def load_mapping(data_dir: Path) -> Dict[str, Any]:
     if int(data.get("macro_sector_schema_version", 0)) < MACRO_SECTOR_SCHEMA_VERSION:
         data["canonical_sectors"] = _canonical_sectors_default()
         data["macro_sector_schema_version"] = MACRO_SECTOR_SCHEMA_VERSION
+        # Remap legacy override labels to new tags where possible.
+        remapped = {}
+        for k, v in (data.get("symbol_overrides") or {}).items():
+            ku = str(k).strip().upper()
+            norm = iis.normalize_tag_label(str(v)) if v is not None else None
+            if ku and norm and norm != UNCLASSIFIED:
+                remapped[ku] = norm
+            elif ku and v is not None and str(v).strip():
+                remapped[ku] = str(v).strip()
+        data["symbol_overrides"] = remapped
         save_mapping(data_dir, data)
         with open(p, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -340,7 +112,9 @@ def save_mapping(data_dir: Path, data: Dict[str, Any]) -> None:
         "version": int(data.get("version", 1)),
         "canonical_sectors": cs,
         "use_exchange_labels": bool(data.get("use_exchange_labels", True)),
-        "macro_sector_schema_version": int(data.get("macro_sector_schema_version", MACRO_SECTOR_SCHEMA_VERSION)),
+        "macro_sector_schema_version": int(
+            data.get("macro_sector_schema_version", MACRO_SECTOR_SCHEMA_VERSION)
+        ),
         "rules": data.get("rules") or [],
         "symbol_overrides": data.get("symbol_overrides") or {},
     }
@@ -355,7 +129,8 @@ def save_mapping(data_dir: Path, data: Dict[str, Any]) -> None:
         ku = str(k).strip().upper()
         vs = str(v).strip()
         if ku and vs:
-            sym_ov[ku] = vs
+            norm = iis.normalize_tag_label(vs)
+            sym_ov[ku] = norm if norm else vs
     out["symbol_overrides"] = sym_ov
     p = mapping_path(data_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -396,71 +171,31 @@ def ensure_screener_isin_column(db_path: Path) -> None:
         conn.close()
 
 
-def _field_value(field: str, nse_sector: Optional[str], nse_industry: Optional[str]) -> str:
-    f = (field or "industry").lower().strip()
-    raw = nse_industry if f == "industry" else nse_sector
-    if raw is None:
-        return ""
-    return str(raw).strip()
-
-
 def remap_to_macro_sector(label: str) -> str:
-    """
-    Map any industry / sector / breadcrumb string to one of MACRO_ECONOMIC_SECTORS or Unclassified.
-    """
-    if not label or not str(label).strip():
-        return UNCLASSIFIED
-    t = " ".join(str(label).split())
-    tl = t.lower()
-    if tl == UNCLASSIFIED.lower():
-        return UNCLASSIFIED
-    for canon in MACRO_ECONOMIC_SECTORS:
-        if tl == canon.lower():
-            return canon
-    if "fmcg" in tl or "fast moving consumer" in tl:
-        return _FMCG
-    if tl in ("it", "information technology"):
-        return "Information Technology"
-    low = f" {tl} "
-    if not low.strip():
-        return UNCLASSIFIED
-    for macro, keywords in _MACRO_KEYWORD_RULES:
-        for kw in keywords:
-            if kw in low:
-                return macro
-    return UNCLASSIFIED
-
-
-def _sector_from_screener_market_sets(
-    symbol: str,
-    data_dir: Optional[Path],
-) -> Optional[str]:
-    if data_dir is None:
-        return None
-    try:
-        from screener_market_sets import load_market_sets
-
-        sets = load_market_sets(data_dir)
-    except Exception:
-        return None
-    sym_u = str(symbol or "").strip().upper()
-    if not sym_u:
-        return None
-    auto_syms = sets.get(AUTOMOBILES) or set()
-    parent_syms = sets.get(AUTO_AND_AUTO_COMPONENTS) or set()
-    if sym_u in auto_syms:
-        return AUTOMOBILES
-    if sym_u in parent_syms:
-        return AUTO_AND_AUTO_COMPONENTS
-    return None
+    """Normalize any label to a canonical tag (or Unclassified)."""
+    norm = iis.normalize_tag_label(label)
+    return norm if norm else UNCLASSIFIED
 
 
 def canonical_sectors_for_ui() -> List[str]:
-    return list(MACRO_ECONOMIC_SECTORS) + [UNCLASSIFIED]
+    return iis.canonical_sector_tags()
 
 
 def sector_dropdown_groups_for_ui() -> List[Dict[str, Any]]:
     return [dict(g) for g in SECTOR_DROPDOWN_GROUPS]
+
+
+def resolve_market_sectors(
+    symbol: str,
+    nse_sector: Optional[str],
+    nse_industry: Optional[str],
+    mapping: Dict[str, Any],
+    *,
+    data_dir: Optional[Path] = None,
+) -> List[str]:
+    return iis.resolve_market_sectors(
+        symbol, nse_sector, nse_industry, mapping, data_dir=data_dir,
+    )
 
 
 def resolve_market_sector(
@@ -471,52 +206,11 @@ def resolve_market_sector(
     *,
     data_dir: Optional[Path] = None,
 ) -> str:
-    sym_u = str(symbol or "").strip().upper()
-    overrides = mapping.get("symbol_overrides") or {}
-    if sym_u and sym_u in overrides:
-        v = str(overrides[sym_u]).strip()
-        return remap_to_macro_sector(v) if v else UNCLASSIFIED
-
-    from_sets = _sector_from_screener_market_sets(sym_u, data_dir)
-    if from_sets:
-        return from_sets
-
-    ns = (nse_sector or "").strip() if nse_sector else ""
-    ni = (nse_industry or "").strip() if nse_industry else ""
-
-    for rule in mapping.get("rules") or []:
-        if not isinstance(rule, dict):
-            continue
-        field = rule.get("field", "industry")
-        rtype = (rule.get("type") or "contains").lower().strip()
-        pattern = rule.get("pattern")
-        target = rule.get("sector")
-        if pattern is None or target is None:
-            continue
-        pattern_s = str(pattern).strip()
-        target_s = str(target).strip()
-        if not pattern_s or not target_s:
-            continue
-        hay = _field_value(field, ns or None, ni or None)
-        if rtype == "equals":
-            if hay.lower() == pattern_s.lower():
-                return remap_to_macro_sector(target_s)
-        elif rtype == "regex":
-            try:
-                if re.search(pattern_s, hay, flags=re.IGNORECASE):
-                    return remap_to_macro_sector(target_s)
-            except re.error:
-                continue
-        else:  # contains
-            if pattern_s.lower() in hay.lower():
-                return remap_to_macro_sector(target_s)
-
-    if mapping.get("use_exchange_labels", True):
-        blob = " ".join(x for x in (ni, ns) if x).strip()
-        if blob:
-            return remap_to_macro_sector(blob)
-
-    return UNCLASSIFIED
+    """Joined multi-tag display string (e.g. 'PSU Bank · Bank · Financial Services')."""
+    tags = resolve_market_sectors(
+        symbol, nse_sector, nse_industry, mapping, data_dir=data_dir,
+    )
+    return iis.format_sector_tags(tags)
 
 
 def symbol_set_for_market_sectors(
@@ -524,12 +218,17 @@ def symbol_set_for_market_sectors(
     db_path: Path,
     sector_names: List[str],
 ) -> Optional[Set[str]]:
-    want = {str(s).strip() for s in (sector_names or []) if str(s).strip()}
-    if not want:
+    want_raw = {str(s).strip() for s in (sector_names or []) if str(s).strip()}
+    if not want_raw:
         return None
+    want: Set[str] = set()
+    for name in want_raw:
+        norm = iis.normalize_tag_label(name) or name
+        want.add(norm)
     if not db_path.exists():
         return set()
     mapping = load_mapping(data_dir)
+    iis.load_index_cores(data_dir)
     conn = sqlite3.connect(str(db_path))
     try:
         cur = conn.cursor()
@@ -540,7 +239,22 @@ def symbol_set_for_market_sectors(
     out: Set[str] = set()
     for row in rows:
         sym, se, ind = row[0], row[1], row[2]
-        ms = resolve_market_sector(sym, se, ind, mapping, data_dir=data_dir)
-        if ms in want:
+        tags = resolve_market_sectors(sym, se, ind, mapping, data_dir=data_dir)
+        if any(t in want for t in tags):
             out.add(str(sym).strip().upper())
+    # Also include index-core members that may not be in screener yet.
+    cores = iis.load_index_cores(data_dir)
+    for tag in want:
+        if tag == UNCLASSIFIED:
+            continue
+        out |= set(cores.get(tag) or set())
     return out
+
+
+def ensure_index_sector_cores(data_dir: Path, db_path: Path) -> None:
+    """Kick off index-core load / background refresh for hybrid tags."""
+    iis.ensure_index_cores_async(data_dir, db_path)
+
+
+def refresh_index_sector_cores(data_dir: Path, db_path: Path) -> Dict[str, Any]:
+    return iis.refresh_index_cores(data_dir, db_path)

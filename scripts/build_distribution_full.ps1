@@ -7,6 +7,7 @@
 param(
     [string]$SourceRoot = "",
     [string]$ExportRoot = "",
+    [string]$DbSource = "",
     [string]$Version = "",
     [string]$LicenseSecret = "",
     [switch]$SkipExport,
@@ -30,6 +31,12 @@ if (-not $ExportRoot) {
 } elseif (-not [System.IO.Path]::IsPathRooted($ExportRoot)) {
     $ExportRoot = Join-Path $RepoRoot $ExportRoot
 }
+$DbSource = Resolve-CiMDistributionDbSource -RepoRoot $RepoRoot -DbSource $DbSource
+Assert-CiMDistributionDbSource -DbPath $DbSource -Hint (
+    "Build Launcher ships the showcase testbed database (default D:\CiM\Client_Test\data\nse_data.db). " +
+    "Run OHLCV + filter rebuild on Client_Test first, or pass -DbSource explicitly."
+)
+Write-Host "Distribution DB source: $DbSource"
 if (-not $Version) {
     $Version = Get-CiMRepoVersion -RepoRoot $RepoRoot
 }
@@ -151,6 +158,7 @@ if (-not $SkipExport) {
     $exportArgs = @{
         SourceRoot           = $SourceRoot
         ExportRoot           = $ExportRoot
+        DbSource             = $DbSource
         Mode                 = 'distribution'
         SkipEmbeddedPython   = [bool]$FastExport
         SkipWheelhouse       = [bool]$FastExport
@@ -175,7 +183,7 @@ if (-not $SkipExport) {
 
 $step++
 Log "Step $step/$stepTotal`: Sync-ExportDistributionFixes.ps1"
-& (Join-Path $ScriptDir "Sync-ExportDistributionFixes.ps1") -RepoRoot $RepoRoot -ExportRoot $ExportRoot
+& (Join-Path $ScriptDir "Sync-ExportDistributionFixes.ps1") -RepoRoot $RepoRoot -ExportRoot $ExportRoot -DbSource $DbSource
 
 if ($PlaintextExport) {
     $step++

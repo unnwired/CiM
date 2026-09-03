@@ -211,6 +211,7 @@ foreach ($rel in @(
         "server\market_map.py",
         "scrape_daily.py",
         "scrape_4h.py",
+        "scrape_30m.py",
         "nse_bhavcopy.py",
         "config\github_updates.json",
         "Apply-Update.bat"

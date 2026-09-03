@@ -4,6 +4,7 @@ import { istTodayParts } from './PnLDateSelect';
 import PnLPeriodRangeSelect from './PnLPeriodRangeSelect';
 import StockListColumnHeader from './StockListColumnHeader';
 import { useStockListColumnWidths } from '../hooks/useStockListColumnWidths';
+import { useSyncedHeaderScroll } from '../hooks/useSyncedHeaderScroll';
 import { columnWidthKey } from '../hooks/stockListColumnStorage';
 import {
   STOCK_LIST_ROW_HEIGHT,
@@ -24,6 +25,7 @@ import {
 } from '../utils/buildPnlPeriodReport';
 import { PNL_FORM_GAP, PnlToolbarButton, pnlFormMonoFieldStyle } from './pnlFormDialogChrome';
 import PnLImportZerodhaDialog from './PnLImportZerodhaDialog';
+import PnLImportTaxPnlDialog from './PnLImportTaxPnlDialog';
 import PnLSyncHoldingsDialog from './PnLSyncHoldingsDialog';
 import PnLCashDialog from './PnLCashDialog';
 
@@ -364,6 +366,7 @@ export default function PnLPeriodPanel({
   const [sortBy, setSortBy] = useState('symbol');
   const [sortDir, setSortDir] = useState('asc');
   const [importOpen, setImportOpen] = useState(false);
+  const [taxPnlOpen, setTaxPnlOpen] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
   const [cashDialog, setCashDialog] = useState(null);
 
@@ -430,6 +433,7 @@ export default function PnLPeriodPanel({
   );
 
   const { startResize, resizingKey, gridTemplateColumns } = useStockListColumnWidths(PNL_PERIOD_COLS);
+  const { headerScrollRef, rowsScrollRef } = useSyncedHeaderScroll([gridTemplateColumns, sortedRows.length]);
 
   const handleSort = useCallback((key) => {
     setSortBy((prev) => {
@@ -477,6 +481,9 @@ export default function PnLPeriodPanel({
             <PnlToolbarButton onClick={() => setCashDialog('withdraw')}>
               Withdraw
             </PnlToolbarButton>
+            <PnlToolbarButton onClick={() => setTaxPnlOpen(true)}>
+              Tax P&L
+            </PnlToolbarButton>
             <PnlToolbarButton onClick={() => setImportOpen(true)}>
               Import CSV
             </PnlToolbarButton>
@@ -488,6 +495,11 @@ export default function PnLPeriodPanel({
             </PnlToolbarButton>
           </div>
         </div>
+        <PnLImportTaxPnlDialog
+          open={taxPnlOpen}
+          onClose={() => setTaxPnlOpen(false)}
+          onImported={onImported}
+        />
         <PnLImportZerodhaDialog
           open={importOpen}
           onClose={() => setImportOpen(false)}
@@ -542,7 +554,7 @@ export default function PnLPeriodPanel({
         </div>
       </div>
 
-      <div style={{ ...stockListHeaderStripStyle, overflowX: 'auto', flexShrink: 0 }}>
+      <div ref={headerScrollRef} style={{ ...stockListHeaderStripStyle, overflowX: 'hidden', overflowY: 'hidden', flexShrink: 0 }}>
         <div style={stockListGridTrackStyle(gridTemplateColumns)}>
           {PNL_PERIOD_COLS.map((col, colIdx) => {
             const sortable = col.sortable !== false;
@@ -570,7 +582,7 @@ export default function PnLPeriodPanel({
         </div>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+      <div ref={rowsScrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'auto' }}>
         {sortedRows.length === 0 ? (
           <div style={{ padding: 12, fontSize: 11, color: 'var(--text-muted)' }}>
             No trades in this period.

@@ -5,10 +5,63 @@ import json
 import uuid
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from server.portfolio_entry import compute_pl_pct, parse_entry_price
+
+BROKER_ZERODHA = "zerodha"
+BROKER_PAYTM = "paytm"
+BROKER_MANUAL = "manual"
+BROKER_VALUES = frozenset({BROKER_ZERODHA, BROKER_PAYTM, BROKER_MANUAL})
+
+
+def normalize_broker(value: Any) -> Optional[str]:
+    raw = str(value or "").strip().lower()
+    if raw in BROKER_VALUES:
+        return raw
+    return None
+
+
+def infer_broker(record: dict) -> str:
+    """Resolve broker tag for an open lot or closed trade."""
+    tagged = normalize_broker(record.get("broker"))
+    if tagged:
+        return tagged
+    src = str(record.get("import_source") or "").strip().lower()
+    if src in ("zerodha", "holdings_reconcile", "positions_today"):
+        return BROKER_ZERODHA
+    if record.get("zerodha_trade_id") or record.get("zerodha_trade_ids"):
+        return BROKER_ZERODHA
+    return BROKER_MANUAL
+
+
+def ensure_broker_tags(ledger: dict) -> int:
+    """Backfill broker only when missing. Never overwrite an explicit tag."""
+    updated = 0
+    for p in ledger.get("positions", []) or []:
+        if not isinstance(p, dict):
+            continue
+        if normalize_broker(p.get("broker")):
+            continue
+        p["broker"] = infer_broker(p)
+        updated += 1
+    for t in ledger.get("closed_trades", []) or []:
+        if not isinstance(t, dict):
+            continue
+        if normalize_broker(t.get("broker")):
+            continue
+        t["broker"] = infer_broker(t)
+        updated += 1
+    return updated
+
+
+def set_record_broker(record: dict, broker: str) -> str:
+    b = normalize_broker(broker)
+    if not b:
+        raise ValueError("broker must be zerodha, paytm, or manual")
+    record["broker"] = b
+    return b
 
 
 def _default_ledger() -> dict:
@@ -21,6 +74,7 @@ def _default_ledger() -> dict:
         "available_cash": 0.0,
         "cash_log": [],
         "cash_refs": {},
+        "corp_actions_applied": {"keys": []},
     }
 
 
@@ -60,7 +114,13 @@ def load_ledger(path: Path) -> dict:
             available_cash = round(float(data.get("available_cash") or 0), 2)
         except (TypeError, ValueError):
             available_cash = 0.0
-        return {
+        corp_applied = data.get("corp_actions_applied", {})
+        if not isinstance(corp_applied, dict):
+            corp_applied = {}
+        applied_keys = corp_applied.get("keys", [])
+        if not isinstance(applied_keys, list):
+            applied_keys = []
+        ledger = {
             "positions": positions,
             "closed_trades": closed,
             "cycle_seq": cycle_seq,
@@ -69,7 +129,10 @@ def load_ledger(path: Path) -> dict:
             "available_cash": available_cash,
             "cash_log": cash_log,
             "cash_refs": cash_refs,
+            "corp_actions_applied": {"keys": applied_keys},
         }
+        ensure_broker_tags(ledger)
+        return ledger
     except Exception:
         return _default_ledger()
 
@@ -129,14 +192,25 @@ def _ensure_cycle_maps(ledger: dict) -> None:
         ledger["active_cycle"] = {}
 
 
-def _sorted_open_positions(ledger: dict, symbol: str) -> list[dict]:
+def _sorted_open_positions(
+    ledger: dict,
+    symbol: str,
+    *,
+    brokers: Optional[Sequence[str]] = None,
+) -> list[dict]:
     """Open lots for symbol in FIFO order (oldest buy first)."""
     sym = _normalize_symbol(symbol)
+    allow = None
+    if brokers is not None:
+        allow = {normalize_broker(b) or str(b).strip().lower() for b in brokers}
+        allow.discard("")
     indexed: list[tuple[int, dict]] = []
     for i, p in enumerate(ledger.get("positions", [])):
         if not isinstance(p, dict):
             continue
         if _normalize_symbol(p.get("symbol")) != sym:
+            continue
+        if allow is not None and infer_broker(p) not in allow:
             continue
         q = _parse_qty(p.get("qty"))
         if not q:
@@ -155,13 +229,24 @@ def _sorted_open_positions(ledger: dict, symbol: str) -> list[dict]:
     return [p for _, p in indexed]
 
 
-def symbol_open_qty(ledger: dict, symbol: str) -> int:
+def symbol_open_qty(
+    ledger: dict,
+    symbol: str,
+    *,
+    brokers: Optional[Sequence[str]] = None,
+) -> int:
     sym = _normalize_symbol(symbol)
+    allow = None
+    if brokers is not None:
+        allow = {normalize_broker(b) or str(b).strip().lower() for b in brokers}
+        allow.discard("")
     total = 0
     for p in ledger.get("positions", []):
         if not isinstance(p, dict):
             continue
         if _normalize_symbol(p.get("symbol")) != sym:
+            continue
+        if allow is not None and infer_broker(p) not in allow:
             continue
         q = _parse_qty(p.get("qty"))
         if q:
@@ -409,12 +494,17 @@ def reconcile_pnl_portfolio_sync(portfolio_items: list, ledger: dict) -> dict:
     }
 
 
-def compute_symbol_avg_entry(ledger: dict, symbol: str) -> Optional[float]:
+def compute_symbol_avg_entry(
+    ledger: dict,
+    symbol: str,
+    *,
+    brokers: Optional[Sequence[str]] = None,
+) -> Optional[float]:
     """Weighted average entry across open lots for a symbol (Portfolio display when P&L is master)."""
     sym = _normalize_symbol(symbol)
     total_qty = 0
     total_cost = 0.0
-    for lot in _sorted_open_positions(ledger, sym):
+    for lot in _sorted_open_positions(ledger, sym, brokers=brokers):
         q = _parse_qty(lot.get("qty"))
         e = parse_entry_price(lot.get("entry_price"))
         if q and e is not None:
@@ -535,6 +625,7 @@ def build_open_rows(
                     "entry_price": lot.get("entry_price"),
                     "qty": lot.get("qty"),
                     "entry_date": lot.get("entry_date"),
+                    "broker": infer_broker(lot),
                     "is_placeholder": False,
                 }
                 rows.append(_enrich_open_row(row, quote))
@@ -546,11 +637,35 @@ def build_open_rows(
                 "symbol": sym,
                 "entry_price": hint,
                 "qty": draft_qty,
+                "broker": None,
                 "is_placeholder": True,
             }
             rows.append(_enrich_open_row(row, quote))
 
     return rows
+
+
+def repair_closed_qty_bought(ledger: dict) -> int:
+    """
+    Normalize closed trades so qty_bought == qty_sold.
+
+    Partial Book historically stored the full open-lot size as qty_bought while
+    qty_sold was only the sold slice. That made Closed grids show Bought > Lot sold
+    even when open qty was already zero (e.g. PARAS 102/95, TRENT 50/28).
+    Returns number of trades repaired.
+    """
+    fixed = 0
+    for trade in ledger.get("closed_trades", []) or []:
+        if not isinstance(trade, dict):
+            continue
+        qs = _parse_qty(trade.get("qty_sold"))
+        if qs is None:
+            continue
+        qb = _parse_qty(trade.get("qty_bought"))
+        if qb is None or qb != qs:
+            trade["qty_bought"] = qs
+            fixed += 1
+    return fixed
 
 
 def _normalize_closed_trade(t: dict) -> dict:
@@ -565,6 +680,12 @@ def _normalize_closed_trade(t: dict) -> dict:
         out["cycle_id"] = int(out.get("cycle_id") or 1)
     except (TypeError, ValueError):
         out["cycle_id"] = 1
+    out["broker"] = infer_broker(out)
+    # Display safety: never show Bought > Lot sold for a closed slice.
+    qs = _parse_qty(out.get("qty_sold"))
+    qb = _parse_qty(out.get("qty_bought"))
+    if qs is not None and (qb is None or qb != qs):
+        out["qty_bought"] = qs
     return out
 
 
@@ -603,6 +724,7 @@ def add_position(
     qty: int,
     portfolio_items: list,
     entry_date: Optional[str] = None,
+    broker: Optional[str] = None,
 ) -> dict:
     sym = _normalize_symbol(symbol)
     if sym not in _portfolio_stock_symbols(portfolio_items):
@@ -614,6 +736,7 @@ def add_position(
         raise ValueError("entry_price must be positive")
     if q is None:
         raise ValueError("qty must be a positive integer")
+    broker_tag = normalize_broker(broker) or BROKER_MANUAL
 
     had_open = symbol_open_qty(ledger, sym) > 0
     if not had_open:
@@ -628,6 +751,7 @@ def add_position(
         "qty": q,
         "entry_date": ed,
         "created_at": _now_ist_iso(),
+        "broker": broker_tag,
     }
     ledger.setdefault("positions", []).append(pos)
     sync_portfolio_entry_from_pnl(portfolio_items, ledger, sym)
@@ -671,6 +795,7 @@ def patch_position(
     entry_price: Any = None,
     qty: Any = None,
     entry_date: Any = None,
+    broker: Any = None,
 ) -> dict:
     pid = str(position_id or "").strip()
     for p in ledger.get("positions", []):
@@ -693,8 +818,12 @@ def patch_position(
             if ed is None:
                 raise ValueError("entry_date must be YYYY-MM-DD")
             p["entry_date"] = ed
+        if broker is not None:
+            set_record_broker(p, broker)
         if not p.get("created_at"):
             p["created_at"] = _now_ist_iso()
+        if not normalize_broker(p.get("broker")):
+            p["broker"] = infer_broker(p)
         return p
     raise ValueError("position not found")
 
@@ -754,6 +883,7 @@ def ensure_position_from_placeholder(
         "qty": q,
         "entry_date": ed,
         "created_at": _now_ist_iso(),
+        "broker": BROKER_MANUAL,
     }
     positions.append(pos)
     sync_portfolio_entry_from_pnl(portfolio_items, ledger, sym)
@@ -814,12 +944,14 @@ def _book_position_slice(
     lot_entry_date = parse_entry_date(target.get("entry_date"))
 
     now = _now_ist_iso()
+    # Closed slice only: qty_bought must equal qty_sold. Remaining shares stay on the open lot.
+    # (Previously qty_bought stored the full lot size, so Closed "Bought" > "Lot sold" looked like leftovers.)
     trade = {
         "id": str(uuid.uuid4()),
         "symbol": sym,
         "entry_price": entry,
         "exit_price": exit_p,
-        "qty_bought": open_qty,
+        "qty_bought": qs,
         "qty_sold": qs,
         "realized_pl": realized_pl,
         "realized_pl_pct": realized_pl_pct,
@@ -829,6 +961,7 @@ def _book_position_slice(
         "sale_date": sd,
         "cycle_id": cycle_id,
         "booked_at": now,
+        "broker": infer_broker(target),
     }
     ledger.setdefault("closed_trades", []).append(trade)
 
@@ -863,20 +996,21 @@ def book_fifo(
     sale_date: str,
     quote_snapshot: dict,
     portfolio_items: list,
+    brokers: Optional[Sequence[str]] = None,
 ) -> list[dict]:
     """Sell qty from symbol using FIFO (oldest buy date / lot first)."""
     sym = _normalize_symbol(symbol)
     if sym not in _portfolio_stock_symbols(portfolio_items):
         raise ValueError("symbol not in portfolio")
 
-    total = symbol_open_qty(ledger, sym)
+    total = symbol_open_qty(ledger, sym, brokers=brokers)
     qs = _parse_qty(qty_sold)
     if qs is None:
         raise ValueError("qty_sold must be a positive integer")
     if qs > total:
         raise ValueError("qty_sold exceeds open qty")
 
-    lots = _sorted_open_positions(ledger, sym)
+    lots = _sorted_open_positions(ledger, sym, brokers=brokers)
     if not lots:
         raise ValueError("no open positions for symbol")
 
@@ -1010,7 +1144,8 @@ def patch_placeholder_or_position(
 
 def consolidate_open_lots(ledger: dict, *, symbol: Optional[str] = None) -> int:
     """
-    Merge open lots that share symbol, entry_date, and entry_price (FIFO order preserved).
+    Merge open lots that share broker, symbol, entry_date, and entry_price.
+    Broker is part of the key so Zerodha/Paytm/manual lots never fold together.
     Returns the number of lots folded into another.
     """
     sym_filter = _normalize_symbol(symbol) if symbol else None
@@ -1036,7 +1171,7 @@ def consolidate_open_lots(ledger: dict, *, symbol: Optional[str] = None) -> int:
             merged.append(p)
             continue
 
-        key = (sym, ed, entry)
+        key = (infer_broker(p), sym, ed, entry)
         if key not in bucket_idx:
             bucket_idx[key] = len(merged)
             merged.append(dict(p))
@@ -1250,26 +1385,93 @@ def set_symbol_open_snapshot(
     entry_price: float,
     entry_date: Optional[str] = None,
     import_source: Optional[str] = None,
+    broker: Optional[str] = None,
+    replace_brokers: Optional[Sequence[str]] = None,
 ) -> None:
-    """Replace all open lots for symbol with one lot (holdings sync / repair)."""
+    """
+    Replace open lots for symbol with one lot (holdings sync / repair).
+
+    By default replaces every lot for the symbol. When replace_brokers is set
+    (e.g. Zerodha holdings sync), only those broker lots are removed; Paytm/manual
+    lots for the same symbol are preserved.
+    """
     sym = _normalize_symbol(symbol)
     qs = _parse_qty(qty)
     entry = parse_entry_price(entry_price)
     if not qs or entry is None:
         raise ValueError("qty and entry_price required")
 
-    kept = [
-        p for p in ledger.get("positions", [])
-        if not (isinstance(p, dict) and _normalize_symbol(p.get("symbol")) == sym)
-    ]
+    replace = None
+    if replace_brokers is not None:
+        replace = {normalize_broker(b) or str(b).strip().lower() for b in replace_brokers}
+        replace.discard("")
+
+    kept: list[dict] = []
+    for p in ledger.get("positions", []):
+        if not isinstance(p, dict):
+            continue
+        if _normalize_symbol(p.get("symbol")) != sym:
+            kept.append(p)
+            continue
+        if replace is None or infer_broker(p) in replace:
+            continue
+        kept.append(p)
+
+    broker_tag = normalize_broker(broker)
+    if not broker_tag:
+        src = str(import_source or "").strip().lower()
+        if src in ("zerodha", "holdings_reconcile", "positions_today"):
+            broker_tag = BROKER_ZERODHA
+        else:
+            broker_tag = BROKER_MANUAL
+
     lot: dict = {
         "id": str(uuid.uuid4()),
         "symbol": sym,
         "entry_price": entry,
         "qty": qs,
         "entry_date": parse_entry_date(entry_date) if entry_date else None,
+        "broker": broker_tag,
     }
     if import_source:
         lot["import_source"] = import_source
     kept.append(lot)
     ledger["positions"] = kept
+
+
+def set_position_broker(ledger: dict, position_id: str, broker: str) -> dict:
+    return patch_position(ledger, position_id, broker=broker)
+
+
+def set_closed_trade_broker(ledger: dict, trade_id: str, broker: str) -> dict:
+    tid = str(trade_id or "").strip()
+    for t in ledger.get("closed_trades", []) or []:
+        if not isinstance(t, dict):
+            continue
+        if str(t.get("id")) != tid:
+            continue
+        set_record_broker(t, broker)
+        return t
+    raise ValueError("closed trade not found")
+
+
+def set_symbol_broker(ledger: dict, symbol: str, broker: str, *, scope: str = "open") -> dict:
+    """Bulk-tag open lots and/or closed trades for a symbol."""
+    sym = _normalize_symbol(symbol)
+    b = normalize_broker(broker)
+    if not b:
+        raise ValueError("broker must be zerodha, paytm, or manual")
+    scope_l = str(scope or "open").strip().lower()
+    open_n = 0
+    closed_n = 0
+    if scope_l in ("open", "both", "all"):
+        for p in ledger.get("positions", []) or []:
+            if isinstance(p, dict) and _normalize_symbol(p.get("symbol")) == sym:
+                p["broker"] = b
+                open_n += 1
+    if scope_l in ("closed", "both", "all"):
+        for t in ledger.get("closed_trades", []) or []:
+            if isinstance(t, dict) and _normalize_symbol(t.get("symbol")) == sym:
+                t["broker"] = b
+                closed_n += 1
+    return {"symbol": sym, "broker": b, "open_updated": open_n, "closed_updated": closed_n}

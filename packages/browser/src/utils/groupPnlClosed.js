@@ -77,6 +77,10 @@ export function groupSortValue(group, key) {
   switch (key) {
     case 'symbol':
       return group.symbol ?? '';
+    case 'broker': {
+      const tags = [...new Set((group.trades || []).map((t) => String(t.broker || 'manual').toLowerCase()))];
+      return tags.length === 1 ? tags[0] : tags.sort().join(',');
+    }
     case 'market_cap':
       return t.market_cap;
     case 'entry':

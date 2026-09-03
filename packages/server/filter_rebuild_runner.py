@@ -8,6 +8,7 @@ from filter_rebuild_registry import (
     SNAPSHOT_TIMEFRAME_OPTIONS,
     indicator_families_for_keys,
     keys_for_engine,
+    normalize_snapshot_timeframe,
     resolve_keys,
 )
 from range_channel_snapshots_rebuild import rebuild_range_channel_snapshots
@@ -61,7 +62,12 @@ def run_filter_rebuild(
     snap_keys = keys_for_engine(key_list, "indicator_snapshots")
     families = indicator_families_for_keys(snap_keys)
 
-    tf_input = [str(t).strip().upper() for t in (timeframes or []) if str(t).strip()]
+    tf_input = [
+        normalize_snapshot_timeframe(t)
+        for t in (timeframes or [])
+        if str(t).strip()
+    ]
+    tf_input = [t for t in tf_input if t]
     if snap_keys and not tf_input:
         tf_input = list(_default_timeframes_for_keys(snap_keys))
     if range_keys and not tf_input:
@@ -78,14 +84,24 @@ def run_filter_rebuild(
         "families": sorted(families),
     }
 
+    # Cooperative cancellation: the progress/message callbacks are the safe points
+    # where a pending cancel is noticed and JobCancelled is raised. The rebuild
+    # engines call these per batch, so cancel interrupts mid-phase rather than
+    # only between phases.
+    from server.admin_job_control import JobCancelled, raise_if_cancelled
+
     def on_msg(msg: str) -> None:
+        raise_if_cancelled()
         job_state["message"] = msg
 
     def on_prog(done: int, total: int) -> None:
+        raise_if_cancelled()
         job_state["progress"] = int(done)
         job_state["total"] = max(int(total), 1)
 
+    conn = None
     try:
+        raise_if_cancelled()
         conn = get_db_connection()
         symbols_override = None
         if incremental:
@@ -98,6 +114,7 @@ def run_filter_rebuild(
                 f"Incremental rebuild for {len(symbols_override or [])} recently changed symbol(s)…"
             )
 
+        raise_if_cancelled()
         if vol_keys:
             on_msg("Rebuilding average volume stats…")
             rebuild_volume_stats_universe(
@@ -107,6 +124,7 @@ def run_filter_rebuild(
                 message_callback=on_msg,
             )
 
+        raise_if_cancelled()
         if range_keys:
             on_msg(f"Rebuilding range channel snapshots ({', '.join(range_tfs or ('3D',))})…")
             rebuild_range_channel_snapshots(
@@ -117,6 +135,7 @@ def run_filter_rebuild(
                 message_callback=on_msg,
             )
 
+        raise_if_cancelled()
         if snap_keys:
             mod = load_scrape_daily_module()
             fam_list = sorted(families) if families else sorted(INDICATOR_FAMILIES)
@@ -140,8 +159,21 @@ def run_filter_rebuild(
             job_state["meta"]["symbols_recomputed"] = n
 
         conn.close()
+        conn = None
         invalidate_filter_cache()
         labels = ", ".join(e["label"] for e in entries)
         finish_job(f"Filter rebuild completed: {labels}.")
+    except JobCancelled:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        raise
     except Exception as exc:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
         fail_job(str(exc))

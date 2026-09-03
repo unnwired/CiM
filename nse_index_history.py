@@ -179,9 +179,23 @@ def write_index_history_rows(
 ) -> int:
     cursor = conn.cursor()
     written = 0
+    try:
+        from movers_data import _is_nse_session_day as _session_ok
+    except Exception:
+        try:
+            from server.movers_data import _is_nse_session_day as _session_ok
+        except Exception:
+            _session_ok = lambda d: d.weekday() < 5  # noqa: E731
+
     for row in rows:
         norm = normalize_nse_history_row(row)
         if not norm:
+            continue
+        try:
+            day = datetime.strptime(str(norm["date"])[:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if not _session_ok(day):
             continue
         cursor.execute(
             """

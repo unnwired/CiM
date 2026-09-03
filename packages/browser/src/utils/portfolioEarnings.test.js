@@ -1,4 +1,33 @@
-import { sortItemsByEarningsPriority } from './portfolioEarnings';
+import { isDualBeatRow, sortItemsByEarningsPriority } from './portfolioEarnings';
+
+describe('isDualBeatRow', () => {
+  test('accepts dual beat when both surprises are non-negative', () => {
+    expect(isDualBeatRow({
+      eps_surprise_pct: 5,
+      revenue_surprise_pct: 2,
+      eps_actual: 10,
+      revenue_actual: 100,
+    })).toBe(true);
+  });
+
+  test('accepts revenue-only beat when reported EPS exists (GMDC-style)', () => {
+    expect(isDualBeatRow({
+      eps_surprise_pct: null,
+      revenue_surprise_pct: 3.5,
+      eps_actual: 1.2,
+      revenue_actual: 500,
+    })).toBe(true);
+  });
+
+  test('rejects revenue-only beat without reported EPS', () => {
+    expect(isDualBeatRow({
+      eps_surprise_pct: null,
+      revenue_surprise_pct: 3.5,
+      eps_actual: null,
+      revenue_actual: 500,
+    })).toBe(false);
+  });
+});
 
 describe('sortItemsByEarningsPriority', () => {
   const beatBySymbol = new Map([

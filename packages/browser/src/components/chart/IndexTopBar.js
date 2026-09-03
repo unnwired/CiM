@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
+import BasketToolbarButton from '../Basket';
 import EMAControls from './EMAControls';
-import DrawingToolsDesignControl from './drawing/DrawingToolsDesignControl';
+import { useWheelHorizontalScroll } from '../../hooks/useWheelHorizontalScroll';
 
 const INDICATOR_OPTIONS = [
   { key: 'stochrsi', label: 'StochRSI' },
@@ -20,6 +21,8 @@ export default function IndexTopBar({
   onBack,
 }) {
   const [indOpen, setIndOpen] = useState(false);
+  const toolbarScrollRef = useRef(null);
+  useWheelHorizontalScroll(toolbarScrollRef);
 
   const hasConstituents = !['GC=F', 'SI=F'].includes(index?.symbol);
 
@@ -35,7 +38,7 @@ export default function IndexTopBar({
   };
 
   return (
-    <div className="chart-app-toolbar" style={{
+    <div ref={toolbarScrollRef} className="chart-app-toolbar" style={{
       height:          52,
       minHeight:       52,
       backgroundColor: 'var(--bg-secondary)',
@@ -110,7 +113,7 @@ export default function IndexTopBar({
 
       <div style={{ flex: 1, minWidth: 8 }} />
 
-      <DrawingToolsDesignControl />
+      <BasketToolbarButton />
 
       {/* Constituents button */}
       {hasConstituents && onShowConstituents && (

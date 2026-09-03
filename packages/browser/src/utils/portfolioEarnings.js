@@ -38,21 +38,47 @@ export const WATCHLIST_EARNINGS_WINDOW_DAYS = 20;
 export const DUAL_BEAT_WINDOW_DAYS = 10;
 export const EARNINGS_PRIORITY_DEFAULT_DIR = 'asc';
 
-/** Dual beat: both surprise % ≥ 0 (matches Earnings tab). TV often omits revenue actual. */
+function rowNum(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Beat when every measurable surprise dimension is >= 0 (matches Earnings tab bounds).
+ * If TV omits an estimate, that dimension is not measurable; a beat on the sibling
+ * surprise also requires reported actual for the missing-estimate metric.
+ */
 export function isDualBeatRow(row) {
-  const eps = Number(row?.eps_surprise_pct);
-  const rev = Number(row?.revenue_surprise_pct);
-  if (!Number.isFinite(eps) || !Number.isFinite(rev)) return false;
-  if (eps < 0 || rev < 0) return false;
-  if (
-    row?.eps_actual == null
-    && row?.revenue_actual == null
-    && eps === 0
-    && rev === 0
-  ) {
-    return false;
+  if (!row) return false;
+
+  const epsSurp = row.eps_surprise_pct == null ? null : rowNum(row.eps_surprise_pct);
+  const revSurp = row.revenue_surprise_pct == null ? null : rowNum(row.revenue_surprise_pct);
+  const epsActual = rowNum(row.eps_actual);
+  const revActual = rowNum(row.revenue_actual);
+
+  if (epsSurp != null && epsSurp < 0) return false;
+  if (revSurp != null && revSurp < 0) return false;
+
+  const epsMeasurable = epsSurp != null;
+  const revMeasurable = revSurp != null;
+
+  if (epsMeasurable && revMeasurable) {
+    if (epsActual == null && revActual == null && epsSurp === 0 && revSurp === 0) {
+      return false;
+    }
+    return epsSurp >= 0 && revSurp >= 0;
   }
-  return true;
+
+  if (revMeasurable && !epsMeasurable) {
+    return revSurp >= 0 && epsActual != null;
+  }
+
+  if (epsMeasurable && !revMeasurable) {
+    return epsSurp >= 0 && revActual != null;
+  }
+
+  return false;
 }
 
 /**

@@ -57,6 +57,10 @@ data/nse_dataset.csv
 **/data/nse_dataset.csv
 data/*.db
 
+# Per-user web showcase data (alerts, prefs) — never commit
+data/users/
+**/data/users/
+
 # Optional: other generated/local data
 data/screener_profile/
 data/*.db-journal
@@ -66,6 +70,8 @@ data/admin_scheduler_state.json
 **/data/admin_scheduler_state.json
 data/showcase_admin_scheduler_state.json
 **/data/showcase_admin_scheduler_state.json
+data/upstox_instrument_map.json
+**/data/upstox_instrument_map.json
 
 # Large local/runtime trees
 runtime/

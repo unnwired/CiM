@@ -6,10 +6,11 @@ export function normalizeEquitySymbol(symbol) {
   return String(symbol || '').trim().toUpperCase();
 }
 
-export function screenerFinancialsUrl(symbol, basis = 'standalone') {
+/** Default consolidated — matches quarterly sheet default and typical India filings. */
+export function screenerFinancialsUrl(symbol, basis = 'consolidated') {
   const slug = screenerCompanySlug(symbol);
   if (!slug) return null;
-  const b = String(basis || 'standalone').trim().toLowerCase();
+  const b = String(basis || 'consolidated').trim().toLowerCase();
   if (b === 'consolidated') {
     return `https://www.screener.in/company/${encodeURIComponent(slug)}/consolidated/#quarters`;
   }

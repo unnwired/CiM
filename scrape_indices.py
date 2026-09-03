@@ -31,83 +31,188 @@ def connect_db():
 
     return connect_sqlite(DB_PATH)
 
-INDICES = [
-    ("^NSEI",      "NIFTY 50",                    "equity"),
-    ("^NSEBANK",   "NIFTY Bank",                  "equity"),
-    ("^CNXIT",     "NIFTY IT",                    "equity"),
-    ("^NSMIDCP",   "NIFTY Midcap 100",             "equity"),
-    ("^NSEMDCP50", "NIFTY Midcap 50",              "equity"),
-    ("^CNXFMCG",   "NIFTY FMCG",                  "equity"),
-    ("^CNXPHARMA", "NIFTY Pharma",                "equity"),
-    ("NIFTY_HEALTHCARE.NS", "Nifty Healthcare",   "equity"),
-    ("^CNXAUTO",   "NIFTY Auto",                  "equity"),
-    ("^CNXMETAL",  "NIFTY Metal",                 "equity"),
-    ("^CNXREALTY", "NIFTY Realty",                "equity"),
-    ("^CNXENERGY", "NIFTY Energy",                "equity"),
-    ("^CNXINFRA",  "NIFTY Infra",                 "equity"),
-    ("^CNXINDDEF", "Nifty India Defence",         "equity"),
-    ("^CNXPSUBANK","NIFTY PSU Bank",              "equity"),
-    ("^CNXSC",     "NIFTY Smallcap 100",          "equity"),
-    ("^CNXCMDT",   "NIFTY Commodities",           "equity"),
-    ("^CNXPSE",    "NIFTY PSE",                   "equity"),
-    ("^CNXMNC",    "NIFTY MNC",                   "equity"),
-    ("^CNXSERVICE","NIFTY Services Sector",       "equity"),
-    ("^CNXMEDIA",  "NIFTY Media",                 "equity"),
-    ("^CNXDIVOP",  "NIFTY Dividend Opp 50",       "equity"),
-    ("^CNXNXT50",  "Nifty Next 50",               "equity"),
-    ("^CNX100",    "Nifty 100",                   "equity"),
-    ("^CNX200",    "Nifty 200",                   "equity"),
-    ("^CRSLDX",    "Nifty 500",                   "equity"),
-    ("^CNXSMLCP50","Nifty Smallcap 50",           "equity"),
-    ("GC=F",       "Gold Futures",                "commodity"),
-    ("SI=F",       "Silver Futures",              "commodity"),
-]
 
-NSE_NAME_MAP = {
-    "^NSEI":      "NIFTY 50",
-    "^NSEBANK":   "NIFTY BANK",
-    "^CNXIT":     "NIFTY IT",
-    "^NSMIDCP":   "NIFTY MIDCAP 100",
-    "^NSEMDCP50": "NIFTY MIDCAP 50",
-    "^CNXFMCG":   "NIFTY FMCG",
-    "^CNXPHARMA": "NIFTY PHARMA",
-    "NIFTY_HEALTHCARE.NS": "NIFTY HEALTHCARE INDEX",
-    "^CNXAUTO":   "NIFTY AUTO",
-    "^CNXMETAL":  "NIFTY METAL",
-    "^CNXREALTY": "NIFTY REALTY",
-    "^CNXENERGY": "NIFTY ENERGY",
-    "^CNXINFRA":  "NIFTY INFRA",
-    "^CNXINDDEF": "NIFTY INDIA DEFENCE",
-    "^CNXPSUBANK":"NIFTY PSU BANK",
-    "^CNXSC":     "NIFTY SMALLCAP 100",
-    "^CNXCMDT":   "NIFTY COMMODITIES",
-    "^CNXPSE":    "NIFTY PSE",
-    "^CNXMNC":    "NIFTY MNC",
-    "^CNXSERVICE":"NIFTY SERVICES SECTOR",
-    "^CNXMEDIA":  "NIFTY MEDIA",
-    "^CNXDIVOP":  "NIFTY DIVIDEND OPPORTUNITIES 50",
-    "^CNXNXT50":  "NIFTY NEXT 50",
-    "^CNX100":    "NIFTY 100",
-    "^CNX200":    "NIFTY 200",
-    "^CRSLDX":    "NIFTY 500",
-    "^CNXSMLCP50":"NIFTY SMLCAP 50",
-}
+def _load_index_catalog():
+    """Import catalog from packages/server (works from repo root or install root)."""
+    import sys
+
+    pkg = BASE_DIR / "packages"
+    if str(pkg) not in sys.path:
+        sys.path.insert(0, str(pkg))
+    if str(BASE_DIR) not in sys.path:
+        sys.path.insert(0, str(BASE_DIR))
+    from server.cim_index_catalog import (
+        NSE_INDEX_HISTORY_START,
+        NSE_ONLY_FALLBACK_SYMBOLS,
+        nse_name_map,
+        scrape_indices_tuples,
+    )
+
+    return scrape_indices_tuples(), nse_name_map(), NSE_ONLY_FALLBACK_SYMBOLS, NSE_INDEX_HISTORY_START
+
+
+try:
+    INDICES, NSE_NAME_MAP, NSE_ONLY_INDEX_SYMBOLS, NSE_INDEX_HISTORY_START = _load_index_catalog()
+except Exception as _cat_err:
+    _log(f"[indices] catalog import warning: {_cat_err}")
+    INDICES = [
+        ("^NSEI", "NIFTY 50", "equity"),
+        ("^NSEBANK", "NIFTY Bank", "equity"),
+        ("GC=F", "Gold Futures", "commodity"),
+        ("SI=F", "Silver Futures", "commodity"),
+    ]
+    NSE_NAME_MAP = {"^NSEI": "NIFTY 50", "^NSEBANK": "NIFTY BANK"}
+    NSE_ONLY_INDEX_SYMBOLS = frozenset()
+    NSE_INDEX_HISTORY_START = {}
 
 SKIP_KEYWORDS = ["G-SEC", "BOND", "BHARAT BOND", "COMPOSITE G-SEC"]
 CHARTABLE_NAMES = set(NSE_NAME_MAP.values())
 
-# Yahoo has no usable daily OHLC — use NSE indicesHistory for 1D+ only (not 4H).
-# 4H intraday uses Yahoo 5m first, then NSE charting 5m fallback (see bars_4h.py).
-NSE_ONLY_INDEX_SYMBOLS = frozenset({
-    "^CNXINDDEF",
-    "NIFTY_HEALTHCARE.NS",
-})
+# Daily OHLC: Upstox primary, Yahoo secondary only (no NSE history mix).
+# 4H intraday: Upstox → Yahoo (see bars_4h.py).
 
-# Earliest calendar date to request from NSE (index may list later).
-NSE_INDEX_HISTORY_START = {
-    "^CNXINDDEF": "2024-11-11",
-    "NIFTY_HEALTHCARE.NS": "2020-11-18",
-}
+
+def _write_index_ohlc_rows(cursor, symbol, rows_iter, category, usd_inr) -> int:
+    """Persist daily index OHLC. Equity indices skip non-NSE-session calendar days."""
+    session_filter = str(category or "").strip().lower() == "equity"
+    is_session = None
+    if session_filter:
+        try:
+            from movers_data import _is_nse_session_day as is_session
+        except Exception:
+            try:
+                from server.movers_data import _is_nse_session_day as is_session
+            except Exception:
+                is_session = lambda d: d.weekday() < 5  # noqa: E731
+
+    rows = 0
+    for date_str, o, h, l, c, v in rows_iter:
+        try:
+            day_s = str(date_str)[:10]
+            if session_filter and is_session is not None:
+                try:
+                    day = datetime.strptime(day_s, "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                if not is_session(day):
+                    continue
+            o, h, l, c = float(o), float(h), float(l), float(c)
+            v = float(v or 0)
+            if category == "commodity":
+                o = convert_commodity(symbol, o, usd_inr)
+                h = convert_commodity(symbol, h, usd_inr)
+                l = convert_commodity(symbol, l, usd_inr)
+                c = convert_commodity(symbol, c, usd_inr)
+            cursor.execute(
+                "INSERT OR REPLACE INTO index_history (Symbol, Date, Open, High, Low, Close, Volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (symbol, day_s, round(o, 2), round(h, 2), round(l, 2), round(c, 2), round(v, 2)),
+            )
+            rows += 1
+        except Exception:
+            continue
+    return rows
+
+
+def _scrape_history_from_upstox(symbol, start, end, cursor, category, usd_inr, conn) -> int:
+    """Pull daily index/equity candles from Upstox into index_history. Returns rows written."""
+    import sys
+
+    pkg = BASE_DIR / "packages"
+    if str(pkg) not in sys.path:
+        sys.path.insert(0, str(pkg))
+    if str(BASE_DIR) not in sys.path:
+        sys.path.insert(0, str(BASE_DIR))
+
+    from server import upstox_config, upstox_history, upstox_instruments
+
+    if not upstox_config.market_data_enabled():
+        return 0
+
+    data_dir = BASE_DIR / "data"
+    upstox_instruments.configure_paths(data_dir=data_dir)
+    upstox_history.configure_paths(data_dir=data_dir)
+    try:
+        upstox_instruments.instrument_map()
+    except Exception as exc:
+        _log(f"    Upstox instrument map failed: {exc}")
+        return 0
+
+    candles, err = upstox_history.fetch_daily_for_symbol(symbol, start, end, adjust=False)
+    if err:
+        _log(f"    Upstox daily: {err}")
+        return 0
+    if not candles:
+        return 0
+
+    written = _write_index_ohlc_rows(cursor, symbol, candles, category, usd_inr)
+    if written:
+        conn.commit()
+    return written
+
+
+def scrape_history(symbol, name, category, usd_inr, conn):
+    _log(f"  Scraping {name} ({symbol})...")
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT MAX(Date) FROM index_history WHERE Symbol = ?", (symbol,))
+    last_date = cursor.fetchone()[0]
+
+    if last_date:
+        start = (datetime.strptime(last_date[:10], "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+    else:
+        start = NSE_INDEX_HISTORY_START.get(symbol, "2010-01-01")
+
+    end = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # 1) Upstox primary for equity indices (and any symbol with an Upstox key).
+    if category == "equity":
+        try:
+            up_rows = _scrape_history_from_upstox(symbol, start, end, cursor, category, usd_inr, conn)
+            if up_rows:
+                _log(f"    [OK] {up_rows} rows from Upstox")
+                return up_rows
+        except Exception as exc:
+            _log(f"    Upstox history failed: {exc}")
+
+    # 2) Yahoo secondary (commodities + Upstox miss).
+    yahoo_sym = symbol
+    try:
+        df = yf.download(yahoo_sym, start=start, end=end, progress=False, auto_adjust=True)
+    except Exception as exc:
+        _log(f"    Yahoo download failed: {exc}")
+        df = None
+
+    if df is None or getattr(df, "empty", True):
+        _log("    No data returned")
+        return 0
+
+    df = df.reset_index()
+    df.columns = [c if isinstance(c, str) else c[0] for c in df.columns]
+
+    y_rows = []
+    for _, row in df.iterrows():
+        try:
+            date_str = row["Date"].strftime("%Y-%m-%d") if hasattr(row["Date"], "strftime") else str(row["Date"])[:10]
+            y_rows.append(
+                (
+                    date_str,
+                    float(row["Open"]),
+                    float(row["High"]),
+                    float(row["Low"]),
+                    float(row["Close"]),
+                    float(row.get("Volume", 0) or 0),
+                )
+            )
+        except Exception:
+            continue
+
+    rows = _write_index_ohlc_rows(cursor, symbol, y_rows, category, usd_inr)
+    if rows:
+        conn.commit()
+        _log(f"    [OK] {rows} rows from Yahoo (fallback)")
+    else:
+        _log("    No data returned")
+    return rows
 
 
 def get_nse_chart_token(symbol: str):
@@ -171,93 +276,6 @@ def setup_db(conn):
     _log("[OK] Tables ready")
 
 
-def scrape_history(symbol, name, category, usd_inr, conn):
-    _log(f"  Scraping {name} ({symbol})...")
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT MAX(Date) FROM index_history WHERE Symbol = ?", (symbol,))
-    last_date = cursor.fetchone()[0]
-
-    if last_date:
-        start = (datetime.strptime(last_date[:10], "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
-    else:
-        start = "2010-01-01"
-
-    end = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
-    nse_name = NSE_NAME_MAP.get(symbol)
-
-    if symbol in NSE_ONLY_INDEX_SYMBOLS and nse_name and category == "equity":
-        try:
-            from nse_index_history import scrape_history_from_nse
-
-            history_start = NSE_INDEX_HISTORY_START.get(symbol, "2010-01-01")
-            rows = scrape_history_from_nse(
-                conn,
-                symbol,
-                nse_name,
-                history_start=history_start,
-            )
-            if rows:
-                _log(f"    [OK] {rows} rows from NSE history API")
-                return rows
-        except Exception as exc:
-            _log(f"    NSE history failed: {exc}")
-        _log("    No data returned")
-        return 0
-
-    df = yf.download(symbol, start=start, end=end, progress=False, auto_adjust=True)
-
-    if df.empty:
-        if nse_name and category == "equity":
-            try:
-                from nse_index_history import scrape_history_from_nse
-
-                rows = scrape_history_from_nse(
-                    conn,
-                    symbol,
-                    nse_name,
-                    history_start=start,
-                )
-                if rows:
-                    _log(f"    [OK] {rows} rows from NSE history API (Yahoo fallback)")
-                    return rows
-            except Exception as exc:
-                _log(f"    NSE history fallback failed: {exc}")
-        _log("    No data returned")
-        return 0
-
-    df = df.reset_index()
-    df.columns = [c if isinstance(c, str) else c[0] for c in df.columns]
-
-    rows = 0
-    for _, row in df.iterrows():
-        try:
-            date_str = row["Date"].strftime("%Y-%m-%d") if hasattr(row["Date"], "strftime") else str(row["Date"])[:10]
-            o = float(row["Open"])
-            h = float(row["High"])
-            l = float(row["Low"])
-            c = float(row["Close"])
-            v = float(row.get("Volume", 0) or 0)
-
-            if category == "commodity":
-                o = convert_commodity(symbol, o, usd_inr)
-                h = convert_commodity(symbol, h, usd_inr)
-                l = convert_commodity(symbol, l, usd_inr)
-                c = convert_commodity(symbol, c, usd_inr)
-
-            cursor.execute(
-                "INSERT OR REPLACE INTO index_history (Symbol, Date, Open, High, Low, Close, Volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (symbol, date_str, round(o,2), round(h,2), round(l,2), round(c,2), round(v,2))
-            )
-            rows += 1
-        except Exception:
-            continue
-
-    conn.commit()
-    _log(f"    [OK] {rows} rows inserted/updated")
-    return rows
-
-
 def fetch_all_nse_indices(conn):
     _log("\nFetching all NSE indices from allIndices API...")
     headers = {
@@ -312,28 +330,6 @@ def fetch_all_nse_indices(conn):
 def update_live_prices(usd_inr, conn):
     _log("\nUpdating live index prices...")
     cursor = conn.cursor()
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept":     "application/json",
-        "Referer":    "https://www.nseindia.com/",
-    }
-    session = requests.Session()
-    session.headers.update(headers)
-
-    nse_data = {}
-    try:
-        session.get("https://www.nseindia.com", timeout=10)
-        time.sleep(1)
-        r = session.get("https://www.nseindia.com/api/allIndices", timeout=15)
-        if r.status_code == 200:
-            for d in r.json().get("data", []):
-                key = d.get("index", "").upper().strip()
-                nse_data[key] = d
-            _log(f"  NSE returned {len(nse_data)} indices")
-    except Exception as e:
-        _log(f"  NSE fetch failed: {e}")
-
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def _has_index_history_closes(sym):
@@ -343,25 +339,51 @@ def update_live_prices(usd_inr, conn):
         )
         return (cursor.fetchone() or [0])[0] >= 2
 
+    # Upstox primary for chartable equity indices; Yahoo secondary.
+    upstox_quotes: dict[str, dict] = {}
+    try:
+        import sys
+
+        pkg = BASE_DIR / "packages"
+        if str(pkg) not in sys.path:
+            sys.path.insert(0, str(pkg))
+        if str(BASE_DIR) not in sys.path:
+            sys.path.insert(0, str(BASE_DIR))
+        from server import upstox_config, upstox_client, upstox_instruments
+
+        if upstox_config.market_data_enabled():
+            data_dir = BASE_DIR / "data"
+            upstox_instruments.configure_paths(data_dir=data_dir)
+            eq_syms = [s for s, _n, c in INDICES if c == "equity"]
+            if eq_syms:
+                rows, err = upstox_client.fetch_quotes(eq_syms, index_names=dict(NSE_NAME_MAP))
+                for r in rows or []:
+                    sym = str((r or {}).get("symbol") or "").strip().upper()
+                    if sym:
+                        upstox_quotes[sym] = r
+                if err and not upstox_quotes:
+                    _log(f"  Upstox quotes: {err}")
+                elif upstox_quotes:
+                    _log(f"  Upstox returned {len(upstox_quotes)} index quotes")
+    except Exception as e:
+        _log(f"  Upstox quote fetch failed: {e}")
+
     for symbol, name, category in INDICES:
         try:
             last = chg_pct = chg_30d = chg_1y = None
             history_closes = _has_index_history_closes(symbol)
 
-            if category == "equity" and nse_data:
-                nse_key = NSE_NAME_MAP.get(symbol, "").upper()
-                matched = nse_data.get(nse_key)
-                if matched:
-                    last    = float(matched.get("last", 0) or 0)
-                    # NSE percentChange is session vs prev close; 1D % for charts/list
-                    # comes from index_history via recalculate_index_changes().
+            if category == "equity" and symbol in upstox_quotes:
+                snap = upstox_quotes[symbol]
+                last = float(snap.get("price") or 0)
+                if last > 0:
                     if not history_closes:
-                        chg_pct = float(matched.get("percentChange", 0) or 0)
-                    chg_30d = None
-                    chg_1y  = None
-                    _log(f"  [OK] {name}: {last}")
+                        chg_pct = snap.get("change_pct")
+                        if chg_pct is not None:
+                            chg_pct = float(chg_pct)
+                    _log(f"  [OK] {name}: {last} (Upstox)")
 
-            if last is None:
+            if last is None or last <= 0:
                 df = yf.download(symbol, period="400d", progress=False, auto_adjust=True)
                 if df.empty:
                     _log(f"  [X] {name}: no data")
@@ -377,14 +399,14 @@ def update_live_prices(usd_inr, conn):
                 chg_pct = round((last - prev) / prev * 100, 2) if prev else 0.0
 
                 if len(df) >= 22:
-                    p30   = float(df["Close"].iloc[-22].values[0])
+                    p30 = float(df["Close"].iloc[-22].values[0])
                     p30_c = convert_commodity(symbol, p30, usd_inr) if category == "commodity" else p30
                     chg_30d = round((last - p30_c) / p30_c * 100, 2) if p30_c else 0.0
                 else:
                     chg_30d = 0.0
 
                 if len(df) >= 252:
-                    p1y   = float(df["Close"].iloc[-252].values[0])
+                    p1y = float(df["Close"].iloc[-252].values[0])
                     p1y_c = convert_commodity(symbol, p1y, usd_inr) if category == "commodity" else p1y
                     chg_1y = round((last - p1y_c) / p1y_c * 100, 2) if p1y_c else 0.0
                 else:
@@ -400,7 +422,7 @@ def update_live_prices(usd_inr, conn):
             else:
                 cursor.execute(
                     "UPDATE indices SET last_price=?, change_pct=?, updated_at=? WHERE symbol=?",
-                    (round(last, 2), round(chg_pct, 2), now, symbol),
+                    (round(last, 2), round(chg_pct or 0, 2), now, symbol),
                 )
             if cursor.rowcount == 0:
                 cursor.execute(
@@ -418,7 +440,7 @@ def update_live_prices(usd_inr, conn):
 def ensure_equity_index_rows(conn) -> int:
     """
     Insert chartable equity indices from INDICES that are missing in `indices`.
-    Uses NSE allIndices for live level and session % when Yahoo has no history yet.
+    Live level from Upstox when configured, else Yahoo (no NSE mix).
     """
     cursor = conn.cursor()
     cursor.execute("SELECT symbol FROM indices")
@@ -431,35 +453,46 @@ def ensure_equity_index_rows(conn) -> int:
     if not missing:
         return 0
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "application/json",
-        "Referer": "https://www.nseindia.com/",
-    }
-    session = requests.Session()
-    session.headers.update(headers)
-    nse_data: dict[str, dict] = {}
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    quotes: dict[str, dict] = {}
     try:
-        session.get("https://www.nseindia.com", timeout=10)
-        time.sleep(1)
-        r = session.get("https://www.nseindia.com/api/allIndices", timeout=15)
-        if r.status_code == 200:
-            for d in r.json().get("data", []):
-                key = str(d.get("index", "")).upper().strip()
-                if key:
-                    nse_data[key] = d
+        import sys
+
+        pkg = BASE_DIR / "packages"
+        if str(pkg) not in sys.path:
+            sys.path.insert(0, str(pkg))
+        if str(BASE_DIR) not in sys.path:
+            sys.path.insert(0, str(BASE_DIR))
+        from server import upstox_config, upstox_client, upstox_instruments
+
+        if upstox_config.market_data_enabled():
+            data_dir = BASE_DIR / "data"
+            upstox_instruments.configure_paths(data_dir=data_dir)
+            syms = [s for s, _n, _c in missing]
+            rows, _err = upstox_client.fetch_quotes(syms, index_names=dict(NSE_NAME_MAP))
+            for r in rows or []:
+                sym = str((r or {}).get("symbol") or "").strip().upper()
+                if sym:
+                    quotes[sym] = r
     except Exception:
         pass
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     added = 0
     for symbol, name, category in missing:
-        nse_key = NSE_NAME_MAP.get(symbol, "").upper()
-        matched = nse_data.get(nse_key)
-        if not matched:
-            continue
-        last = float(matched.get("last", 0) or 0)
-        chg_pct = float(matched.get("percentChange", 0) or 0)
+        snap = quotes.get(symbol) or {}
+        last = float(snap.get("price") or 0)
+        chg_pct = float(snap.get("change_pct") or 0) if snap.get("change_pct") is not None else 0.0
+        if last <= 0:
+            try:
+                df = yf.download(symbol, period="5d", progress=False, auto_adjust=True)
+                if df is not None and not df.empty:
+                    last = float(df["Close"].iloc[-1].values[0])
+                    if len(df) >= 2:
+                        prev = float(df["Close"].iloc[-2].values[0])
+                        chg_pct = round((last - prev) / prev * 100, 2) if prev else 0.0
+            except Exception:
+                last = 0.0
+                chg_pct = 0.0
         cursor.execute(
             "INSERT OR IGNORE INTO indices (symbol, name, category, last_price, change_pct, change_30d, change_1y, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (symbol, name, category, round(last, 2), round(chg_pct, 2), 0.0, 0.0, now),
@@ -477,91 +510,50 @@ def _nse_history_symbols_to_refresh(
     max_lag_days: int = 5,
     min_rows: int = 2,
 ) -> list[tuple[str, str]]:
-    """Symbols that need NSE index_history backfill or extension."""
+    """Chartable equity indices that need Upstox/Yahoo history deepen (legacy name kept)."""
     from datetime import date as date_cls
-
-    from nse_index_history import find_index_history_gaps
 
     cutoff = (date_cls.today() - timedelta(days=max_lag_days)).strftime("%Y-%m-%d")
     cursor = conn.cursor()
     to_refresh: dict[str, str] = {}
 
-    for symbol in NSE_ONLY_INDEX_SYMBOLS:
-        nse_name = NSE_NAME_MAP.get(symbol)
-        if not nse_name:
-            continue
-        cursor.execute("SELECT name FROM indices WHERE symbol = ?", (symbol,))
-        row = cursor.fetchone()
-        name = (row[0] if row else None) or symbol
-        if find_index_history_gaps(conn, symbol):
-            to_refresh[symbol] = name
+    for symbol, name, category in INDICES:
+        if category != "equity":
             continue
         cursor.execute(
-            "SELECT MAX(SUBSTR(Date, 1, 10)) FROM index_history WHERE Symbol = ?",
+            "SELECT COUNT(*), MAX(SUBSTR(Date, 1, 10)) FROM index_history WHERE Symbol = ?",
             (symbol,),
         )
-        last = cursor.fetchone()[0]
-        if not last or str(last)[:10] < cutoff:
+        row = cursor.fetchone() or (0, None)
+        count = int(row[0] or 0)
+        last = row[1]
+        if count < min_rows or not last or str(last)[:10] < cutoff:
             to_refresh[symbol] = name
-
-    cursor.execute(
-        """
-        SELECT i.symbol, i.name
-        FROM indices i
-        WHERE i.category = 'equity'
-          AND (SELECT COUNT(*) FROM index_history h WHERE h.Symbol = i.symbol) < ?
-        """,
-        (min_rows,),
-    )
-    for symbol, name in cursor.fetchall():
-        if NSE_NAME_MAP.get(symbol):
-            to_refresh[str(symbol)] = str(name or symbol)
 
     return sorted(to_refresh.items())
 
 
 def sync_nse_index_history(conn, *, max_lag_days: int = 5, min_rows: int = 2) -> int:
     """
-    Backfill or extend index_history for NSE-only / Yahoo-missing indices.
-    Runs on startup and after index updates so charts do not freeze on an old bar.
+    Backfill or extend index_history for chartable equity indices.
+    Upstox primary, Yahoo secondary — no NSE indicesHistory mix.
     """
-    from nse_index_history import (
-        find_index_history_gaps,
-        make_nse_history_session,
-        scrape_history_from_nse,
-    )
-
     targets = _nse_history_symbols_to_refresh(
         conn, max_lag_days=max_lag_days, min_rows=min_rows
     )
     if not targets:
         return 0
 
-    session = make_nse_history_session()
+    usd_inr = get_usd_inr()
     total = 0
-    try:
-        for symbol, name in targets:
-            nse_name = NSE_NAME_MAP.get(symbol)
-            if not nse_name:
-                continue
-            history_start = NSE_INDEX_HISTORY_START.get(symbol, "2010-01-01")
-            force_full = bool(find_index_history_gaps(conn, symbol))
-            try:
-                rows = scrape_history_from_nse(
-                    conn,
-                    symbol,
-                    nse_name,
-                    history_start=history_start,
-                    session=session,
-                    force_full=force_full,
-                )
-                if rows:
-                    _log(f"  [OK] {name}: {rows} NSE history row(s)")
-                    total += rows
-            except Exception as exc:
-                _log(f"  [X] {name} NSE history: {exc}")
-    finally:
-        session.close()
+    for symbol, name in targets:
+        try:
+            rows = scrape_history(symbol, name, "equity", usd_inr, conn)
+            if rows:
+                _log(f"  [OK] {name}: {rows} history row(s) (Upstox/Yahoo)")
+                total += rows
+        except Exception as exc:
+            _log(f"  [X] {name} history: {exc}")
 
     if total:
         recalculate_index_changes(conn)

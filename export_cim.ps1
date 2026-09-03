@@ -1,6 +1,7 @@
 param(
     [string]$SourceRoot = "D:\Programs\NSE Pulse\Claude Ai",
     [string]$ExportRoot = "",
+    [string]$DbSource = "",
     [ValidateSet("standard","distribution")]
     [string]$Mode = "standard",
     [switch]$KeepExisting,
@@ -42,7 +43,7 @@ function Remove-DirectorySafe {
         Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
         return -not (Test-Path -LiteralPath $Path)
     } catch {
-        # Locked .pyd/.dll (Charts In Motion backend running) — try rename-aside then delete later.
+        # Locked .pyd/.dll (Charts In Motion backend running)  - try rename-aside then delete later.
         $aside = "$Path.delete.$([guid]::NewGuid().ToString('N').Substring(0, 8))"
         try {
             Rename-Item -LiteralPath $Path -NewName (Split-Path -Leaf $aside) -ErrorAction Stop
@@ -79,12 +80,20 @@ function Copy-TreeIfExists {
 function Copy-DatabaseSnapshot {
     param(
         [string]$SourceRoot,
-        [string]$ExportRoot
+        [string]$ExportRoot,
+        [string]$DbSource = ""
     )
-    $srcDb = Join-Path $SourceRoot "data\nse_data.db"
+    $srcDb = if ($DbSource) {
+        if ($DbSource -match '\.db$') { $DbSource } else { Join-Path $DbSource "data\nse_data.db" }
+    } else {
+        Join-Path $SourceRoot "data\nse_data.db"
+    }
+    $srcDb = [System.IO.Path]::GetFullPath($srcDb)
     $dstDb = Join-Path $ExportRoot "data\nse_data.db"
     $snapPy = Join-Path $SourceRoot "scripts\copy_db_snapshot.py"
-    if (-not (Test-Path -LiteralPath $srcDb)) { return }
+    if (-not (Test-Path -LiteralPath $srcDb)) {
+        throw "Missing DB source for export: $srcDb"
+    }
     if (-not (Test-Path -LiteralPath $snapPy)) {
         throw "Missing scripts\copy_db_snapshot.py (required for safe nse_data.db export)"
     }
@@ -96,6 +105,7 @@ function Copy-DatabaseSnapshot {
         )) {
         if (Test-Path -LiteralPath $candidate) { $py = $candidate; break }
     }
+    Write-Host "DB snapshot source: $srcDb"
     if ($py) {
         & $py -s $snapPy $srcDb $dstDb
     } else {
@@ -785,7 +795,7 @@ Copy-IfExists     -From (Join-Path $pkg.BrowserRoot "package.json")      -To (Jo
 Copy-IfExists     -From (Join-Path $pkg.BrowserRoot "package-lock.json") -To (Join-Path $ExportRoot "frontend\package-lock.json")
 Copy-IfExists     -From (Join-Path $pkg.BrowserRoot "yarn.lock")         -To (Join-Path $ExportRoot "frontend\yarn.lock")
 Copy-TreeIfExists -From $pkg.BrowserPublic                                -To (Join-Path $ExportRoot "frontend\public")
-# Plaintext sign-in shell (not encrypted) — required before online session unlocks app code.
+# Plaintext sign-in shell (not encrypted)  - required before online session unlocks app code.
 Copy-TreeIfExists -From $pkg.BrowserAuth                                  -To (Join-Path $ExportRoot "frontend\auth")
 if (-not $isDistribution) {
     # Standard mode keeps source for easier local development/troubleshooting.
@@ -904,8 +914,9 @@ $dataFiles = @("nse_dataset.csv", "nse_calendar.json", "market_sectors.json", "m
 if (-not $isDistribution) {
     $dataFiles += @("layout.json", "watchlists.json", "saved_filters.json", "screener_session.json")
 }
-if (Test-Path -LiteralPath (Join-Path $SourceRoot "data\nse_data.db")) {
-    Copy-DatabaseSnapshot -SourceRoot $SourceRoot -ExportRoot $ExportRoot
+# Parentheses required: bare `Test-Path ... -or $DbSource` is parsed as Test-Path -or (parameter), not boolean OR.
+if ((Test-Path -LiteralPath (Join-Path $SourceRoot "data\nse_data.db")) -or [bool]$DbSource) {
+    Copy-DatabaseSnapshot -SourceRoot $SourceRoot -ExportRoot $ExportRoot -DbSource $DbSource
     if ($isDistribution) {
         $exportDb = Join-Path $ExportRoot "data\nse_data.db"
         $sanitizePy = Join-Path $SourceRoot "scripts\sanitize_export_db.py"
@@ -917,7 +928,7 @@ if (Test-Path -LiteralPath (Join-Path $SourceRoot "data\nse_data.db")) {
                 throw "sanitize_export_db.py failed (exit $LASTEXITCODE)"
             }
         } elseif (Test-Path -LiteralPath $exportDb) {
-            Write-Warning "[WARN] Could not sanitize instrument_notes — missing sanitize_export_db.py or runtime\python"
+            Write-Warning "[WARN] Could not sanitize instrument_notes  - missing sanitize_export_db.py or runtime\python"
         }
     }
 }
@@ -1013,10 +1024,10 @@ Write-Host "Export complete."
 Write-Host "Location: $FinalExportRoot"
 Write-Host "Manifest: $manifestPath"
 if (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $FinalExportRoot) ($([IO.Path]::GetFileName($FinalExportRoot)) + ".previous"))) {
-    Write-Host "Previous export kept as: $([IO.Path]::GetFileName($FinalExportRoot)).previous"
+    Write-Host ("Previous export kept as: {0}.previous" -f [IO.Path]::GetFileName($FinalExportRoot))
 }
 Write-Host ""
-Write-Host "Next step: zip the folder '$FinalExportRoot' and share it."
+Write-Host ("Next step: zip the folder {0} and share it." -f $FinalExportRoot)
 
 if ($pythonObfInfo -and (Test-Path -LiteralPath $pythonObfInfo.Root)) {
     Remove-Item -LiteralPath $pythonObfInfo.Root -Recurse -Force -ErrorAction SilentlyContinue

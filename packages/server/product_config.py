@@ -145,9 +145,12 @@ def _showcase_host_settings(base_dir: Path | None = None) -> dict[str, Any]:
 
 def yahoo_primary_pipeline(base_dir: Path | None = None) -> bool:
     """
-    Yahoo-centric update + live movers (no full-universe NSE quote-equity scrape).
-    Default on for live and testbed showcase installs (avoids NSE WAF blocks on bulk quote-equity).
-    Set showcase_host.json yahooPrimaryPipeline=false or CIM_YAHOO_PRIMARY_PIPELINE=0 to opt out.
+    Skip full-universe NSE quote-equity scrape on Admin Update / price refresh.
+
+    Market data is Upstox-first (charts, movers, screener quotes); NSE bulk scrape
+    only triggers WAF "NSE block detected" noise. Default ON for all installs
+    (desktop + showcase). Opt out with showcase_host.json yahooPrimaryPipeline=false
+    or CIM_YAHOO_PRIMARY_PIPELINE=0.
     """
     raw = os.getenv("CIM_YAHOO_PRIMARY_PIPELINE", "").strip().lower()
     if raw in ("1", "true", "yes"):
@@ -159,7 +162,5 @@ def yahoo_primary_pipeline(base_dir: Path | None = None) -> bool:
         return True
     if settings.get("yahooPrimaryPipeline") is False:
         return False
-    role = str(settings.get("role") or "").strip().lower()
-    if role in ("live", "testbed"):
-        return True
-    return False
+    # Default on everywhere — desktop had no showcase_host.json and kept hitting NSE.
+    return True

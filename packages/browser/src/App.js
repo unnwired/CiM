@@ -1,10 +1,12 @@
 import './api/http';
 import axios from 'axios';
 import React, { useState, useEffect, useCallback, useRef, useLayoutEffect, useMemo, Suspense, lazy } from 'react';
+import { createPortal } from 'react-dom';
 import DashboardPage  from './pages/DashboardPage';
 import ChartPage      from './pages/ChartPage';
 import SplitChartPage from './pages/SplitChartPage';
 import IndicesPage    from './pages/IndicesPage';
+import FundsPage      from './pages/FundsPage';
 import MarketPulsePage from './pages/MarketPulsePage';
 import MoversPage from './pages/MoversPage';
 import IndexChartPage from './pages/IndexChartPage';
@@ -24,9 +26,25 @@ import KnowledgeBaseEditor from './components/KnowledgeBaseEditor';
 import { resolveKnowledgeBaseGuideId } from './content/knowledgeBasePages';
 import AccountSettingsModal from './components/AccountSettingsModal';
 import ServerStatusBar from './components/ServerStatusBar';
+import UniversalNotes from './components/UniversalNotes';
+import UniversalAlerts from './components/UniversalAlerts';
+import { BasketProvider } from './components/Basket';
+import LiveFeedPopover from './components/LiveFeedPopover';
 import { useServerStatus } from './hooks/useServerStatus';
+import { useWheelHorizontalScroll } from './hooks/useWheelHorizontalScroll';
+import {
+  trimChartTabsToMax,
+} from './utils/chartTabFifo';
+import {
+  activateChartInStack,
+  activeChart,
+  closeActiveChartInStack,
+  closeChartInStack,
+  findChartInStacks,
+  openChartInStacks,
+  setActiveChartSymbol,
+} from './utils/chartTabStack';
 import ConfirmDialog, { askConfirm } from './components/ConfirmDialog';
-import FilterRebuildDialog from './components/FilterRebuildDialog';
 import { ToastProvider } from './context/ToastContext';
 import { fetchLicenseStatus, licenseHeartbeat } from './api/auth';
 import { IntradayPatchProvider } from './intraday/useIntradayPatch';
@@ -36,6 +54,7 @@ import {
   resolvePageId,
   getRefreshSymbols,
   pageDisplayName,
+  livePageContextFromView,
 } from './intraday/intradaySymbolRegistry';
 import { ChartPrefsProvider } from './chartPrefs/useChartPrefs';
 import {
@@ -43,6 +62,7 @@ import {
   isLoopbackHost,
   isOperatorSessionActive,
 } from './config/operatorMode';
+import { shouldBlockGlobalSearchTypeahead } from './utils/isTypingTarget';
 
 const MarketMapPage = lazy(() => import('./pages/MarketMapPage'));
 const PotentialSwingsPage = lazy(() => import('./pages/PotentialSwingsPage'));
@@ -56,7 +76,7 @@ const FEATURE_ENTRY_ID = '779443803';
 const CONTEXT_MENU_MARGIN = 8;
 
 /** Admin jobs that rewrite OHLCV / chart payloads — refresh open charts even when scheduler started the job. */
-const CHART_DATA_REFRESH_JOBS = new Set(['ohlcv', 'indicator_snapshots', 'filter_rebuild', 'ohlc_repair', 'indices']);
+const CHART_DATA_REFRESH_JOBS = new Set(['ohlcv', 'bars_4h_build', 'bars_30m_build', 'indicator_snapshots', 'filter_rebuild', 'ohlc_repair', 'indices', 'indexChartGapRepair']);
 
 function watchlistContainsSymbol(w, symbol, itemType) {
   const sym = String(symbol || '').toUpperCase();
@@ -83,7 +103,8 @@ function App() {
   const [activeTabIdx, setActiveTabIdx] = useState(null);
   const [indexTabs, setIndexTabs]       = useState([]);
   const [activeIndexTab, setActiveIndexTab] = useState(null);
-  const [constituentsTabs, setConstituentsTabs] = useState([]);
+  const [constituentsStacks, setConstituentsStacks] = useState([]);
+  const [activeConstituentsStackIdx, setActiveConstituentsStackIdx] = useState(null);
   const [watchlists, setWatchlists]       = useState([]);
   const [activeWatchlistName, setActiveWatchlistName] = useState(() => localStorage.getItem('watchlist.activeName') || '');
   const [watchlistSelectedItem, setWatchlistSelectedItem] = useState(() => {
@@ -99,6 +120,8 @@ function App() {
     visible: false, x: 0, y: 0, symbol: '', type: 'stock',
     createMode: false, newWatchlistName: '', sourcePage: 'pulse',
     watchlistName: null,
+    items: null,
+    allVisibleItems: null,
   });
   const [contextMenuPos, setContextMenuPos] = useState({ left: 0, top: 0, flipX: false, flipY: false });
   const [adminOpen, setAdminOpen]       = useState(false);
@@ -107,7 +130,6 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [aggressiveCacheRam, setAggressiveCacheRam] = useState(false);
   const [cacheBusy, setCacheBusy] = useState(false);
-  const [filterRebuildDialogOpen, setFilterRebuildDialogOpen] = useState(false);
   const [desktopCanRestartBackend, setDesktopCanRestartBackend] = useState(false);
   const [restartBackendBusy, setRestartBackendBusy] = useState(false);
   const [desktopCanReloadFrontend, setDesktopCanReloadFrontend] = useState(false);
@@ -170,7 +192,12 @@ function App() {
     setGlobalSearchActiveIndex(0);
   }, [knowledgeBaseOpen]);
   const tabCreationOrder                = useRef([]);
+  const constituentsCreationOrder       = useRef([]);
   const viewRef                         = useRef(view);
+  const activeTabIdxRef                 = useRef(activeTabIdx);
+  const activeConstituentsStackIdxRef   = useRef(activeConstituentsStackIdx);
+  activeTabIdxRef.current = activeTabIdx;
+  activeConstituentsStackIdxRef.current = activeConstituentsStackIdx;
 
   const prevViewRef = useRef(null);
   useEffect(() => {
@@ -200,19 +227,37 @@ function App() {
     const id = setInterval(refresh, 24 * 60 * 60 * 1000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
+
+  useEffect(() => {
+    if (!accountOpen || !isDistributionProfile) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const status = await fetchLicenseStatus();
+        if (!cancelled) setLicenseStatus(status);
+      } catch {
+        /* keep prior status */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [accountOpen]);
   const {
     status: jobStatus,
     isRunning: updateRunning,
     isPendingStart: updatePendingStart,
     isCancelling: updateCancelling,
     percent: updatePercent,
+    queued: jobQueue,
     startAdminJob,
     startOhlcvUpdate,
+    startRepairIndexChartGaps,
     startSplitAdjustmentsApplyPending,
     startSplitCatchupScan,
     fetchSplitWatchStatus,
     startRefreshShareCounts,
     cancelAdminJob,
+    cancelQueuedJob,
+    clearJobQueue,
   } = useAdminJobStatus({
     autoStart: !showcaseWebClient,
     onFinished: (finalStatus) => {
@@ -331,7 +376,7 @@ function App() {
   }, []);
 
   const onOpenFilterSchedule = useCallback(() => {
-    setFilterRebuildDialogOpen(true);
+    setSchedulerOpen(true);
   }, []);
 
   const navigateAfterLastChartClosed = useCallback((returnView) => {
@@ -343,10 +388,14 @@ function App() {
       return;
     }
     // Go to most recently active indices-related tab, not dashboard
-    setConstituentsTabs(ct => {
-      if (ct.length > 0) {
-        setView('constituents_' + ct[ct.length - 1].symbol);
-        return ct;
+    setConstituentsStacks(stacks => {
+      if (stacks.length > 0) {
+        const face = activeChart(stacks[stacks.length - 1]);
+        if (face?.symbol) {
+          setActiveConstituentsStackIdx(stacks.length - 1);
+          setView('constituents_' + face.symbol);
+          return stacks;
+        }
       }
       setIndexTabs(it => {
         if (it.length > 0) {
@@ -357,61 +406,69 @@ function App() {
         }
         return it;
       });
-      return ct;
+      return stacks;
     });
   }, []);
 
   // ── Open stock chart ───────────────────────────────────────────────────────
+  // Tab slots fill left→right until max; when full, replace oldest open → next oldest
+  // (FIFO by open time), not a fixed index. Opening an already-open symbol just focuses it.
   const openChart = useCallback((symbol) => {
     const originView = viewRef.current === 'chart' ? null : viewRef.current;
-    setChartTabs(prev => {
-      const existingIdx = prev.findIndex(t => t.symbol === symbol);
-      if (existingIdx !== -1) {
-        setActiveTabIdx(existingIdx);
-        setView('chart');
-        if (!originView) return prev;
-        return prev.map((t, i) => (
-          i === existingIdx ? { ...t, returnView: originView } : t
-        ));
-      }
-      let next;
-      const tab = { symbol, id: `${symbol}-${Date.now()}`, returnView: originView };
-      if (prev.length < maxChartTabs) {
-        next = [...prev, tab];
-        setActiveTabIdx(next.length - 1);
-      } else {
-        const oldestId  = tabCreationOrder.current[0];
-        const oldestIdx = prev.findIndex(t => t.id === oldestId);
-        const replaceAt = oldestIdx !== -1 ? oldestIdx : 0;
-        next            = [...prev];
-        next[replaceAt] = tab;
-        setActiveTabIdx(replaceAt);
-      }
-      tabCreationOrder.current = next.map(t => t.id);
+    const viewIsChart = viewRef.current === 'chart';
+    setChartTabs((prev) => {
+      const result = openChartInStacks({
+        stacks: prev,
+        creationOrder: tabCreationOrder.current,
+        activeStackIdx: activeTabIdxRef.current,
+        viewIsChart,
+        symbol,
+        originView,
+        maxStacks: maxChartTabs,
+      });
+      tabCreationOrder.current = result.creationOrder;
+      setActiveTabIdx(result.activeStackIdx);
       setView('chart');
-      return next;
+      return result.stacks;
     });
   }, [maxChartTabs]);
 
-  const closeChart = useCallback((idx) => {
-    setChartTabs(prev => {
-      const closedTab = prev[idx];
-      const next = prev.filter((_, i) => i !== idx);
-      tabCreationOrder.current = next.map(t => t.id);
-      if (next.length === 0) {
+  useEffect(() => {
+    function onLiveOpenChart(e) {
+      const sym = String(e?.detail?.symbol || '').trim().toUpperCase();
+      if (!sym) return;
+      openChart(sym);
+    }
+    window.addEventListener('cim:live-open-chart', onLiveOpenChart);
+    return () => window.removeEventListener('cim:live-open-chart', onLiveOpenChart);
+  }, [openChart]);
+
+  const closeChart = useCallback((stackIdx, chartIdx = null) => {
+    setChartTabs((prev) => {
+      const result = chartIdx == null
+        ? closeActiveChartInStack(prev, tabCreationOrder.current, stackIdx)
+        : closeChartInStack(prev, tabCreationOrder.current, stackIdx, chartIdx);
+      tabCreationOrder.current = result.creationOrder;
+      if (result.stacks.length === 0) {
         setActiveTabIdx(null);
-        navigateAfterLastChartClosed(closedTab?.returnView);
-      } else {
-        const newIdx = Math.min(idx, next.length - 1);
+        navigateAfterLastChartClosed(result.closedReturnView);
+      } else if (result.removedStack) {
+        const newIdx = result.nextActiveStackIdxHint;
         setActiveTabIdx(newIdx);
         setView('chart');
+      } else {
+        setActiveTabIdx(stackIdx);
+        setView('chart');
       }
-      return next;
+      return result.stacks;
     });
   }, [navigateAfterLastChartClosed]);
 
-  const switchChart = useCallback((idx) => {
-    setActiveTabIdx(idx);
+  const switchChart = useCallback((stackIdx, chartIdx = null) => {
+    if (chartIdx != null) {
+      setChartTabs((prev) => activateChartInStack(prev, stackIdx, chartIdx));
+    }
+    setActiveTabIdx(stackIdx);
     setView('chart');
   }, []);
 
@@ -451,17 +508,25 @@ function App() {
       const next      = prev.filter(t => t.symbol !== symbol);
       if (next.length === 0) {
         setActiveIndexTab(null);
-        // Check if a constituents tab for this index is open
-        setConstituentsTabs(ct => {
-          const related = ct.find(t => t.symbol === symbol);
+        // Check if a constituents stack still has pages open
+        setConstituentsStacks(stacks => {
+          const related = findChartInStacks(stacks, symbol);
           if (related) {
-            setView('constituents_' + related.symbol);
-          } else if (ct.length > 0) {
-            setView('constituents_' + ct[ct.length - 1].symbol);
-          } else {
-            setView('indices');
+            const nextStacks = activateChartInStack(stacks, related.stackIdx, related.chartIdx);
+            setActiveConstituentsStackIdx(related.stackIdx);
+            setView('constituents_' + symbol);
+            return nextStacks;
           }
-          return ct;
+          if (stacks.length > 0) {
+            const face = activeChart(stacks[stacks.length - 1]);
+            if (face?.symbol) {
+              setActiveConstituentsStackIdx(stacks.length - 1);
+              setView('constituents_' + face.symbol);
+              return stacks;
+            }
+          }
+          setView('indices');
+          return stacks;
         });
       } else {
         const newIdx = Math.max(0, closedIdx - 1);
@@ -473,27 +538,55 @@ function App() {
     });
   }, []);
 
-  // ── Open constituents ──────────────────────────────────────────────────────
+  // ── Open constituents (stacked like symbol charts) ─────────────────────────
   const openConstituents = useCallback((index) => {
-    setConstituentsTabs(prev => {
-      const exists = prev.find(t => t.symbol === index.symbol);
-      if (exists) {
-        setView('constituents_' + index.symbol);
-        return prev;
-      }
-      setView('constituents_' + index.symbol);
-      return [...prev, index];
+    const sym = String(index?.symbol || '').trim().toUpperCase();
+    if (!sym) return;
+    const originView = String(viewRef.current || '').startsWith('constituents_')
+      ? null
+      : viewRef.current;
+    setConstituentsStacks((prev) => {
+      const result = openChartInStacks({
+        stacks: prev,
+        creationOrder: constituentsCreationOrder.current,
+        activeStackIdx: activeConstituentsStackIdxRef.current,
+        viewIsChart: false,
+        symbol: sym,
+        originView,
+        maxStacks: maxChartTabs,
+        entryMeta: {
+          // Preserve index payload fields ConstituentsPage may read.
+          ...index,
+          symbol: sym,
+          name: index.name || sym,
+        },
+      });
+      constituentsCreationOrder.current = result.creationOrder;
+      setActiveConstituentsStackIdx(result.activeStackIdx);
+      const face = activeChart(result.stacks[result.activeStackIdx]);
+      if (face?.symbol) setView('constituents_' + face.symbol);
+      return result.stacks;
     });
-  }, []);
+  }, [maxChartTabs]);
 
-  const closeConstituentsTab = useCallback((symbol) => {
-    setConstituentsTabs(prev => {
-      const closedIdx = prev.findIndex(t => t.symbol === symbol);
-      const next      = prev.filter(t => t.symbol !== symbol);
-      if (next.length === 0) {
+  const closeConstituentsTab = useCallback((stackIdx, chartIdx = null) => {
+    setConstituentsStacks((prev) => {
+      const stack = prev[stackIdx];
+      const closedEntry = chartIdx == null
+        ? stack?.charts?.[stack.activeIdx]
+        : stack?.charts?.[chartIdx];
+      const closedSym = closedEntry?.symbol;
+      const result = chartIdx == null
+        ? closeActiveChartInStack(prev, constituentsCreationOrder.current, stackIdx)
+        : closeChartInStack(prev, constituentsCreationOrder.current, stackIdx, chartIdx);
+      constituentsCreationOrder.current = result.creationOrder;
+      if (result.stacks.length === 0) {
+        setActiveConstituentsStackIdx(null);
         // Go to related index chart if open, else adjacent index tab, else indices
         setIndexTabs(idxTabs => {
-          const related = idxTabs.find(t => t.symbol === symbol);
+          const related = closedSym
+            ? idxTabs.find(t => t.symbol === closedSym)
+            : null;
           if (related) {
             setActiveIndexTab(related.symbol);
             setView('index_' + related.symbol);
@@ -507,13 +600,48 @@ function App() {
           return idxTabs;
         });
       } else {
-        const newIdx = Math.max(0, closedIdx - 1);
-        setView('constituents_' + next[newIdx].symbol);
+        const newIdx = result.nextActiveStackIdxHint;
+        setActiveConstituentsStackIdx(newIdx);
+        const face = activeChart(result.stacks[newIdx]);
+        if (face?.symbol) setView('constituents_' + face.symbol);
       }
+      return result.stacks;
+    });
+  }, []);
+
+  const switchConstituents = useCallback((stackIdx, chartIdx = null) => {
+    if (chartIdx == null) {
+      setActiveConstituentsStackIdx(stackIdx);
+      setConstituentsStacks((prev) => {
+        const face = activeChart(prev[stackIdx]);
+        if (face?.symbol) setView('constituents_' + face.symbol);
+        return prev;
+      });
+      return;
+    }
+    setConstituentsStacks((prev) => {
+      const next = activateChartInStack(prev, stackIdx, chartIdx);
+      setActiveConstituentsStackIdx(stackIdx);
+      const face = activeChart(next[stackIdx]);
+      if (face?.symbol) setView('constituents_' + face.symbol);
       return next;
     });
   }, []);
 
+  const reorderConstituentsStacks = useCallback((fromIdx, toIdx) => {
+    setConstituentsStacks((prev) => {
+      const next = [...prev];
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      setActiveConstituentsStackIdx((ai) => {
+        if (ai === fromIdx) return toIdx;
+        if (fromIdx < ai && toIdx >= ai) return ai - 1;
+        if (fromIdx > ai && toIdx <= ai) return ai + 1;
+        return ai;
+      });
+      return next;
+    });
+  }, []);
   useEffect(() => {
     function handleOutsideClick(e) {
       if (!settingsOpen) return;
@@ -669,6 +797,10 @@ function App() {
     setView('indices');
   }, []);
 
+  const goToFunds = useCallback(() => {
+    setView('funds');
+  }, []);
+
   const goToWatchlist = useCallback(() => {
     setView('watchlist');
   }, []);
@@ -691,19 +823,22 @@ function App() {
   }, []);
   const startUpdateJob = useCallback(async (starter, startErrMessage) => {
     setSettingsOpen(false);
-    if (updateRunning || updatePendingStart) {
-      setUpdatePanelOpen(true);
-      return;
-    }
-    updateRequestedRef.current = true;
     setUpdatePanelOpen(true);
+    updateRequestedRef.current = true;
     try {
-      await starter();
+      const result = await starter();
+      if (result?.status === 'queued') {
+        setToastMessage(
+          result.coalesced
+            ? `Already queued: ${result.label || result.job || 'job'} (position ${result.position}).`
+            : `Queued behind current job: ${result.label || result.job || 'job'} (position ${result.position}).`,
+        );
+      }
     } catch (e) {
       updateRequestedRef.current = false;
       setToastMessage(e.response?.data?.detail || startErrMessage);
     }
-  }, [updatePendingStart, updateRunning]);
+  }, []);
 
   const handleCancelUpdate = useCallback(async () => {
     if (!updateRunning && !updatePendingStart) return;
@@ -719,9 +854,16 @@ function App() {
     await startUpdateJob(startOhlcvUpdate, 'Failed to start price/volume update.');
   }, [startOhlcvUpdate, startUpdateJob]);
 
+  const handleRepairIndexChartGaps = useCallback(async () => {
+    await startUpdateJob(
+      startRepairIndexChartGaps,
+      'Failed to start index chart gap repair.',
+    );
+  }, [startRepairIndexChartGaps, startUpdateJob]);
+
   const handleUpdateIndicatorSnapshots = useCallback(async () => {
-    onOpenFilterSchedule();
-  }, [onOpenFilterSchedule]);
+    setSchedulerOpen(true);
+  }, []);
 
   const handleStockSplitAdjustments = useCallback(async () => {
     await startUpdateJob(
@@ -763,21 +905,22 @@ function App() {
       if (!ok) return;
     }
     setSettingsOpen(false);
-    if (updateRunning || updatePendingStart) {
-      setUpdatePanelOpen(true);
-      return;
-    }
     updateRequestedRef.current = true;
     setUpdatePanelOpen(true);
     setEarningsPlusRefreshPending(true);
     try {
-      await startAdminJob('/api/admin/refresh-earnings-plus-cache', { params });
+      const result = await startAdminJob('/api/admin/refresh-earnings-plus-cache', { params });
+      if (result?.status === 'queued') {
+        setToastMessage(
+          `Queued Earnings+ refresh behind current job (position ${result.position}).`,
+        );
+      }
     } catch (e) {
       updateRequestedRef.current = false;
       setEarningsPlusRefreshPending(false);
       setToastMessage(e.response?.data?.detail || 'Failed to start Earnings+ cache refresh.');
     }
-  }, [startAdminJob, updatePendingStart, updateRunning]);
+  }, [startAdminJob]);
 
   const openSupport = useCallback(() => {
     setSettingsOpen(false);
@@ -857,12 +1000,19 @@ function App() {
     const n = Number(value);
     if (!Number.isFinite(n) || n < 1 || n > 20) return;
     setMaxChartTabs(n);
+    setChartTabs(prev => {
+      if (prev.length <= n) return prev;
+      const trimmed = trimChartTabsToMax(prev, tabCreationOrder.current, activeTabIdx, n);
+      tabCreationOrder.current = trimmed.creationOrder;
+      setActiveTabIdx(trimmed.activeIdx);
+      return trimmed.tabs;
+    });
     try {
       await axios.post(`${API}/api/layout`, { maxChartTabs: n });
     } catch {
       setToastMessage('Failed to save max chart tabs setting.');
     }
-  }, []);
+  }, [activeTabIdx]);
 
   const [cimUpdateBusy, setCimUpdateBusy] = useState(false);
   const [appVersion, setAppVersion] = useState('');
@@ -1141,6 +1291,18 @@ function App() {
 
   const handleContextMenuRequest = useCallback((payload) => {
     if (!payload?.symbol || !payload?.type) return;
+    const items = Array.isArray(payload.items) && payload.items.length
+      ? payload.items.map((it) => ({
+          symbol: String(it.symbol || '').trim().toUpperCase(),
+          type: String(it.type || 'stock').toLowerCase() === 'index' ? 'index' : 'stock',
+        })).filter((it) => it.symbol)
+      : [{ symbol: String(payload.symbol).trim().toUpperCase(), type: payload.type }];
+    const allVisibleItems = Array.isArray(payload.allVisibleItems)
+      ? payload.allVisibleItems.map((it) => ({
+          symbol: String(it.symbol || '').trim().toUpperCase(),
+          type: String(it.type || 'stock').toLowerCase() === 'index' ? 'index' : 'stock',
+        })).filter((it) => it.symbol)
+      : null;
     setContextMenuState({
       visible: true,
       x: payload.x || 0,
@@ -1151,6 +1313,8 @@ function App() {
       newWatchlistName: '',
       sourcePage: payload.sourcePage || 'pulse',
       watchlistName: payload.watchlistName ?? null,
+      items,
+      allVisibleItems,
     });
   }, []);
 
@@ -1251,10 +1415,9 @@ function App() {
   }, [activeWatchlistName, activeWatchlistForSearch, addItemsToNamedWatchlist]);
 
   useEffect(() => {
-    function isTypingTarget(el) {
-      if (!el) return false;
-      const tag = (el.tagName || '').toLowerCase();
-      return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable;
+    let lastPointerDownTarget = null;
+    function onPointerDown(e) {
+      lastPointerDownTarget = e.target;
     }
     function onKeydown(e) {
       const consume = () => {
@@ -1264,7 +1427,20 @@ function App() {
       };
       if (e.defaultPrevented) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      const blockTypeahead = shouldBlockGlobalSearchTypeahead(e, lastPointerDownTarget);
       const key = e.key || '';
+
+      // Inputs / Alerts / Portfolio % UI — never steal Backspace or digits.
+      if (blockTypeahead) {
+        return;
+      }
+
+      // Stop browser "Back" navigation when focus is not in a field / no-typeahead UI.
+      if ((key === 'Backspace' || key === 'Delete') && !globalSearchOpen) {
+        e.preventDefault();
+        return;
+      }
 
       if (knowledgeBaseOpen) return;
 
@@ -1277,7 +1453,13 @@ function App() {
           setGlobalSearchActiveIndex(0);
           return;
         }
+        const searchOwnsFocus = !!globalSearchInputRef.current
+          && document.activeElement === globalSearchInputRef.current;
         if (key === 'Backspace') {
+          if (!searchOwnsFocus) {
+            e.preventDefault();
+            return;
+          }
           consume();
           setGlobalSearchQuery(prev => prev.slice(0, -1));
           return;
@@ -1300,6 +1482,11 @@ function App() {
           return;
         }
         if (key.length === 1 && !/\s/.test(key)) {
+          if (!searchOwnsFocus && document.activeElement
+            && document.activeElement !== document.body
+            && document.activeElement !== document.documentElement) {
+            return;
+          }
           consume();
           setGlobalSearchQuery(prev => `${prev}${key}`.toUpperCase());
           globalSearchInputRef.current?.focus();
@@ -1308,7 +1495,6 @@ function App() {
       }
 
       if (!canOpenGlobalSearch) return;
-      if (isTypingTarget(e.target)) return;
       if (key === '/' && !globalSearchOpen) {
         consume();
         setGlobalSearchOpen(true);
@@ -1322,14 +1508,66 @@ function App() {
         setGlobalSearchQuery(key.toUpperCase());
       }
     }
+    window.addEventListener('mousedown', onPointerDown, true);
     window.addEventListener('keydown', onKeydown, true);
-    return () => window.removeEventListener('keydown', onKeydown, true);
+    return () => {
+      window.removeEventListener('mousedown', onPointerDown, true);
+      window.removeEventListener('keydown', onKeydown, true);
+    };
   }, [applyGlobalSearchPick, canOpenGlobalSearch, globalSearchActiveIndex, globalSearchOpen, globalSearchResults, knowledgeBaseOpen]);
+
+  // Live Feed scope follows the active page (no Mode dropdown).
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const chartTabSymbol = view === 'chart' && activeTabIdx != null
+      ? activeChart(chartTabs[activeTabIdx])?.symbol
+      : null;
+    const scope = livePageContextFromView(view, { chartSymbol: chartTabSymbol });
+    window.dispatchEvent(new CustomEvent('cim:live-page-context', {
+      detail: {
+        context: scope.context,
+        pageId: scope.pageId,
+        label: scope.label,
+        symbol: chartTabSymbol || undefined,
+      },
+    }));
+    try {
+      const snap = window.CiMLiveFeedControl?.getSnapshot?.();
+      if (snap?.enabled && scope.pageId) {
+        pageLiveApiRef.current?.setPageLive?.(scope.pageId);
+      }
+    } catch { /* ignore */ }
+    return undefined;
+  }, [view, activeTabIdx, chartTabs]);
+
+  // Keep pageLiveId in sync with Live Feed ON/OFF so charts get liveToday.
+  // Only trust cim:live-feed-toggle from the feed controller — cim:live-active can
+  // briefly report enabled:false while resubscribing (stopMoversUniverse mid-sync).
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const onToggle = (e) => {
+      const enabled = !!(e?.detail?.enabled);
+      if (!enabled) {
+        try {
+          const snap = window.CiMLiveFeedControl?.getSnapshot?.();
+          if (snap?.enabled) return;
+        } catch { /* ignore */ }
+        pageLiveApiRef.current?.clearPageLive?.();
+        return;
+      }
+      const pageId = e?.detail?.pageId || resolvePageId(view);
+      if (pageId) pageLiveApiRef.current?.setPageLive?.(pageId);
+    };
+    window.addEventListener('cim:live-feed-toggle', onToggle);
+    return () => {
+      window.removeEventListener('cim:live-feed-toggle', onToggle);
+    };
+  }, [view]);
 
   const handleRefreshLivePrices = useCallback(async () => {
     const pageId = resolvePageId(view);
     const chartTabSymbol = view === 'chart' && activeTabIdx != null
-      ? chartTabs[activeTabIdx]?.symbol
+      ? activeChart(chartTabs[activeTabIdx])?.symbol
       : null;
     let symbols = getRefreshSymbols(pageId, chartTabSymbol);
 
@@ -1401,6 +1639,20 @@ function App() {
     }
   }, [view, activeTabIdx, chartTabs]);
 
+  const contextMenuItems = (
+    Array.isArray(contextMenuState.items) && contextMenuState.items.length
+      ? contextMenuState.items
+      : (contextMenuState.symbol
+        ? [{ symbol: contextMenuState.symbol, type: contextMenuState.type || 'stock' }]
+        : [])
+  );
+  const contextMenuAllVisible = Array.isArray(contextMenuState.allVisibleItems)
+    ? contextMenuState.allVisibleItems
+    : [];
+  const contextMenuLabel = contextMenuItems.length > 1
+    ? `${contextMenuItems.length} symbols`
+    : (contextMenuState.symbol || '');
+
   return (
     <IntradayPatchProvider
       enabled={!!isWebBrowserUser}
@@ -1409,6 +1661,7 @@ function App() {
     >
     <PageLiveProvider onApiReady={(api) => { pageLiveApiRef.current = api; }}>
     <ChartPrefsProvider enabled={isWebBrowserUser} email={licenseStatus?.email}>
+    <BasketProvider onOpenStock={openChart} onOpenIndex={openIndex}>
     <div style={{
       display:         'flex',
       flexDirection:   'column',
@@ -1468,9 +1721,11 @@ function App() {
             activeTabIdx={activeTabIdx}
             indexTabs={indexTabs}
             activeIndexTab={activeIndexTab}
-            constituentsTabs={constituentsTabs}
+            constituentsStacks={constituentsStacks}
+            activeConstituentsStackIdx={activeConstituentsStackIdx}
             onDashboard={goToDashboard}
             onIndices={goToIndices}
+            onFunds={goToFunds}
             onWatchlist={goToWatchlist}
             onPortfolio={goToPortfolio}
             onPnL={goToPnL}
@@ -1483,9 +1738,10 @@ function App() {
             onCloseChart={closeChart}
             onSwitchIndex={sym => { setActiveIndexTab(sym); setView('index_' + sym); }}
             onCloseIndex={closeIndexTab}
-            onSwitchConstituents={sym => setView('constituents_' + sym)}
+            onSwitchConstituents={switchConstituents}
             onCloseConstituents={closeConstituentsTab}
             onReorderChartTabs={reorderChartTabs}
+            onReorderConstituentsStacks={reorderConstituentsStacks}
             onOpenSectors={() => { setAdminOpen(true); setSettingsOpen(false); }}
             onOpenScheduler={() => { setSchedulerOpen(true); setSettingsOpen(false); }}
             onOpenSettings={() => setSettingsOpen(v => !v)}
@@ -1505,6 +1761,7 @@ function App() {
             onToggleAggressiveCache={handleToggleAggressiveCache}
             onClearCacheNow={handleClearCacheNow}
             onUpdatePriceVolume={handleUpdatePriceVolume}
+            onRepairIndexChartGaps={handleRepairIndexChartGaps}
             onUpdateIndicatorSnapshots={handleUpdateIndicatorSnapshots}
             onUpdateSplitAdjustments={handleStockSplitAdjustments}
             onSplitCatchupScan={handleSplitCatchupScan}
@@ -1539,6 +1796,7 @@ function App() {
             intradayRefreshBusy={intradayRefreshBusy}
             healthState={healthState}
             usersOnline={usersOnline}
+            onOpenChart={openChart}
           />
 
           <div
@@ -1578,6 +1836,9 @@ function App() {
               onOpenChart={openChart}
               isActive={view === 'earnings-beats'}
               onContextMenuRequest={handleContextMenuRequest}
+              onAddStocksToWatchlist={handleDashboardAddToWatchlist}
+              watchlists={watchlists}
+              onGoToWatchlist={goToWatchlist}
               onRefreshEarningsPlusCache={showDesktopAdminUi ? handleRefreshEarningsPlusCache : undefined}
               earningsPlusRefreshRunning={earningsPlusRefreshPending || (updateRunning && jobStatus?.job === 'earnings_plus_cache')}
             />
@@ -1648,6 +1909,11 @@ function App() {
           />
         </div>
 
+        {/* Mutual Funds (AMFI daily NAV) */}
+        <div style={{ display: view === 'funds' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
+          <FundsPage />
+        </div>
+
         {/* Index chart tabs */}
         {indexTabs.map(idx => (
           <div key={idx.symbol} style={{ display: view === 'index_' + idx.symbol ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
@@ -1660,34 +1926,66 @@ function App() {
           </div>
         ))}
 
-        {/* Constituents tabs */}
-        {constituentsTabs.map(idx => (
-          <div key={idx.symbol} style={{ display: view === 'constituents_' + idx.symbol ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-            <ConstituentsPage
-              index={idx}
-              onOpenChart={openChart}
-              onContextMenuRequest={handleContextMenuRequest}
-              onBack={() => {
-                const indexTab = indexTabs.find(t => t.symbol === idx.symbol);
-                if (indexTab) setView('index_' + idx.symbol);
-                else setView('indices');
+        {/* Constituents stacks — one ConstituentsPage per active entry */}
+        {constituentsStacks.map((stack, idx) => {
+          const page = activeChart(stack);
+          if (!page) return null;
+          return (
+            <div
+              key={`${stack.id}-${page.id}`}
+              style={{
+                display: (view === 'constituents_' + page.symbol && idx === activeConstituentsStackIdx)
+                  ? 'flex'
+                  : 'none',
+                flex: 1,
+                flexDirection: 'column',
+                overflow: 'hidden',
+                height: '100%',
               }}
-            />
-          </div>
-        ))}
-
-        {/* Chart tabs */}
-        {chartTabs.map((tab, idx) => (
-          <div key={tab.id} style={{ display: (view === 'chart' && idx === activeTabIdx) ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden', height: '100%' }}>
-            <SplitChartPage
-              symbol={tab.symbol}
-              onOpenChart={openChart}
-              onActiveSymbolChange={(sym) => {
-                setChartTabs(prev => prev.map((t, i) => i === activeTabIdx ? { ...t, symbol: sym } : t));
+            >
+              <ConstituentsPage
+                index={page}
+                onOpenChart={openChart}
+                onContextMenuRequest={handleContextMenuRequest}
+                onBack={() => {
+                  const indexTab = indexTabs.find(t => t.symbol === page.symbol);
+                  if (indexTab) setView('index_' + page.symbol);
+                  else setView('indices');
+                }}
+              />
+            </div>
+          );
+        })}
+        {/* Chart stacks — one SplitChartPage per stack slot */}
+        {chartTabs.map((stack, idx) => {
+          const chart = activeChart(stack);
+          if (!chart) return null;
+          return (
+            <div
+              key={`${stack.id}-${chart.id}`}
+              style={{
+                display: (view === 'chart' && idx === activeTabIdx) ? 'flex' : 'none',
+                flex: 1,
+                flexDirection: 'column',
+                overflow: 'hidden',
+                height: '100%',
               }}
-            />
-          </div>
-        ))}
+            >
+              <SplitChartPage
+                symbol={chart.symbol}
+                onOpenChart={openChart}
+                onActiveSymbolChange={(sym) => {
+                  setChartTabs((prev) => setActiveChartSymbol(prev, idx, sym));
+                  try {
+                    window.dispatchEvent(new CustomEvent('cim:chart-focus-symbol', {
+                      detail: { symbol: String(sym || '').trim().toUpperCase() },
+                    }));
+                  } catch (_) { /* ignore */ }
+                }}
+              />
+            </div>
+          );
+        })}
           </div>
         </div>
 
@@ -1701,7 +1999,7 @@ function App() {
         />
       </div>
 
-      {(updateRunning || updatePendingStart || updatePanelOpen) && (
+      {(updateRunning || updatePendingStart || updatePanelOpen || (jobQueue && jobQueue.length > 0)) && (
         <div style={{
           position: 'fixed',
           top: 'calc(var(--tabbar-height) + 8px)',
@@ -1718,7 +2016,7 @@ function App() {
             <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
               {(updateRunning || updatePendingStart)
                 ? (updateCancelling ? 'Cancelling update…' : 'Update in progress')
-                : 'Last update status'}
+                : (jobQueue?.length ? 'Job queue' : 'Last update status')}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               {(updateRunning || updatePendingStart) && (
@@ -1751,6 +2049,112 @@ function App() {
               ? jobStatus.error
               : (jobStatus?.message || ((updateRunning || updatePendingStart) ? 'Starting update job…' : 'No active update job.'))}
           </div>
+          {(() => {
+            const src = statusMeta?.sources || {};
+            const daily = src.daily || {};
+            const bars = src.bars_4h || {};
+            const hasDaily = daily.upstox != null || daily.failed != null || daily.skipped_current != null;
+            const has4h = bars.upstox != null || bars.failed != null || bars.none != null || bars.skipped_current != null;
+            if (!hasDaily && !has4h) return null;
+            const parts = [];
+            if (hasDaily) {
+              parts.push(
+                `Daily Upstox ${Number(daily.upstox || 0)}` +
+                (daily.failed != null ? ` · failed ${Number(daily.failed || 0)}` : '') +
+                (daily.skipped_current != null ? ` · skip ${Number(daily.skipped_current || 0)}` : '')
+              );
+            }
+            if (has4h) {
+              parts.push(
+                `4H Upstox ${Number(bars.upstox || 0)}` +
+                (bars.none != null ? ` · miss ${Number(bars.none || 0)}` : '') +
+                (bars.failed != null ? ` · failed ${Number(bars.failed || 0)}` : '') +
+                (bars.skipped_current != null ? ` · skip ${Number(bars.skipped_current || 0)}` : '')
+              );
+            }
+            return (
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, lineHeight: 1.35 }}>
+                Source: {parts.join(' · ')}
+              </div>
+            );
+          })()}
+          {Array.isArray(jobQueue) && jobQueue.length > 0 && (
+            <div style={{ marginBottom: 8, border: '1px solid var(--border-light)', borderRadius: 6, backgroundColor: 'var(--bg-tertiary)', padding: '8px 10px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6, gap: 8 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-primary)' }}>
+                  Queued ({jobQueue.length})
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await clearJobQueue();
+                    } catch {
+                      setToastMessage('Failed to clear job queue.');
+                    }
+                  }}
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 600,
+                    color: 'var(--text-secondary)',
+                    background: 'transparent',
+                    border: '1px solid var(--border)',
+                    borderRadius: 4,
+                    padding: '2px 6px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Clear queue
+                </button>
+              </div>
+              {jobQueue.map((item) => (
+                <div
+                  key={item.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                    padding: '4px 0',
+                    borderTop: '1px solid var(--border-light)',
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 11, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {item.position}. {item.label || item.key}
+                    </div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                      {item.source === 'scheduled' ? 'scheduled' : 'manual'}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    title="Remove from queue"
+                    onClick={async () => {
+                      try {
+                        await cancelQueuedJob(item.id);
+                      } catch {
+                        setToastMessage('Failed to remove queued job.');
+                      }
+                    }}
+                    style={{
+                      fontSize: 10,
+                      fontWeight: 600,
+                      color: 'var(--accent-red)',
+                      background: 'transparent',
+                      border: '1px solid var(--accent-red)',
+                      borderRadius: 4,
+                      padding: '2px 6px',
+                      cursor: 'pointer',
+                      flexShrink: 0,
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           {(splitPendingCount > 0 || (jobStatus?.job === 'split_adjustments' && (updateRunning || updatePendingStart))) && (
             <div style={{ marginBottom: 8, border: '1px solid var(--border-light)', borderRadius: 6, backgroundColor: 'var(--bg-tertiary)', padding: '8px 10px' }}>
               {jobStatus?.job === 'split_adjustments' && (updateRunning || updatePendingStart) && (
@@ -1865,18 +2269,25 @@ function App() {
           }}
         >
           <div style={{ padding: '8px 10px', fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-            {contextMenuState.symbol}
+            {contextMenuLabel}
           </div>
           <div
-            onClick={() => {
-              addToPortfolio(contextMenuState.symbol, contextMenuState.type);
+            onClick={async () => {
+              for (const it of contextMenuItems) {
+                await addToPortfolio(it.symbol, it.type);
+              }
+              setToastMessage(
+                contextMenuItems.length > 1
+                  ? `Added ${contextMenuItems.length} symbols to portfolio.`
+                  : `Added ${contextMenuItems[0]?.symbol || ''} to portfolio.`,
+              );
               setContextMenuState(s => ({ ...s, visible: false }));
             }}
             style={{ padding: '9px 12px', cursor: 'pointer', fontSize: 12, color: 'var(--accent-green)', borderBottom: '1px solid var(--border)' }}
             onMouseEnter={e => { e.currentTarget.style.backgroundColor = 'var(--bg-hover)'; }}
             onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'transparent'; }}
           >
-            Add to portfolio
+            {contextMenuItems.length > 1 ? `Add ${contextMenuItems.length} to portfolio` : 'Add to portfolio'}
           </div>
           {(contextMenuState.sourcePage === 'portfolio'
             || contextMenuState.sourcePage === 'constituents') && (
@@ -1926,15 +2337,19 @@ function App() {
             ))}
           <div style={{ height: 1, backgroundColor: 'var(--border)' }} />
           <div style={{ padding: '6px 10px 2px', fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-            Add to watchlist
+            {contextMenuItems.length > 1 ? `Add ${contextMenuItems.length} to watchlist` : 'Add to watchlist'}
           </div>
           {watchlists.map(w => (
             <div
               key={w.name}
               onClick={async () => {
-                const r = await addItemsToNamedWatchlist([{ symbol: contextMenuState.symbol, type: contextMenuState.type }], w.name);
+                const r = await addItemsToNamedWatchlist(contextMenuItems, w.name);
                 if (r.ok) {
-                  setToastMessage(`Added ${contextMenuState.symbol} to "${w.name}".`);
+                  setToastMessage(
+                    contextMenuItems.length > 1
+                      ? `Added ${contextMenuItems.length} symbols to "${w.name}".`
+                      : `Added ${contextMenuItems[0]?.symbol || ''} to "${w.name}".`,
+                  );
                   setContextMenuState(s => ({ ...s, visible: false }));
                 } else {
                   alert(r.error || 'Failed to add to watchlist.');
@@ -1947,6 +2362,33 @@ function App() {
               {w.name}
             </div>
           ))}
+          {contextMenuState.sourcePage === 'earnings-beats' && contextMenuAllVisible.length > 0 && (
+            <>
+              <div style={{ height: 1, backgroundColor: 'var(--border)' }} />
+              <div style={{ padding: '6px 10px 2px', fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                {`Add all visible (${contextMenuAllVisible.length})`}
+              </div>
+              {watchlists.map(w => (
+                <div
+                  key={`all-vis-${w.name}`}
+                  onClick={async () => {
+                    const r = await addItemsToNamedWatchlist(contextMenuAllVisible, w.name);
+                    if (r.ok) {
+                      setToastMessage(`Added ${contextMenuAllVisible.length} visible symbols to "${w.name}".`);
+                      setContextMenuState(s => ({ ...s, visible: false }));
+                    } else {
+                      alert(r.error || 'Failed to add to watchlist.');
+                    }
+                  }}
+                  style={{ padding: '8px 12px', cursor: 'pointer', fontSize: 12, color: 'var(--text-primary)' }}
+                  onMouseEnter={e => { e.currentTarget.style.backgroundColor = 'var(--bg-hover)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                >
+                  {w.name}
+                </div>
+              ))}
+            </>
+          )}
           <div style={{ height: 1, backgroundColor: 'var(--border)' }} />
           {!contextMenuState.createMode ? (
             <div
@@ -1973,9 +2415,9 @@ function App() {
                     if (!watchlists.some(w => w.name.toLowerCase() === targetName.toLowerCase())) {
                       await axios.post(`${API}/api/watchlists`, { name: targetName });
                     }
-                    const r = await addItemsToNamedWatchlist([{ symbol: contextMenuState.symbol, type: contextMenuState.type }], targetName);
+                    const r = await addItemsToNamedWatchlist(contextMenuItems, targetName);
                     if (r.ok) {
-                      setToastMessage(`Added ${contextMenuState.symbol} to "${targetName}".`);
+                      setToastMessage(contextMenuItems.length > 1 ? `Added ${contextMenuItems.length} symbols to "${targetName}".` : `Added ${contextMenuItems[0]?.symbol || ''} to "${targetName}".`);
                       setContextMenuState(s => ({ ...s, visible: false, createMode: false, newWatchlistName: '' }));
                     } else {
                       alert(r.error || 'Failed to add to watchlist.');
@@ -1994,9 +2436,9 @@ function App() {
                     if (!watchlists.some(w => w.name.toLowerCase() === targetName.toLowerCase())) {
                       await axios.post(`${API}/api/watchlists`, { name: targetName });
                     }
-                    const r = await addItemsToNamedWatchlist([{ symbol: contextMenuState.symbol, type: contextMenuState.type }], targetName);
+                    const r = await addItemsToNamedWatchlist(contextMenuItems, targetName);
                     if (r.ok) {
-                      setToastMessage(`Added ${contextMenuState.symbol} to "${targetName}".`);
+                      setToastMessage(contextMenuItems.length > 1 ? `Added ${contextMenuItems.length} symbols to "${targetName}".` : `Added ${contextMenuItems[0]?.symbol || ''} to "${targetName}".`);
                       setContextMenuState(s => ({ ...s, visible: false, createMode: false, newWatchlistName: '' }));
                     } else {
                       alert(r.error || 'Failed to add to watchlist.');
@@ -2225,10 +2667,6 @@ function App() {
           {toastMessage}
         </div>
       )}
-      <FilterRebuildDialog
-        open={filterRebuildDialogOpen}
-        onClose={() => setFilterRebuildDialogOpen(false)}
-      />
       <ConfirmDialog
         open={!!confirmState}
         title={confirmState?.title}
@@ -2239,19 +2677,395 @@ function App() {
         onCancel={confirmState?.onCancel}
       />
     </div>
+    </BasketProvider>
     </ChartPrefsProvider>
     </PageLiveProvider>
     </IntradayPatchProvider>
   );
 }
 
+function TabBarTab({
+  label,
+  isActive,
+  onClose,
+  onClick,
+  draggable,
+  onDragStart,
+  onDrop,
+  mono,
+  badge,
+  rootRef,
+  title,
+}) {
+  return (
+    <div
+      ref={rootRef}
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragOver={e => e.preventDefault()}
+      onDrop={onDrop}
+      onClick={onClick}
+      title={title}
+      style={{
+        display:         'flex',
+        alignItems:      'center',
+        justifyContent:  'space-between',
+        minWidth:        120,
+        maxWidth:        160,
+        padding:         '0 10px 0 12px',
+        cursor:          draggable ? 'grab' : 'pointer',
+        borderRight:     '1px solid var(--border)',
+        backgroundColor: isActive ? 'var(--bg-tertiary)' : 'transparent',
+        borderBottom:    isActive ? '2px solid var(--accent-blue)' : '2px solid transparent',
+        color:           isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+        flexShrink:      0,
+        userSelect:      'none',
+        height:          '100%',
+      }}
+    >
+      <span style={{
+        fontFamily:   mono ? 'var(--font-mono)' : 'inherit',
+        fontSize:     11,
+        fontWeight:   isActive ? 600 : 400,
+        overflow:     'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace:   'nowrap',
+        flex:         1,
+      }}
+      >
+        {label}
+      </span>
+      {badge != null && badge > 1 && (
+        <span
+          aria-hidden
+          style={{
+            flexShrink: 0,
+            marginLeft: 4,
+            fontSize: 9,
+            fontWeight: 700,
+            color: isActive ? 'var(--accent-blue)' : 'var(--text-muted)',
+            fontFamily: 'var(--font-mono)',
+          }}
+        >
+          {badge}
+        </span>
+      )}
+      {onClose && (
+        <button
+          onClick={e => { e.stopPropagation(); onClose(); }}
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 16, height: 16, flexShrink: 0, background: 'none', color: 'var(--text-muted)', fontSize: 14, marginLeft: 4 }}
+          onMouseEnter={e => { e.currentTarget.style.color = 'var(--text-primary)'; }}
+          onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+        >
+          ×
+        </button>
+      )}
+    </div>
+  );
+}
+
+const CHART_STACK_MENU_Z = 10060;
+
+function ChartStackTab({
+  stack,
+  stackIdx,
+  isActive,
+  onSwitchStack,
+  onCloseActive,
+  onSwitchChart,
+  onCloseChart,
+  draggable,
+  onDragStart,
+  onDrop,
+  getFaceLabel,
+  getItemLabel,
+  stackNoun = 'charts',
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuRect, setMenuRect] = useState(null);
+  const anchorRef = useRef(null);
+  const menuRef = useRef(null);
+  const leaveTimerRef = useRef(null);
+  const dragOriginRef = useRef(null);
+  const [dragEnabled, setDragEnabled] = useState(false);
+
+  const face = activeChart(stack);
+  const count = stack?.charts?.length || 0;
+  const stacked = count > 1;
+  const labelFor = useCallback((entry) => {
+    if (typeof getItemLabel === 'function') return getItemLabel(entry);
+    if (typeof getFaceLabel === 'function') return getFaceLabel(entry);
+    return entry?.symbol || '—';
+  }, [getFaceLabel, getItemLabel]);
+  const faceLabel = (typeof getFaceLabel === 'function' ? getFaceLabel(face) : null)
+    || face?.symbol
+    || '—';
+
+  const clearLeaveTimer = useCallback(() => {
+    if (leaveTimerRef.current != null) {
+      window.clearTimeout(leaveTimerRef.current);
+      leaveTimerRef.current = null;
+    }
+  }, []);
+
+  const openMenu = useCallback(() => {
+    if (!stacked) return;
+    clearLeaveTimer();
+    setMenuOpen(true);
+  }, [stacked, clearLeaveTimer]);
+
+  const scheduleCloseMenu = useCallback(() => {
+    clearLeaveTimer();
+    leaveTimerRef.current = window.setTimeout(() => {
+      setMenuOpen(false);
+      leaveTimerRef.current = null;
+    }, 140);
+  }, [clearLeaveTimer]);
+
+  const closeMenu = useCallback(() => {
+    clearLeaveTimer();
+    setMenuOpen(false);
+  }, [clearLeaveTimer]);
+
+  useLayoutEffect(() => {
+    if (!menuOpen || !stacked) {
+      setMenuRect(null);
+      return undefined;
+    }
+    const update = () => {
+      const el = anchorRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const width = Math.max(160, Math.min(280, Math.max(r.width, 180)));
+      const pad = 8;
+      const left = Math.min(
+        Math.max(pad, r.left),
+        Math.max(pad, window.innerWidth - width - pad),
+      );
+      setMenuRect({ top: r.bottom + 2, left, width });
+    };
+    update();
+    window.addEventListener('resize', update);
+    window.addEventListener('scroll', update, true);
+    return () => {
+      window.removeEventListener('resize', update);
+      window.removeEventListener('scroll', update, true);
+    };
+  }, [menuOpen, stacked, count, faceLabel]);
+
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    const onDoc = (e) => {
+      const t = e.target;
+      if (anchorRef.current?.contains(t)) return;
+      if (menuRef.current?.contains(t)) return;
+      closeMenu();
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') closeMenu();
+    };
+    // Use click (not mousedown) so menu item selection can complete first.
+    document.addEventListener('click', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('click', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [menuOpen, closeMenu]);
+
+  useEffect(() => () => clearLeaveTimer(), [clearLeaveTimer]);
+
+  // Stacked tabs: only enable HTML5 drag after a short drag gesture so click/hover open the menu.
+  useEffect(() => {
+    if (!stacked) {
+      setDragEnabled(Boolean(draggable));
+      return undefined;
+    }
+    setDragEnabled(false);
+    const onUp = () => {
+      dragOriginRef.current = null;
+      setDragEnabled(false);
+    };
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('blur', onUp);
+    return () => {
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('blur', onUp);
+    };
+  }, [stacked, draggable]);
+
+  const onFaceMouseDown = (e) => {
+    if (!stacked || !draggable || e.button !== 0) return;
+    dragOriginRef.current = { x: e.clientX, y: e.clientY };
+    const onMove = (ev) => {
+      const origin = dragOriginRef.current;
+      if (!origin) return;
+      const dx = Math.abs(ev.clientX - origin.x);
+      const dy = Math.abs(ev.clientY - origin.y);
+      if (dx > 6 || dy > 6) {
+        setDragEnabled(true);
+        window.removeEventListener('mousemove', onMove);
+      }
+    };
+    window.addEventListener('mousemove', onMove);
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const onFaceClick = (e) => {
+    onSwitchStack();
+    if (!stacked) return;
+    e.stopPropagation();
+    clearLeaveTimer();
+    // Always open on click (do not toggle closed — hover may already have opened it).
+    setMenuOpen(true);
+  };
+
+  const canDrag = Boolean(draggable) && !menuOpen && (!stacked || dragEnabled);
+
+  const menu = stacked && menuOpen && menuRect
+    ? createPortal(
+      <div
+        ref={menuRef}
+        role="menu"
+        data-cim="chart-stack-menu"
+        aria-label={`Stacked ${stackNoun} (${count})`}
+        onMouseEnter={openMenu}
+        onMouseLeave={scheduleCloseMenu}
+        style={{
+          position: 'fixed',
+          top: menuRect.top,
+          left: menuRect.left,
+          width: menuRect.width,
+          zIndex: CHART_STACK_MENU_Z,
+          maxHeight: 280,
+          overflowY: 'auto',
+          backgroundColor: 'var(--bg-secondary, #161b22)',
+          border: '1px solid var(--border, #30363d)',
+          borderRadius: 6,
+          boxShadow: '0 10px 28px rgba(0,0,0,0.55)',
+          padding: 4,
+        }}
+      >
+        {stack.charts.map((chart, chartIdx) => {
+          const selected = chartIdx === stack.activeIdx;
+          const itemLabel = labelFor(chart);
+          return (
+            <div
+              key={chart.id}
+              role="menuitem"
+              onMouseDown={(e) => {
+                // Select on mousedown so outside-click handlers cannot steal the gesture.
+                e.preventDefault();
+                e.stopPropagation();
+                onSwitchChart(stackIdx, chartIdx);
+                closeMenu();
+              }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '7px 10px',
+                borderRadius: 4,
+                cursor: 'pointer',
+                backgroundColor: selected ? 'var(--bg-active, #2d333b)' : 'transparent',
+                color: selected ? 'var(--text-primary, #e6edf3)' : 'var(--text-secondary, #8b949e)',
+                fontFamily: 'var(--font-mono)',
+                fontSize: 11,
+                fontWeight: selected ? 600 : 400,
+                whiteSpace: 'nowrap',
+              }}
+              onMouseEnter={(e) => {
+                if (!selected) e.currentTarget.style.backgroundColor = 'var(--bg-hover, #21262d)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = selected ? 'var(--bg-active, #2d333b)' : 'transparent';
+              }}
+            >
+              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{itemLabel}</span>
+              <button
+                type="button"
+                title={`Close ${itemLabel}`}
+                onMouseDown={(e) => {
+                  // Must handle on mousedown: parent menuitem also uses mousedown to switch,
+                  // and that fires before click — so × never closed without this.
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onCloseChart(stackIdx, chartIdx);
+                }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 16,
+                  height: 16,
+                  flexShrink: 0,
+                  background: 'none',
+                  color: 'var(--text-muted)',
+                  fontSize: 13,
+                  border: 'none',
+                  cursor: 'pointer',
+                  padding: 0,
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--text-primary)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+              >
+                ×
+              </button>
+            </div>
+          );
+        })}
+      </div>,
+      document.body,
+    )
+    : null;
+
+  return (
+    <div
+      style={{ position: 'relative', height: '100%', flexShrink: 0 }}
+      onMouseEnter={openMenu}
+      onMouseLeave={scheduleCloseMenu}
+      onMouseDown={onFaceMouseDown}
+    >
+      <TabBarTab
+        rootRef={anchorRef}
+        label={faceLabel}
+        isActive={isActive}
+        onClick={onFaceClick}
+        onClose={onCloseActive}
+        draggable={canDrag}
+        mono
+        badge={count}
+        title={stacked ? `${count} ${stackNoun} stacked — hover or click to switch` : undefined}
+        onDragStart={(e) => {
+          if (!canDrag) {
+            e.preventDefault();
+            return;
+          }
+          onDragStart?.(e);
+        }}
+        onDrop={onDrop}
+      />
+      {menu}
+    </div>
+  );
+}
+
 function TabBar({
   view, chartTabs, activeTabIdx, indexTabs, activeIndexTab,
-  constituentsTabs, onDashboard, onIndices, onWatchlist, onPortfolio, onPnL, onPotentialSwings, onMarketPulse, onMarketMovers, onMarketMap, onEarningsBeats, onSwitchChart, onCloseChart,
+  constituentsStacks, activeConstituentsStackIdx,
+  onDashboard, onIndices, onFunds, onWatchlist, onPortfolio, onPnL, onPotentialSwings, onMarketPulse, onMarketMovers, onMarketMap, onEarningsBeats, onSwitchChart, onCloseChart,
   onSwitchIndex, onCloseIndex, onSwitchConstituents, onCloseConstituents,
-  onReorderChartTabs, onOpenSectors, onOpenScheduler, onOpenSettings, onOpenAccount, onOpenKnowledgeBaseEditor, onOpenIssue, onOpenFeature, onOpenAbout, onOpenSupport,
+  onReorderChartTabs, onReorderConstituentsStacks, onOpenSectors, onOpenScheduler, onOpenSettings, onOpenAccount, onOpenKnowledgeBaseEditor, onOpenIssue, onOpenFeature, onOpenAbout, onOpenSupport,
   aggressiveCacheRam, maxChartTabs, onUpdateMaxChartTabs, cacheBusy, onToggleAggressiveCache, onClearCacheNow,
-  onUpdatePriceVolume, onUpdateIndicatorSnapshots, onUpdateSplitAdjustments, onSplitCatchupScan, splitPendingCount, onRefreshShareCounts, onRefreshEarningsPlusCache, onToggleUpdateProgress, updateRunning, updatePercent, settingsOpen, settingsRef,
+  onUpdatePriceVolume, onRepairIndexChartGaps, onUpdateIndicatorSnapshots, onUpdateSplitAdjustments, onSplitCatchupScan, splitPendingCount, onRefreshShareCounts, onRefreshEarningsPlusCache, onToggleUpdateProgress, updateRunning, updatePercent, settingsOpen, settingsRef,
   onRebuildIndicatorSnapshots,
   earningsPlusRefreshRunning,
   desktopCanRestartBackend, restartBackendBusy,
@@ -2269,9 +3083,12 @@ function TabBar({
   intradayRefreshBusy = false,
   healthState = 'loading',
   usersOnline = null,
+  onOpenChart,
 }) {
   const dragIdx     = useRef(null);
   const dragType    = useRef(null);
+  const tabsScrollRef = useRef(null);
+  useWheelHorizontalScroll(tabsScrollRef);
   const updateBtnRef = useRef(null);
   const updateMenuRef = useRef(null);
   const updateMenuWrapRef = useRef(null);
@@ -2286,6 +3103,15 @@ function TabBar({
       return { top: r.bottom + 4, left: Math.max(8, r.right - 280), width: 280 };
     });
   }, []);
+
+  // Close Live Feed popover when Update menu opens (LiveFeedPopover listens via custom event).
+  useEffect(() => {
+    if (!updateMenuRect) return undefined;
+    try {
+      window.dispatchEvent(new CustomEvent('cim:live-feed-popover-close'));
+    } catch { /* ignore */ }
+    return undefined;
+  }, [updateMenuRect]);
 
   useEffect(() => {
     if (knowledgeBaseOpen) setUpdateMenuRect(null);
@@ -2306,56 +3132,16 @@ function TabBar({
     if (dragType.current === 'chart' && type === 'chart' && dragIdx.current !== idx) {
       onReorderChartTabs(dragIdx.current, idx);
     }
+    if (
+      dragType.current === 'constituents'
+      && type === 'constituents'
+      && dragIdx.current !== idx
+      && typeof onReorderConstituentsStacks === 'function'
+    ) {
+      onReorderConstituentsStacks(dragIdx.current, idx);
+    }
     dragIdx.current  = null;
     dragType.current = null;
-  }
-
-  function Tab({ label, isActive, onClose, onClick, draggable, onDragStart, onDrop, mono }) {
-    return (
-      <div
-        draggable={draggable}
-        onDragStart={onDragStart}
-        onDragOver={e => e.preventDefault()}
-        onDrop={onDrop}
-        onClick={onClick}
-        style={{
-          display:         'flex',
-          alignItems:      'center',
-          justifyContent:  'space-between',
-          minWidth:        120,
-          maxWidth:        160,
-          padding:         '0 10px 0 12px',
-          cursor:          draggable ? 'grab' : 'pointer',
-          borderRight:     '1px solid var(--border)',
-          backgroundColor: isActive ? 'var(--bg-tertiary)' : 'transparent',
-          borderBottom:    isActive ? '2px solid var(--accent-blue)' : '2px solid transparent',
-          color:           isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
-          flexShrink:      0,
-          userSelect:      'none',
-          height:          '100%',
-        }}
-      >
-        <span style={{
-          fontFamily:   mono ? 'var(--font-mono)' : 'inherit',
-          fontSize:     11,
-          fontWeight:   isActive ? 600 : 400,
-          overflow:     'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace:   'nowrap',
-          flex:         1,
-        }}>
-          {label}
-        </span>
-        {onClose && (
-          <button
-            onClick={e => { e.stopPropagation(); onClose(); }}
-            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 16, height: 16, flexShrink: 0, background: 'none', color: 'var(--text-muted)', fontSize: 14, marginLeft: 4 }}
-            onMouseEnter={e => e.currentTarget.style.color = 'var(--text-primary)'}
-            onMouseLeave={e => e.currentTarget.style.color = 'var(--text-muted)'}
-          >×</button>
-        )}
-      </div>
-    );
   }
 
   useLayoutEffect(() => {
@@ -2434,8 +3220,11 @@ function TabBar({
           </span>
         ) : null}
       </div>
-      <div style={{ flex: 1, overflowX: 'auto', overflowY: 'hidden', display: 'flex', alignItems: 'stretch' }}>
-        {/* Fixed nav tabs — order: NSE | Indices | Market Map | Market Pulse | Market Movers | Earnings | Watchlist | Portfolio | Potential Swings */}
+      <div
+        ref={tabsScrollRef}
+        style={{ flex: 1, overflowX: 'auto', overflowY: 'hidden', display: 'flex', alignItems: 'stretch' }}
+      >
+        {/* Fixed nav tabs — order: NSE | Indices | Funds | Market Map | Market Pulse | Market Movers | Earnings | Watchlist | Portfolio | Potential Swings */}
         <div onClick={onDashboard} style={{
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           gap: 7, padding: '0 16px', cursor: 'pointer',
@@ -2464,6 +3253,18 @@ function TabBar({
           whiteSpace: 'nowrap', flexShrink: 0, userSelect: 'none',
         }}>
           Indices
+        </div>
+        <div onClick={onFunds} style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '0 16px', cursor: 'pointer',
+          borderRight: '1px solid var(--border)',
+          backgroundColor: view === 'funds' ? 'var(--bg-tertiary)' : 'transparent',
+          borderBottom: view === 'funds' ? '2px solid var(--accent-blue)' : '2px solid transparent',
+          color: view === 'funds' ? 'var(--text-primary)' : 'var(--text-secondary)',
+          fontSize: 12, fontWeight: view === 'funds' ? 600 : 400,
+          whiteSpace: 'nowrap', flexShrink: 0, userSelect: 'none',
+        }}>
+          Funds
         </div>
         <div onClick={onMarketMap} style={{
           display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -2564,19 +3365,49 @@ function TabBar({
         </div>
         )}
         {indexTabs.map((idx, i) => (
-          <Tab key={idx.symbol} label={idx.name} isActive={view === 'index_' + idx.symbol}
+          <TabBarTab key={idx.symbol} label={idx.name} isActive={view === 'index_' + idx.symbol}
             onClick={() => onSwitchIndex(idx.symbol)} onClose={() => onCloseIndex(idx.symbol)}
             draggable={true} onDragStart={e => onDragStart(e, 'index', i)} onDrop={e => onDrop(e, 'index', i)} />
         ))}
-        {constituentsTabs.map((idx, i) => (
-          <Tab key={'c_' + idx.symbol} label={idx.name + ' — Const.'} isActive={view === 'constituents_' + idx.symbol}
-            onClick={() => onSwitchConstituents(idx.symbol)} onClose={() => onCloseConstituents(idx.symbol)}
-            draggable={true} onDragStart={e => onDragStart(e, 'constituents', i)} onDrop={e => onDrop(e, 'constituents', i)} />
-        ))}
-        {chartTabs.map((tab, idx) => (
-          <Tab key={tab.id} label={tab.symbol} isActive={view === 'chart' && idx === activeTabIdx}
-            onClick={() => onSwitchChart(idx)} onClose={() => onCloseChart(idx)}
-            draggable={true} mono={true} onDragStart={e => onDragStart(e, 'chart', idx)} onDrop={e => onDrop(e, 'chart', idx)} />
+        {(constituentsStacks || []).map((stack, idx) => {
+          const face = activeChart(stack);
+          return (
+            <ChartStackTab
+              key={stack.id}
+              stack={stack}
+              stackIdx={idx}
+              isActive={Boolean(
+                face?.symbol
+                && view === 'constituents_' + face.symbol
+                && idx === activeConstituentsStackIdx,
+              )}
+              onSwitchStack={() => onSwitchConstituents(idx)}
+              onCloseActive={() => onCloseConstituents(idx)}
+              onSwitchChart={onSwitchConstituents}
+              onCloseChart={onCloseConstituents}
+              getFaceLabel={(entry) => `${entry?.name || entry?.symbol || '—'} — Const.`}
+              getItemLabel={(entry) => `${entry?.name || entry?.symbol || '—'} — Const.`}
+              stackNoun="constituents"
+              draggable
+              onDragStart={e => onDragStart(e, 'constituents', idx)}
+              onDrop={e => onDrop(e, 'constituents', idx)}
+            />
+          );
+        })}
+        {chartTabs.map((stack, idx) => (
+          <ChartStackTab
+            key={stack.id}
+            stack={stack}
+            stackIdx={idx}
+            isActive={view === 'chart' && idx === activeTabIdx}
+            onSwitchStack={() => onSwitchChart(idx)}
+            onCloseActive={() => onCloseChart(idx)}
+            onSwitchChart={onSwitchChart}
+            onCloseChart={onCloseChart}
+            draggable
+            onDragStart={e => onDragStart(e, 'chart', idx)}
+            onDrop={e => onDrop(e, 'chart', idx)}
+          />
         ))}
       </div>
 
@@ -2604,6 +3435,13 @@ function TabBar({
             onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.backgroundColor = 'transparent'; }}
           >↻ Refresh</div>
         )}
+        <LiveFeedPopover
+          knowledgeBaseOpen={knowledgeBaseOpen}
+          settingsOpen={settingsOpen}
+          onOpenChange={(isOpen) => { if (isOpen) setUpdateMenuRect(null); }}
+        />
+        <UniversalAlerts onOpenChart={onOpenChart} />
+        <UniversalNotes />
         <div ref={updateMenuWrapRef} style={{ position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'stretch' }}>
         <button
           ref={updateBtnRef}
@@ -2721,16 +3559,17 @@ function TabBar({
             >
               Update price and volume data
             </div>
-            {showDesktopAdminUi && (
-              <>
             <div
-              onClick={() => { setUpdateMenuRect(null); onUpdateIndicatorSnapshots && onUpdateIndicatorSnapshots(); }}
+              onClick={() => { setUpdateMenuRect(null); onRepairIndexChartGaps && onRepairIndexChartGaps(); }}
+              title="Scan all index charts for missing daily bars and backfill gaps from NSE (Yahoo fallback). Run when index charts show long flat gaps."
               style={{ padding: '9px 12px', cursor: 'pointer', fontSize: 12, color: 'var(--text-primary)', borderTop: '1px solid var(--border-light)' }}
               onMouseEnter={e => { e.currentTarget.style.backgroundColor = 'var(--bg-hover)'; }}
               onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'transparent'; }}
             >
-              Schedule filter data...
+              Repair Index Chart Gaps
             </div>
+            {showDesktopAdminUi && (
+              <>
             {showSchedulerMenu && onOpenScheduler && (
             <div
               onClick={() => { setUpdateMenuRect(null); onOpenScheduler(); }}
@@ -2826,7 +3665,7 @@ function TabBar({
             >
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ width: 16, textAlign: 'center' }}>📈</span>
-                Max Chart Tabs
+                Max Chart Stacks
               </span>
               <select
                 value={maxChartTabs}
@@ -2834,7 +3673,7 @@ function TabBar({
                 disabled={cacheBusy}
                 style={{ fontSize: 12 }}
               >
-                {[3, 5, 8, 10, 15].map(n => (
+                {[1, 3, 5, 8, 10, 15].map(n => (
                   <option key={n} value={n}>{n}</option>
                 ))}
               </select>
@@ -2898,12 +3737,6 @@ function TabBar({
                   label={earningsPlusRefreshRunning ? 'Refreshing Earnings + Cache…' : 'Refresh Earnings + Cache (this month)'}
                   onClick={onRefreshEarningsPlusCache}
                   disabled={cacheBusy || earningsPlusRefreshRunning}
-                />
-                <MenuItem
-                  icon="🧱"
-                  label="Schedule filter data..."
-                  onClick={onRebuildIndicatorSnapshots}
-                  disabled={cacheBusy || updateRunning}
                 />
               </>
             )}

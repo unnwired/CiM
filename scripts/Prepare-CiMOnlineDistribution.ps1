@@ -51,6 +51,8 @@ if (Test-Path -LiteralPath $prodPath) {
 $sync = @(
     "server\license_client.py",
     "server\license_routes.py",
+    "server\client_user_agent.py",
+    "server\auth_social_proof.py",
     "server\app_code_crypto.py",
     "server\cim_bootstrap.py",
     "server\product_config.py"

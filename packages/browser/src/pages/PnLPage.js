@@ -5,10 +5,12 @@ import StockListColumnHeader from '../components/StockListColumnHeader';
 import StockListGridCell from '../components/StockListGridCell';
 import PnLEntryCell from '../components/PnLEntryCell';
 import PnLQtyCell from '../components/PnLQtyCell';
+import PnLBrokerCell, { BROKER_OPTIONS, groupBrokerTags } from '../components/PnLBrokerCell';
 import PnLBookDialog from '../components/PnLBookDialog';
 import PnlSymbolCell from '../components/PnlSymbolCell';
 import PnLPeriodPanel from '../components/PnLPeriodPanel';
 import { useStockListColumnWidths } from '../hooks/useStockListColumnWidths';
+import { useSyncedHeaderScroll } from '../hooks/useSyncedHeaderScroll';
 import { columnWidthKey } from '../hooks/stockListColumnStorage';
 import { applySavedOrder, insertionGapFromRowHover, reorderByGap } from '../utils/listOrder';
 import { DropInsetLine, setListDragImage } from '../utils/listDnD';
@@ -51,6 +53,9 @@ import { searchUniverse } from '../api/client';
 import { useIntradayPatchOptional } from '../intraday/useIntradayPatch';
 import { usePageLive } from '../intraday/pageLiveContext';
 import { usePatchOverlay } from '../intraday/usePatchOverlay';
+import { useRegisterFocusedSymbol } from '../intraday/useRegisterFocusedSymbol';
+import { useRegisterIntradaySymbols } from '../intraday/useRegisterIntradaySymbols';
+import { symbolsForChartFocus } from '../intraday/intradayRefreshScopes';
 
 const API = '';
 const PNL_PAGE_ID = 'pnl';
@@ -81,6 +86,7 @@ function writePeriodPaneWidth(w) {
 
 const PNL_OPEN_COLS = [
   { key: 'symbol', widthKey: 'pnl_open_symbol', label: 'Symbol', width: 96, sortable: true },
+  { key: 'broker', widthKey: 'pnl_open_broker', label: 'Broker', width: 88, sortable: true },
   { key: 'entry_date', widthKey: 'pnl_open_bought', label: 'Bought', width: 88, sortable: true },
   { key: 'market_cap', widthKey: 'pnl_open_market_cap', label: 'Mkt Cap', width: 100, sortable: true },
   { key: 'price', widthKey: 'pnl_open_price', label: 'Price', width: 80, sortable: true },
@@ -96,6 +102,7 @@ const PNL_OPEN_COLS = [
 
 const PNL_CLOSED_COLS = [
   { key: 'symbol', widthKey: 'pnl_closed_symbol', label: 'Symbol', width: 96, sortable: true },
+  { key: 'broker', widthKey: 'pnl_closed_broker', label: 'Broker', width: 72, sortable: true },
   { key: 'market_cap', widthKey: 'pnl_closed_market_cap', label: 'Mkt Cap', width: 100, sortable: true },
   { key: 'entry', widthKey: 'pnl_closed_entry', label: 'Entry', width: 80, sortable: true },
   { key: 'exit', widthKey: 'pnl_closed_exit', label: 'Exit', width: 80, sortable: true },
@@ -254,6 +261,7 @@ function OpenGrid({
   onDragEnd,
 }) {
   const { startResize, resizingKey, gridTemplateColumns } = useStockListColumnWidths(PNL_OPEN_COLS);
+  const { headerScrollRef, rowsScrollRef } = useSyncedHeaderScroll([gridTemplateColumns, groups.length]);
   const [expanded, setExpanded] = useState(() => readStoredExpanded());
 
   const displayList = useMemo(
@@ -273,6 +281,15 @@ function OpenGrid({
     switch (key) {
       case 'symbol':
         return <PnlSymbolCell variant="child" />;
+      case 'broker':
+        return (
+          <PnLBrokerCell
+            positionId={lot.id}
+            broker={lot.broker}
+            isPlaceholder={lot.is_placeholder}
+            onSaved={() => onPositionSaved?.()}
+          />
+        );
       case 'entry_date':
         return fmtSaleDate(lot.entry_date);
       case 'market_cap':
@@ -340,6 +357,20 @@ function OpenGrid({
             expanded={expanded[group.symbol] === true}
           />
         );
+      case 'broker': {
+        const tags = groupBrokerTags(group.lots);
+        const multi = tags.length > 1;
+        return (
+          <PnLBrokerCell
+            mode="symbol"
+            symbol={group.symbol}
+            broker={multi ? undefined : tags[0]}
+            mixed={multi}
+            isPlaceholder={group.isPlaceholder || lot?.is_placeholder}
+            onSaved={() => onPositionSaved?.()}
+          />
+        );
+      }
       case 'entry_date':
         if (multiLot) return fmtSaleDate(t.min_entry_date) || '—';
         return fmtSaleDate(lot?.entry_date);
@@ -408,7 +439,7 @@ function OpenGrid({
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      <div style={{ ...stockListHeaderStripStyle, overflowX: 'auto', flexShrink: 0 }}>
+      <div ref={headerScrollRef} style={{ ...stockListHeaderStripStyle, overflowX: 'hidden', overflowY: 'hidden', flexShrink: 0 }}>
         <div style={stockListGridTrackStyle(gridTemplateColumns)}>
           {PNL_OPEN_COLS.map((col, colIdx) => {
             const sortable = col.sortable !== false;
@@ -435,7 +466,7 @@ function OpenGrid({
           })}
         </div>
       </div>
-      <div style={{ flex: 1, overflow: 'auto' }}>
+      <div ref={rowsScrollRef} style={{ flex: 1, overflowY: 'auto', overflowX: 'auto' }}>
         {groups.length === 0 ? (
           <div style={{ padding: 16, fontSize: 12, color: 'var(--text-muted)' }}>
             Add stock to track P&amp;L here.
@@ -568,6 +599,7 @@ function ClosedGrid({
     [widthKeyPrefix],
   );
   const { startResize, resizingKey, gridTemplateColumns } = useStockListColumnWidths(cols);
+  const { headerScrollRef, rowsScrollRef } = useSyncedHeaderScroll([gridTemplateColumns, rows.length, widthKeyPrefix]);
   const [expanded, setExpanded] = useState({});
 
   const sectionTotal = useMemo(() => sectionTotalFromTrades(rows, isLoss), [rows, isLoss]);
@@ -600,6 +632,14 @@ function ClosedGrid({
             expanded={expanded[group.symbol] === true}
           />
         );
+      case 'broker': {
+        const tags = groupBrokerTags(group.trades);
+        return (
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            {tags.length === 1 ? tags[0] : tags.length > 1 ? 'Mixed' : '—'}
+          </span>
+        );
+      }
       case 'market_cap':
         return formatMarketCap(t.market_cap);
       case 'entry':
@@ -633,6 +673,12 @@ function ClosedGrid({
     switch (key) {
       case 'symbol':
         return <PnlSymbolCell variant="child" />;
+      case 'broker':
+        return (
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'capitalize' }}>
+            {trade.broker || '—'}
+          </span>
+        );
       case 'market_cap':
         return '—';
       case 'entry':
@@ -680,7 +726,7 @@ function ClosedGrid({
         <span>{title}</span>
         <span style={{ fontFamily: 'var(--font-mono)' }}>{formatPnLHeaderTotal(sectionTotal)}</span>
       </div>
-      <div style={{ ...stockListHeaderStripStyle, overflowX: 'auto', flexShrink: 0 }}>
+      <div ref={headerScrollRef} style={{ ...stockListHeaderStripStyle, overflowX: 'hidden', overflowY: 'hidden', flexShrink: 0 }}>
         <div style={stockListGridTrackStyle(gridTemplateColumns)}>
           {cols.map((col, colIdx) => {
             const sortable = col.sortable !== false;
@@ -707,7 +753,7 @@ function ClosedGrid({
           })}
         </div>
       </div>
-      <div style={{ flex: 1, overflow: 'auto' }}>
+      <div ref={rowsScrollRef} style={{ flex: 1, overflowY: 'auto', overflowX: 'auto' }}>
         {rows.length === 0 ? (
           <div style={{ padding: 16, fontSize: 12, color: 'var(--text-muted)' }}>No booked trades</div>
         ) : (
@@ -1096,6 +1142,16 @@ export default function PnLPage({ onOpenChart }) {
   const [priceRefreshBusy, setPriceRefreshBusy] = useState(false);
   const [priceRefreshNote, setPriceRefreshNote] = useState('');
 
+  const pnlLiveSymbols = useMemo(
+    () => [...new Set(
+      (openRows || [])
+        .map((r) => String(r.symbol || '').trim().toUpperCase())
+        .filter(Boolean),
+    )],
+    [openRows],
+  );
+  useRegisterIntradaySymbols(PNL_PAGE_ID, pnlLiveSymbols);
+
   const displayOpenGroups = useMemo(() => {
     const patched = overlayPnlRows(openRows);
     let groups = buildOpenSymbolGroups(patched);
@@ -1341,6 +1397,35 @@ export default function PnLPage({ onOpenChart }) {
     return g?.symbol ?? null;
   }, [selectedKey, displayOpenGroups]);
 
+  useRegisterFocusedSymbol(PNL_PAGE_ID, useMemo(
+    () => symbolsForChartFocus(selectedSymbol),
+    [selectedSymbol],
+  ));
+
+  useEffect(() => {
+    const sym = String(selectedSymbol || '').trim().toUpperCase();
+    if (!sym || typeof window === 'undefined') return undefined;
+    window.dispatchEvent(new CustomEvent('cim:chart-focus-symbol', {
+      detail: { symbol: sym, source: 'pnl' },
+    }));
+    return undefined;
+  }, [selectedSymbol]);
+
+  const handleMarkSymbolBroker = useCallback(async (broker) => {
+    if (!selectedSymbol || !broker) return;
+    try {
+      await axios.post(`${API}/api/pnl/broker/symbol`, {
+        symbol: selectedSymbol,
+        broker,
+        scope: 'open',
+      });
+      load({ preserveRowOrder: true });
+    } catch (err) {
+      const detail = err?.response?.data?.detail;
+      console.warn('broker tag failed', err?.response?.status, detail || err?.message);
+    }
+  }, [selectedSymbol, load]);
+
   const handleSelectGroup = useCallback((group) => {
     setSelectedKey(pnlOpenGroupKey(group));
   }, []);
@@ -1399,6 +1484,33 @@ export default function PnLPage({ onOpenChart }) {
           <PnlToolbarButton onClick={() => onOpenChart && onOpenChart(selectedSymbol)}>
             Open Full Chart ↗
           </PnlToolbarButton>
+        )}
+        {selectedSymbol && (
+          <select
+            aria-label={`Mark ${selectedSymbol} lots as broker`}
+            defaultValue=""
+            onChange={(e) => {
+              const v = e.target.value;
+              e.target.value = '';
+              if (v) handleMarkSymbolBroker(v);
+            }}
+            style={{
+              fontSize: 11,
+              padding: '4px 6px',
+              borderRadius: 4,
+              border: '1px solid var(--border)',
+              background: 'var(--bg-primary)',
+              color: 'var(--text-primary)',
+              cursor: 'pointer',
+            }}
+          >
+            <option value="" disabled>
+              Mark {selectedSymbol} as…
+            </option>
+            {BROKER_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
         )}
       </div>
 

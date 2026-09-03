@@ -1,27 +1,27 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import BasketToolbarButton from '../components/Basket';
+import { startBasketSymbolDrag } from '../utils/basketDnD';
 import axios from 'axios';
 import { applySavedOrder, reorderByGap, insertionGapFromRowHover, wlItemKey } from '../utils/listOrder';
 import { setListDragImage, DropInsetLine } from '../utils/listDnD';
 import {
   STOCK_LIST_ROW_HEIGHT,
   stockListHeaderStripStyle,
-  stockListFooterStripStyle,
   stockListGridTrackStyle,
   stockListRowSelectShadow,
 } from '../components/stockTableChrome';
+import StockListSplitBody from '../components/StockListSplitBody';
 import StockListColumnHeader from '../components/StockListColumnHeader';
 import StockListGridCell from '../components/StockListGridCell';
 import { useStockListColumnWidths } from '../hooks/useStockListColumnWidths';
 import { columnWidthKey } from '../hooks/stockListColumnStorage';
-import InstrumentNotesIcon from '../components/InstrumentNotesIcon';
 import ExternalFinancialsLinks from '../components/ExternalFinancialsLinks';
 import ChartContainer from '../components/chart/ChartContainer';
 import IndexChartContainer from '../components/chart/IndexChartContainer';
 import { DrawingMirrorProvider } from '../components/chart/drawing/DrawingMirrorContext';
 import { DrawingWorkspaceProvider } from '../components/chart/drawing/DrawingWorkspaceContext';
 import { DrawingToolbarConnected, DrawingFloatPaletteConnected } from '../components/chart/drawing/DrawingToolbar';
-import DrawingToolsDesignControl from '../components/chart/drawing/DrawingToolsDesignControl';
 import EMAControls from '../components/chart/EMAControls';
 import ChartHeaderBar from '../components/chart/ChartHeaderBar';
 import {
@@ -64,10 +64,12 @@ import {
 } from '../layout/listOrderPersistence';
 import { usePatchOverlay } from '../intraday/usePatchOverlay';
 import { useRegisterFocusedSymbol } from '../intraday/useRegisterFocusedSymbol';
+import { useRegisterIntradaySymbols } from '../intraday/useRegisterIntradaySymbols';
 import { isIntradayLiveTimeframe } from '../intraday/patchOverlay';
 import { usePageLive } from '../intraday/pageLiveContext';
 import { useSyncedPanelHeights, columnCountForChartLayout, multiColumnHeightProps } from '../hooks/useSyncedPanelHeights';
 import PortfolioEarningsModal from '../components/PortfolioEarningsModal';
+import EarningsPlusInlineMark from '../components/EarningsPlusInlineMark';
 import {
   buildDualBeatEarningsMap,
   buildUpcomingEarningsMap,
@@ -79,7 +81,6 @@ import {
   PORTFOLIO_EARNINGS_ROW_HOVER,
   PORTFOLIO_EARNINGS_LABEL_COLOR,
   WATCHLIST_EARNINGS_WINDOW_DAYS,
-  DUAL_BEAT_WINDOW_DAYS,
   DUAL_BEAT_ROW_BG,
   DUAL_BEAT_BORDER,
   DUAL_BEAT_ROW_HOVER,
@@ -103,7 +104,6 @@ const INDICATOR_OPTIONS = [
 const WL_COLS = [
   { key: 'symbol', widthKey: 'symbol', label: 'Symbol', width: 90, sortKey: 'symbol' },
   { key: 'mcap', widthKey: 'market_cap', label: 'Mkt Cap', width: 110, sortKey: 'mcap' },
-  { key: 'note', widthKey: 'note', label: '', width: 36, sortKey: null },
   { key: 'price', widthKey: 'price', label: 'Price', width: 85, sortKey: 'price' },
   { key: 'd1', widthKey: 'change_1d', label: '1D Chg %', width: 80, sortKey: 'd1' },
   { key: 'm1', widthKey: 'change_1m', label: '1M Chg %', width: 80, sortKey: 'm1' },
@@ -186,7 +186,7 @@ export default function WatchlistPage({
   const [paneWidth, setPaneWidth] = useState(420);
   const chartPrefs = useChartPrefsContext();
   const { liveActive, liveTick } = usePageLive('watchlist');
-  const { overlayStockRow, overlayIndexRow, refreshTick: patchRefreshTick } = usePatchOverlay('watchlist');
+  const { overlayStockRow, overlayIndexRow, refreshTick: patchRefreshTick, getSnapshot } = usePatchOverlay('watchlist');
   const liveStocksMap = useMemo(() => {
     const out = { ...stocksMap };
     Object.keys(out).forEach((sym) => {
@@ -237,6 +237,7 @@ export default function WatchlistPage({
   const [wlDropGap, setWlDropGap] = useState(null);
   const [wlDraggingIdx, setWlDraggingIdx] = useState(null);
   const wlRowRefs = useRef({});
+  const scrolledWlSelRef = useRef(null);
 
   /** Align with Pulse default: Market Cap descending. Dragging rows switches to custom order until a column header is clicked. */
   const [wlSortKey, setWlSortKey] = useState('mcap');
@@ -246,6 +247,8 @@ export default function WatchlistPage({
   /** Upcoming earnings within rolling window (watchlist stocks only). */
   const [wlEarningsBySymbol, setWlEarningsBySymbol] = useState(() => new Map());
   const [wlBeatBySymbol, setWlBeatBySymbol] = useState(() => new Map());
+  /** Earnings+ qualified symbols (gold E+ beside symbol name). */
+  const [wlPlusSymbols, setWlPlusSymbols] = useState(() => new Set());
   const [wlEarningsModal, setWlEarningsModal] = useState(null);
   const [wlEarningsPriorityEnabled, setWlEarningsPriorityEnabled] = useState(true);
   const [wlEarningsPriorityDir, setWlEarningsPriorityDir] = useState(EARNINGS_PRIORITY_DEFAULT_DIR);
@@ -301,12 +304,19 @@ export default function WatchlistPage({
     wlEarningsPriorityEnabled,
   ]);
 
-  const watchlistStockSymbols = useMemo(() => new Set(
+  const watchlistStockSymbolsKey = useMemo(() => (
     (activeWatchlist?.items || [])
-      .filter(it => it.type !== 'index')
-      .map(it => String(it.symbol || '').trim().toUpperCase())
-      .filter(Boolean),
+      .filter((it) => it.type !== 'index')
+      .map((it) => String(it.symbol || '').trim().toUpperCase())
+      .filter(Boolean)
+      .sort()
+      .join(',')
   ), [activeWatchlist?.items]);
+
+  const watchlistStockSymbols = useMemo(
+    () => new Set(watchlistStockSymbolsKey ? watchlistStockSymbolsKey.split(',') : []),
+    [watchlistStockSymbolsKey],
+  );
 
   const wlEarningsCount = useMemo(() => {
     let n = 0;
@@ -319,27 +329,17 @@ export default function WatchlistPage({
     }
     return n;
   }, [wlEarningsBySymbol, wlBeatBySymbol]);
-  const wlBeatCount = useMemo(() => {
-    let n = 0;
-    for (const sym of wlBeatBySymbol.keys()) {
-      const highlight = resolveEarningsRowHighlight(
-        wlBeatBySymbol.get(sym),
-        wlEarningsBySymbol.get(sym),
-      );
-      if (highlight.kind === 'beat') n += 1;
-    }
-    return n;
-  }, [wlBeatBySymbol, wlEarningsBySymbol]);
 
   useEffect(() => {
-    if (watchlistStockSymbols.size === 0) {
+    if (!watchlistStockSymbolsKey) {
       setWlEarningsBySymbol(new Map());
       setWlBeatBySymbol(new Map());
+      setWlPlusSymbols(new Set());
       return undefined;
     }
     let cancelled = false;
     (async () => {
-      const [upcomingSettled, beatSettled] = await Promise.allSettled([
+      const [upcomingSettled, beatSettled, plusSettled] = await Promise.allSettled([
         axios.get(`${API}/api/earnings-beats`, {
           params: { mode: 'upcoming', period: 'rolling_20_days', limit: 2000 },
         }),
@@ -348,8 +348,11 @@ export default function WatchlistPage({
             mode: 'reported',
             report_window: 'rolling_10_days',
             limit: 2000,
-            symbols: [...watchlistStockSymbols].join(','),
+            symbols: watchlistStockSymbolsKey,
           },
+        }),
+        axios.get(`${API}/api/earnings-plus-flags`, {
+          params: { symbols: watchlistStockSymbolsKey },
         }),
       ]);
       if (cancelled) return;
@@ -371,9 +374,14 @@ export default function WatchlistPage({
       } else {
         setWlBeatBySymbol(new Map());
       }
+      if (plusSettled.status === 'fulfilled') {
+        setWlPlusSymbols(new Set(plusSettled.value.data?.qualified || []));
+      } else {
+        setWlPlusSymbols(new Set());
+      }
     })();
     return () => { cancelled = true; };
-  }, [watchlistStockSymbols]);
+  }, [watchlistStockSymbolsKey, watchlistStockSymbols]);
 
   useEffect(() => {
     const onWlUpdated = () => {
@@ -422,6 +430,31 @@ export default function WatchlistPage({
     () => (selectedItem?.symbol ? [selectedItem.symbol] : []),
     [selectedItem?.symbol],
   ));
+
+  useRegisterIntradaySymbols('watchlist', useMemo(
+    () => (activeWatchlist?.items || [])
+      .map((it) => String(it?.symbol || '').trim().toUpperCase())
+      .filter(Boolean),
+    [activeWatchlist?.items],
+  ));
+
+  useEffect(() => {
+    const name = String(activeWatchlist?.name || '').trim();
+    if (!name || typeof window === 'undefined') return undefined;
+    window.dispatchEvent(new CustomEvent('cim:watchlist-active', {
+      detail: { name },
+    }));
+    return undefined;
+  }, [activeWatchlist?.name]);
+
+  useEffect(() => {
+    const sym = String(selectedItem?.symbol || '').trim().toUpperCase();
+    if (!sym || typeof window === 'undefined') return undefined;
+    window.dispatchEvent(new CustomEvent('cim:chart-focus-symbol', {
+      detail: { symbol: sym, source: 'watchlist' },
+    }));
+    return undefined;
+  }, [selectedItem?.symbol]);
 
   useEffect(() => {
     if (activeWatchlist && activeWatchlist.name !== appActiveWatchlistName) {
@@ -661,6 +694,10 @@ export default function WatchlistPage({
   useEffect(() => {
     if (!selectedItem || !displayWlItems.length) return;
     const key = `${String(selectedItem.type || '').toLowerCase()}:${String(selectedItem.symbol || '').toUpperCase()}`;
+    // Only scroll when selection changes — not on every live list refresh.
+    if (scrolledWlSelRef.current === key) return;
+    if (!wlRowRefs.current[key]) return;
+    scrolledWlSelRef.current = key;
     wlRowRefs.current[key]?.scrollIntoView({ block: 'nearest' });
   }, [displayWlItems, selectedItem]);
 
@@ -1090,6 +1127,19 @@ export default function WatchlistPage({
     if (!selectedItem) return null;
     return selectedItem.type === 'index' ? liveIndicesMap[selectedItem.symbol] : liveStocksMap[selectedItem.symbol];
   }, [selectedItem, liveIndicesMap, liveStocksMap]);
+  const focusSnap = selectedItem?.symbol ? getSnapshot(selectedItem.symbol) : null;
+  const headerPrice = (() => {
+    const fromSnap = focusSnap?.price;
+    if (fromSnap != null && Number.isFinite(Number(fromSnap))) return Number(fromSnap);
+    if (lastPrice != null && Number.isFinite(Number(lastPrice))) return Number(lastPrice);
+    const rowPx = activeItemData?.Price ?? activeItemData?.last_price;
+    return rowPx != null && Number.isFinite(Number(rowPx)) ? Number(rowPx) : null;
+  })();
+  const headerChange = (() => {
+    const fromSnap = focusSnap?.change_pct;
+    if (fromSnap != null && Number.isFinite(Number(fromSnap))) return Number(fromSnap);
+    return lastChange;
+  })();
 
   function actionBtnStyle() {
     return {
@@ -1292,14 +1342,14 @@ export default function WatchlistPage({
             {selectedItem?.symbol}
           </span>
         )}
-        {activeItemData && (
+        {activeItemData && headerPrice != null && (
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-primary)', flexShrink: 0 }}>
-            ₹{Number(lastPrice ?? activeItemData?.Price ?? activeItemData?.last_price ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            ₹{headerPrice.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </span>
         )}
-        {lastChange !== null && (
-          <span style={{ color: lastChange >= 0 ? 'var(--accent-green)' : 'var(--accent-red)', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 600, backgroundColor: lastChange >= 0 ? 'rgba(63,185,80,0.12)' : 'rgba(248,81,73,0.12)', border: `1px solid ${lastChange >= 0 ? '#3fb95044' : '#f8514944'}`, borderRadius: 4, padding: '1px 6px' }}>
-            {lastChange >= 0 ? '+' : ''}{lastChange.toFixed(2)}%
+        {headerChange !== null && Number.isFinite(headerChange) && (
+          <span style={{ color: headerChange >= 0 ? 'var(--accent-green)' : 'var(--accent-red)', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 600, backgroundColor: headerChange >= 0 ? 'rgba(63,185,80,0.12)' : 'rgba(248,81,73,0.12)', border: `1px solid ${headerChange >= 0 ? '#3fb95044' : '#f8514944'}`, borderRadius: 4, padding: '1px 6px' }}>
+            {headerChange >= 0 ? '+' : ''}{headerChange.toFixed(2)}%
           </span>
         )}
         <div style={{ width: 1, height: 20, backgroundColor: 'var(--border)', flexShrink: 0 }} />
@@ -1330,7 +1380,7 @@ export default function WatchlistPage({
 
         <div style={{ flex: 1, minWidth: 8 }} />
 
-        <DrawingToolsDesignControl />
+        <BasketToolbarButton />
 
         <div ref={indRef} style={{ position: 'relative', flexShrink: 0 }}>
           <button onClick={() => { setIndOpen(o => !o); setViewOpen(false); }} style={{ ...actionBtnStyle(), backgroundColor: indOpen ? 'var(--bg-active)' : 'var(--bg-tertiary)' }}>
@@ -1418,8 +1468,13 @@ export default function WatchlistPage({
             style={{ ...actionBtnStyle(), minWidth: 220, justifyContent: 'space-between' }}
             title="Select watchlist"
           >
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {activeWatchlist?.name || 'Create a watchlist below…'}
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {activeWatchlist?.name || 'Create a watchlist below…'}
+              </span>
+              {activeWatchlist?.notifications_enabled ? (
+                <span title="Notifications ON for this watchlist" aria-label="Notifications on" style={{ flexShrink: 0, fontSize: 12, lineHeight: 1 }}>🔔</span>
+              ) : null}
             </span>
             <span style={{ opacity: 0.7 }}>▾</span>
           </button>
@@ -1493,7 +1548,34 @@ export default function WatchlistPage({
                             ) : (
                               <>
                                 {canDrag ? <span style={{ width: 12, color: 'var(--text-muted)', fontSize: 10, letterSpacing: '-0.12em', flexShrink: 0 }}>⋮⋮</span> : null}
-                                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{w.name}</span>
+                                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{w.name}</span>
+                                  {w.notifications_enabled ? (
+                                    <span title="Notifications ON" aria-hidden style={{ flexShrink: 0, fontSize: 11 }}>🔔</span>
+                                  ) : null}
+                                </span>
+                                <button
+                                  type="button"
+                                  title={w.notifications_enabled ? 'Notifications ON — click to disable' : 'Notifications OFF — click to enable for this watchlist'}
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    try {
+                                      await axios.patch(`${API}/api/watchlists/${encodeURIComponent(w.name)}`, {
+                                        notifications_enabled: !w.notifications_enabled,
+                                      });
+                                      await onWatchlistsChange();
+                                    } catch (err) {
+                                      alert(err.response?.data?.detail || err.message || 'Failed to update notifications');
+                                    }
+                                  }}
+                                  style={{
+                                    background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px',
+                                    fontSize: 11, lineHeight: 1, flexShrink: 0,
+                                    color: w.notifications_enabled ? 'var(--accent-blue)' : 'var(--text-muted)',
+                                  }}
+                                >
+                                  {w.notifications_enabled ? 'On' : 'Off'}
+                                </button>
                                 <button
                                   type="button"
                                   className="cim-row-edit-btn"
@@ -1594,7 +1676,39 @@ export default function WatchlistPage({
           onChange={handleImportWatchlistFile}
         />
       </div>
-      <div ref={wrapperRef} style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
+      <StockListSplitBody
+        splitRef={wrapperRef}
+        footer={(
+          <>
+            {displayWlItems.length} {displayWlItems.length === 1 ? 'stock' : 'stocks'}
+            <button
+              type="button"
+              onClick={handleWlEarningsPriorityControlClick}
+              aria-pressed={wlEarningsPriorityEnabled}
+              aria-label={`Earnings priority sort ${wlEarningsPriorityEnabled ? 'enabled' : 'disabled'}, ${wlEarningsPriorityDir === 'asc' ? 'nearest dates first' : 'furthest dates first'}`}
+              title={wlEarningsPriorityEnabled
+                ? 'Toggle earnings-priority date direction'
+                : 'Re-enable earnings-priority sorting'}
+              style={{
+                marginLeft: 8,
+                padding: 0,
+                border: 'none',
+                background: 'none',
+                color: wlEarningsPriorityEnabled ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                cursor: 'pointer',
+                font: 'inherit',
+              }}
+            >
+              · Earnings priority {wlEarningsPriorityDir === 'asc' ? '▲' : '▼'}
+            </button>
+            {wlEarningsCount > 0 && (
+              <span style={{ marginLeft: 8, color: PORTFOLIO_EARNINGS_LABEL_COLOR }}>
+                · {wlEarningsCount} reporting in {WATCHLIST_EARNINGS_WINDOW_DAYS} days
+              </span>
+            )}
+          </>
+        )}
+      >
         <div ref={paneRef} style={{ width: paneWidth, minWidth: 300, borderRight: '1px solid var(--border)', flexShrink: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div
             ref={headerScrollRef}
@@ -1648,6 +1762,7 @@ export default function WatchlistPage({
             const upcomingInfo = rowHighlight.kind === 'upcoming' ? rowHighlight.info : null;
             const earningsHighlight = beatInfo || upcomingInfo;
             const isBeatHighlight = !!beatInfo;
+            const hasPlusBadge = it.type !== 'index' && wlPlusSymbols.has(symKey);
             const rowBg = isSelected
               ? 'rgba(56,139,253,0.08)'
               : isBeatHighlight
@@ -1751,7 +1866,18 @@ export default function WatchlistPage({
                     } : undefined}
                     title={earningsHighlight ? 'Click for quarterly results and company profile' : it.symbol}
                   >
-                    <span style={{ fontFamily: 'var(--font-mono)', color: symColor, fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden', lineHeight: 1.2 }}>{it.symbol}</span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+                      <span
+                        title={`${it.symbol} — drag to Basket`}
+                        draggable
+                        onDragStart={(e) => {
+                          e.stopPropagation();
+                          startBasketSymbolDrag(e, it.symbol, it.type === 'index' ? 'index' : 'stock');
+                        }}
+                        style={{ fontFamily: 'var(--font-mono)', color: symColor, fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden', lineHeight: 1.2, cursor: 'grab' }}
+                      >{it.symbol}</span>
+                      {hasPlusBadge ? <EarningsPlusInlineMark /> : null}
+                    </span>
                     {isBeatHighlight ? (
                       <span
                         style={{
@@ -1784,9 +1910,6 @@ export default function WatchlistPage({
                 <StockListGridCell colKey="mcap">
                   <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>{formatMarketCap(mcap)}</span>
                 </StockListGridCell>
-                <StockListGridCell colKey="note" onClick={e => e.stopPropagation()}>
-                  <InstrumentNotesIcon symbol={it.symbol} instrumentType={it.type === 'index' ? 'index' : 'stock'} />
-                </StockListGridCell>
                 <StockListGridCell colKey="price">
                   <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-primary)' }}>{price != null ? `₹${Number(price).toFixed(2)}` : '—'}</span>
                 </StockListGridCell>
@@ -1804,39 +1927,6 @@ export default function WatchlistPage({
               </React.Fragment>
             );
           })}
-          </div>
-          <div style={stockListFooterStripStyle}>
-            {displayWlItems.length} {displayWlItems.length === 1 ? 'symbol' : 'symbols'}
-            <button
-              type="button"
-              onClick={handleWlEarningsPriorityControlClick}
-              aria-pressed={wlEarningsPriorityEnabled}
-              aria-label={`Earnings priority sort ${wlEarningsPriorityEnabled ? 'enabled' : 'disabled'}, ${wlEarningsPriorityDir === 'asc' ? 'nearest dates first' : 'furthest dates first'}`}
-              title={wlEarningsPriorityEnabled
-                ? 'Toggle earnings-priority date direction'
-                : 'Re-enable earnings-priority sorting'}
-              style={{
-                marginLeft: 8,
-                padding: 0,
-                border: 'none',
-                background: 'none',
-                color: wlEarningsPriorityEnabled ? 'var(--accent-blue)' : 'var(--text-secondary)',
-                cursor: 'pointer',
-                font: 'inherit',
-              }}
-            >
-              · Earnings priority {wlEarningsPriorityDir === 'asc' ? '▲' : '▼'}
-            </button>
-            {wlBeatCount > 0 && (
-              <span style={{ marginLeft: 8, color: DUAL_BEAT_LABEL_COLOR }}>
-                · {wlBeatCount} beat EPS+Rev ({DUAL_BEAT_WINDOW_DAYS}d)
-              </span>
-            )}
-            {wlEarningsCount > 0 && (
-              <span style={{ marginLeft: 8, color: PORTFOLIO_EARNINGS_LABEL_COLOR }}>
-                · {wlEarningsCount} reporting in {WATCHLIST_EARNINGS_WINDOW_DAYS} days
-              </span>
-            )}
           </div>
         </div>
         <div
@@ -1869,7 +1959,7 @@ export default function WatchlistPage({
             </DrawingMirrorProvider>
           )}
         </div>
-      </div>
+      </StockListSplitBody>
 
       {wlEarningsModal && (
         <PortfolioEarningsModal

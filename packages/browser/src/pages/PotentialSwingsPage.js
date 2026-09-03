@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
+import BasketToolbarButton from '../components/Basket';
 import axios from 'axios';
 import { APP_DATA_REFRESH_EVENT } from '../chartEvents';
 import ChartContainer from '../components/chart/ChartContainer';
 import ChartHeaderBar from '../components/chart/ChartHeaderBar';
 import EMAControls from '../components/chart/EMAControls';
-import DrawingToolsDesignControl from '../components/chart/drawing/DrawingToolsDesignControl';
 import ExternalFinancialsLinks from '../components/ExternalFinancialsLinks';
 import { DrawingMirrorProvider } from '../components/chart/drawing/DrawingMirrorContext';
 import { DrawingWorkspaceProvider } from '../components/chart/drawing/DrawingWorkspaceContext';
 import { DrawingToolbarConnected, DrawingFloatPaletteConnected } from '../components/chart/drawing/DrawingToolbar';
+import StockListSplitBody from '../components/StockListSplitBody';
 import {
   EMA_PREFS_UPDATED_EVENT,
   PANELS_PREFS_KEY,
@@ -690,7 +691,7 @@ export default function PotentialSwingsPage({
 
         <div style={{ flex: 1, minWidth: 8 }} />
 
-        <DrawingToolsDesignControl />
+        <BasketToolbarButton />
 
         <div ref={indRef} style={{ position: 'relative', flexShrink: 0 }}>
           <button type="button" onClick={() => { setIndOpen(o => !o); setViewOpen(false); }}
@@ -739,7 +740,7 @@ export default function PotentialSwingsPage({
         {selectedSymbol && (
           <button onClick={() => onOpenChart && onOpenChart(selectedSymbol)}
             style={{ display: 'flex', alignItems: 'center', gap: 4, backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 5, padding: '0 10px', height: 28, color: 'var(--text-secondary)', fontSize: 12, flexShrink: 0, cursor: 'pointer' }}>
-            Open Full Chart ↗
+            Open Full Chart â†—
           </button>
         )}
 
@@ -749,7 +750,14 @@ export default function PotentialSwingsPage({
         </button>
       </div>
 
-      <div ref={wrapperRef} style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+      <StockListSplitBody
+        splitRef={wrapperRef}
+        footer={(
+          <>
+            {loading ? 'Scanningâ€¦' : `${filterInputsValid ? filteredRows.length : 0} / ${rows.length} symbols`}
+          </>
+        )}
+      >
         <div style={{ width: paneWidth, minWidth: 240, flexShrink: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', borderRight: '1px solid var(--border)', position: 'relative' }}>
           <div ref={wlPickWrapRef} style={{ borderBottom: '1px solid var(--border)', padding: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1044,7 +1052,7 @@ export default function PotentialSwingsPage({
                     <span>dist {fmtSmall(row.near_cross_distance, 3)}</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 2, fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                    <span>Hist {fmtSmall(row.hist_prev, 3)} → {fmtSmall(row.hist_curr, 3)}</span>
+                    <span>Hist {fmtSmall(row.hist_prev, 3)} â†’ {fmtSmall(row.hist_curr, 3)}</span>
                     <span>K/D {fmtSmall(row.stoch_k, 1)}/{fmtSmall(row.stoch_d, 1)}</span>
                   </div>
                 </div>
@@ -1084,7 +1092,7 @@ export default function PotentialSwingsPage({
             </DrawingMirrorProvider>
           )}
         </div>
-      </div>
+      </StockListSplitBody>
     </div>
   );
 }

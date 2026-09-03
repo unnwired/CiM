@@ -1,15 +1,14 @@
 """
 NSE session-aligned 4H bars (09:15–13:15 and 13:15–15:30 IST).
 
-Built from yfinance 5m data on admin Update — not from daily EOD rows.
-
-Yahoo 5m history is capped at ~60 calendar days from "today"; two 59-day windows
-are used for backfill but only the recent window returns data beyond that wall.
-Expect ~40–45 trading sessions of 4H history, not the full 90-session target.
+Built from 5m intraday on admin Update — not from daily EOD rows.
+5m source: Upstox only (no Yahoo / NSE mix on the Update path).
 """
 from __future__ import annotations
 
 import json
+import logging
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -18,26 +17,37 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Sequence
 from zoneinfo import ZoneInfo
 
+logger = logging.getLogger(__name__)
+
 IST = ZoneInfo("Asia/Kolkata")
 SESSION_OPEN = dtime(9, 15)
 SESSION_MID = dtime(13, 15)
 SESSION_CLOSE = dtime(15, 30)
 
 BARS_4H_HISTORY_SESSION_DAYS = 90
-BARS_4H_INCREMENTAL_SESSION_DAYS = 3
-BARS_4H_YAHOO_WINDOW_DAYS = 59
+# Incremental refresh covers the latest N completed sessions so a missed mid-week
+# day (e.g. Tue) is still filled after Wed's bars land — not "skip forever".
+BARS_4H_INCREMENTAL_SESSION_DAYS = 5
+BARS_4H_YAHOO_WINDOW_DAYS = 59  # retained for tests / legacy helpers only
 BARS_4H_BATCH_SIZE = 50
-BARS_4H_RATE_DELAY_MIN = 0.8
-BARS_4H_RATE_DELAY_MAX = 1.5
-# Minimum distinct session days before we treat a symbol as "backfilled" (~60d Yahoo cap ≈ 40–45 sessions).
+BARS_4H_RATE_DELAY_MIN = 0.15
+BARS_4H_RATE_DELAY_MAX = 0.35
+# Faster pacing when Upstox is configured (primary and only Update source).
+BARS_4H_UPSTOX_RATE_DELAY_MIN = 0.05
+BARS_4H_UPSTOX_RATE_DELAY_MAX = 0.15
+# Minimum distinct session days before we treat a symbol as "backfilled".
 BARS_4H_MIN_SESSION_DAYS_FOR_BACKFILL_COMPLETE = 20
+# Defer full-universe 4H rebuild while the cash session is still open (live charts use quote overlay).
+BARS_4H_DEFER_UNTIL_IST = dtime(15, 30)
+# During live-session Update: catch up at most this many symbols missing 4H history.
+BARS_4H_LIVE_CATCHUP_MAX = 40
 
 META_LAST_SUCCESS = "bars_4h_last_success_ist"
 META_BACKFILL_COMPLETE = "bars_4h_backfill_complete"
 META_SOURCE_PREFIX = "bars_4h_source:"
 META_SOURCE_UPDATED_PREFIX = "bars_4h_source_updated:"
 
-IntradaySource = Literal["yahoo", "nse_charting", "none"]
+IntradaySource = Literal["upstox", "yahoo", "nse_charting", "none"]
 
 
 @dataclass(frozen=True)
@@ -96,6 +106,45 @@ def is_nse_session_day(d: date, holidays: set[str], special_sessions: set[str]) 
     if w < 5:
         return ds not in holidays
     return ds in special_sessions
+
+
+def should_defer_bars_4h_build(base_dir: Optional[Path] = None) -> tuple[bool, str]:
+    """
+    During an NSE session day before 15:30 IST, skip full-universe 4H rebuild
+    inside Update price/volume — live 4H candles come from the quote overlay.
+
+    Force build during session with CIM_BARS_4H_DURING_SESSION=1.
+    """
+    raw = os.getenv("CIM_BARS_4H_DURING_SESSION", "").strip().lower()
+    if raw in ("1", "true", "yes"):
+        return False, "4H build forced during session (CIM_BARS_4H_DURING_SESSION=1)"
+
+    now = datetime.now(IST)
+    if base_dir is None:
+        try:
+            from server.core.install_root import get_install_root
+
+            root = get_install_root()
+        except Exception:
+            root = Path(__file__).resolve().parents[2]
+    else:
+        root = Path(base_dir)
+    cal = load_nse_calendar(root)
+    if not is_nse_session_day(now.date(), cal["holidays"], cal["special_sessions"]):
+        return False, "non-session day — running 4H session bar build"
+    if now.time() >= BARS_4H_DEFER_UNTIL_IST:
+        return False, "post-close — running 4H session bar build"
+    return (
+        True,
+        "live session — skipped full-universe 4H DB rebuild (live 4H uses quote overlay; "
+        "full 4H build runs after 15:30 IST on Update)",
+    )
+
+
+def _batch_pace_delay_sec(*, upstox_primary: bool) -> float:
+    if upstox_primary:
+        return random.uniform(BARS_4H_UPSTOX_RATE_DELAY_MIN, BARS_4H_UPSTOX_RATE_DELAY_MAX)
+    return random.uniform(BARS_4H_RATE_DELAY_MIN, BARS_4H_RATE_DELAY_MAX)
 
 
 def assign_session_bucket(ts: datetime) -> Optional[int]:
@@ -254,12 +303,29 @@ def format_4h_missing_detail(symbol: str, conn=None, *, is_index: bool = False) 
         if src == "none":
             return (
                 f"No 4H intraday source available for {kind} '{sym}' after Update "
-                f"(Yahoo and NSE charting returned no 5m data). Daily charts may still work."
+                f"(Upstox returned no 5m data). Daily charts may still work."
             )
     return (
-        f"No 4H bars for {kind} '{sym}'. Run Update to build 4H session bars "
-        f"(Yahoo 5m first, NSE charting fallback for NSE indices)."
+        f"No 4H bars for {kind} '{sym}'. Run Update after 15:30 IST "
+        f"(Upstox 5m only)."
     )
+
+
+def _session_day_counts(conn, symbols: Sequence[str]) -> dict[str, int]:
+    sym_list = [str(s).strip().upper() for s in symbols if str(s).strip()]
+    if not sym_list:
+        return {}
+    placeholders = ",".join(["?"] * len(sym_list))
+    rows = conn.execute(
+        f"""
+        SELECT Symbol, COUNT(DISTINCT SessionDate)
+        FROM bars_4h
+        WHERE Symbol IN ({placeholders})
+        GROUP BY Symbol
+        """,
+        sym_list,
+    ).fetchall()
+    return {str(r[0]): int(r[1]) for r in rows}
 
 
 def symbols_needing_4h_backfill(
@@ -271,27 +337,175 @@ def symbols_needing_4h_backfill(
     sym_list = [str(s).strip().upper() for s in symbols if str(s).strip()]
     if not sym_list:
         return []
-    placeholders = ",".join(["?"] * len(sym_list))
-    rows = conn.execute(
-        f"""
-        SELECT Symbol, COUNT(DISTINCT SessionDate)
-        FROM bars_4h
-        WHERE Symbol IN ({placeholders})
-        GROUP BY Symbol
-        """,
-        sym_list,
-    ).fetchall()
-    have = {str(r[0]): int(r[1]) for r in rows}
+    have = _session_day_counts(conn, sym_list)
     return [s for s in sym_list if have.get(s, 0) < min_distinct_sessions]
 
 
+def latest_completed_4h_session_date(
+    *,
+    now: Optional[datetime] = None,
+    holidays: Optional[set[str]] = None,
+    special_sessions: Optional[set[str]] = None,
+    base_dir: Optional[Path] = None,
+) -> date:
+    """
+    Latest NSE session whose 4H bars should already be complete.
+
+    On a session day before 15:30 IST, that is the previous session day.
+    At/after 15:30 IST (or any non-open session), that is today if today is a
+    session day, else the prior session day.
+    """
+    clock = now or datetime.now(IST)
+    if holidays is None or special_sessions is None:
+        root = Path(base_dir) if base_dir is not None else None
+        if root is None:
+            try:
+                from server.core.install_root import get_install_root
+
+                root = get_install_root()
+            except Exception:
+                root = Path(__file__).resolve().parents[2]
+        cal = load_nse_calendar(root)
+        holidays = cal["holidays"] if holidays is None else holidays
+        special_sessions = cal["special_sessions"] if special_sessions is None else special_sessions
+    hol = holidays or set()
+    special = special_sessions or set()
+    d = clock.date()
+    if is_nse_session_day(d, hol, special) and clock.time() >= BARS_4H_DEFER_UNTIL_IST:
+        return d
+    d = d - timedelta(days=1)
+    for _ in range(400):
+        if is_nse_session_day(d, hol, special):
+            return d
+        d -= timedelta(days=1)
+    return clock.date()
+
+
+def recent_completed_4h_session_dates(
+    n: int = BARS_4H_INCREMENTAL_SESSION_DAYS,
+    *,
+    now: Optional[datetime] = None,
+    holidays: Optional[set[str]] = None,
+    special_sessions: Optional[set[str]] = None,
+    base_dir: Optional[Path] = None,
+) -> list[date]:
+    """Newest-first list of completed 4H session dates (length up to n)."""
+    latest = latest_completed_4h_session_date(
+        now=now,
+        holidays=holidays,
+        special_sessions=special_sessions,
+        base_dir=base_dir,
+    )
+    if n <= 1:
+        return [latest]
+    clock = now or datetime.now(IST)
+    if holidays is None or special_sessions is None:
+        root = Path(base_dir) if base_dir is not None else None
+        if root is None:
+            try:
+                from server.core.install_root import get_install_root
+
+                root = get_install_root()
+            except Exception:
+                root = Path(__file__).resolve().parents[2]
+        cal = load_nse_calendar(root)
+        holidays = cal["holidays"] if holidays is None else holidays
+        special_sessions = cal["special_sessions"] if special_sessions is None else special_sessions
+    hol = holidays or set()
+    special = special_sessions or set()
+    out: list[date] = [latest]
+    d = latest - timedelta(days=1)
+    while len(out) < max(1, int(n)) and (latest - d).days < 400:
+        if is_nse_session_day(d, hol, special):
+            out.append(d)
+        d -= timedelta(days=1)
+    return out
+
+
+def symbols_needing_4h_refresh(
+    conn,
+    symbols: Sequence[str],
+    latest_session_date: date | str | Sequence[date | str],
+) -> list[str]:
+    """Symbols missing bars_4h for any of the given completed session date(s)."""
+    sym_list = [str(s).strip().upper() for s in symbols if str(s).strip()]
+    if not sym_list:
+        return []
+
+    def _norm(d: date | str) -> str:
+        if isinstance(d, date):
+            return d.strftime("%Y-%m-%d")
+        return str(d).strip()[:10]
+
+    if isinstance(latest_session_date, (list, tuple)):
+        targets = [_norm(x) for x in latest_session_date if _norm(x)]
+    else:
+        targets = [_norm(latest_session_date)]
+    targets = [t for t in targets if t]
+    if not targets:
+        return list(sym_list)
+
+    placeholders = ",".join(["?"] * len(sym_list))
+    date_ph = ",".join(["?"] * len(targets))
+    rows = conn.execute(
+        f"""
+        SELECT Symbol, SessionDate
+        FROM bars_4h
+        WHERE SessionDate IN ({date_ph}) AND Symbol IN ({placeholders})
+        """,
+        [*targets, *sym_list],
+    ).fetchall()
+    have: dict[str, set[str]] = {}
+    for r in rows:
+        if not r or not r[0]:
+            continue
+        sym = str(r[0]).strip().upper()
+        sd = str(r[1] or "").strip()[:10]
+        if not sd:
+            continue
+        have.setdefault(sym, set()).add(sd)
+    wanted = set(targets)
+    return [s for s in sym_list if not wanted.issubset(have.get(s) or set())]
+
+
+def pick_live_session_4h_catchup(
+    conn,
+    symbols: Sequence[str],
+    *,
+    max_symbols: int = BARS_4H_LIVE_CATCHUP_MAX,
+    min_distinct_sessions: int = BARS_4H_MIN_SESSION_DAYS_FOR_BACKFILL_COMPLETE,
+) -> list[str]:
+    """
+    Cap catch-up during a live-session Update: prefer symbols with zero 4H rows,
+    then shallow history — never the full universe on every click.
+    """
+    needing = symbols_needing_4h_backfill(
+        conn, symbols, min_distinct_sessions=min_distinct_sessions
+    )
+    if not needing or max_symbols <= 0:
+        return []
+    have = _session_day_counts(conn, needing)
+    zero = [s for s in needing if have.get(s, 0) <= 0]
+    rest = [s for s in needing if have.get(s, 0) > 0]
+    return (zero + rest)[: int(max_symbols)]
+
+
 def reconcile_4h_backfill_meta(conn, universe_symbols: Sequence[str]) -> None:
-    """Clear stale 'backfill complete' if symbols still lack 4H depth."""
+    """
+    Log shallow symbols without clearing bars_4h_backfill_complete.
+
+    Clearing the flag used to force a full-universe 90d rebuild on the next
+    Update. Depth catch-up stays symbol-scoped via symbols_needing_4h_backfill.
+    """
     if get_meta(conn, META_BACKFILL_COMPLETE) != "1":
         return
     needing = symbols_needing_4h_backfill(conn, universe_symbols)
     if needing:
-        set_meta(conn, META_BACKFILL_COMPLETE, "0")
+        logger.info(
+            "bars_4h: %d symbols still shallow (scoped depth catch-up only, e.g. %s)",
+            len(needing),
+            ", ".join(needing[:8]),
+        )
 
 
 def try_mark_universe_backfill_complete(conn, universe_symbols: Sequence[str]) -> None:
@@ -312,13 +526,9 @@ def upsert_bars_4h(conn, symbol: str, bars: Sequence[Bar4H]) -> int:
             (sym, sd),
         )
     n = 0
+    rows = []
     for b in bars:
-        conn.execute(
-            """
-            INSERT INTO bars_4h
-                (Symbol, BarStart, SessionDate, Bucket, Open, High, Low, Close, Volume)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+        rows.append(
             (
                 sym,
                 b.bar_start.isoformat(),
@@ -329,11 +539,62 @@ def upsert_bars_4h(conn, symbol: str, bars: Sequence[Bar4H]) -> int:
                 b.low,
                 b.close,
                 b.volume,
-            ),
+            )
         )
         n += 1
+    conn.executemany(
+        """
+        INSERT INTO bars_4h
+            (Symbol, BarStart, SessionDate, Bucket, Open, High, Low, Close, Volume)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
     conn.commit()
     return n
+
+
+def upsert_bars_4h_many(conn, symbol_bars: Sequence[tuple[str, Sequence[Bar4H]]]) -> int:
+    """Upsert many symbols in one transaction (one commit)."""
+    ensure_bars_4h_table(conn)
+    total = 0
+    insert_rows: list[tuple] = []
+    for symbol, bars in symbol_bars:
+        if not bars:
+            continue
+        sym = str(symbol).strip().upper()
+        session_dates = {b.session_date for b in bars}
+        for sd in session_dates:
+            conn.execute(
+                "DELETE FROM bars_4h WHERE Symbol=? AND SessionDate=?",
+                (sym, sd),
+            )
+        for b in bars:
+            insert_rows.append(
+                (
+                    sym,
+                    b.bar_start.isoformat(),
+                    b.session_date,
+                    b.bucket,
+                    b.open,
+                    b.high,
+                    b.low,
+                    b.close,
+                    b.volume,
+                )
+            )
+            total += 1
+    if insert_rows:
+        conn.executemany(
+            """
+            INSERT INTO bars_4h
+                (Symbol, BarStart, SessionDate, Bucket, Open, High, Low, Close, Volume)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            insert_rows,
+        )
+    conn.commit()
+    return total
 
 
 def load_bars_4h_for_chart(conn, symbol: str, limit: Optional[int] = None) -> list[dict[str, Any]]:
@@ -455,6 +716,7 @@ def fetch_5m_for_symbols(
     start: datetime,
     end: datetime,
 ) -> dict[str, list[tuple]]:
+    """Yahoo 5m helper — prefer fetch_5m_with_fallback."""
     import yfinance as yf  # noqa: F401
 
     symbols = [str(s).strip().upper() for s in symbols if str(s).strip()]
@@ -476,56 +738,62 @@ def fetch_5m_for_symbols(
     return out
 
 
+def _fetch_5m_upstox(
+    symbols: Sequence[str],
+    windows: Sequence[tuple[datetime, datetime]],
+) -> dict[str, list[tuple]]:
+    try:
+        from server import upstox_config, upstox_history
+
+        if not upstox_config.market_data_enabled():
+            return {}
+    except Exception:
+        return {}
+
+    sym_list = [str(s).strip().upper() for s in symbols if str(s).strip()]
+    if not sym_list or not windows:
+        return {}
+    accum: dict[str, list[tuple]] = {s: [] for s in sym_list}
+    for win_start, win_end in windows:
+        chunk = upstox_history.fetch_minutes_for_symbols(sym_list, win_start, win_end, interval="5")
+        for sym, rows in chunk.items():
+            accum.setdefault(sym, []).extend(rows)
+    out: dict[str, list[tuple]] = {}
+    for sym, rows in accum.items():
+        if not rows:
+            continue
+        by_ts = {r[0].isoformat(): r for r in rows if r and r[0] is not None}
+        out[sym] = [by_ts[k] for k in sorted(by_ts.keys())]
+    return out
+
+
 def fetch_5m_with_fallback(
     symbols: Sequence[str],
     windows: Sequence[tuple[datetime, datetime]],
     base_dir: Path,
 ) -> dict[str, Fetch5mResult]:
     """
-    Layer 1: Yahoo 5m for all windows.
-    Layer 2: NSE charting 5m for all windows (only if Yahoo empty and token exists).
-    Never merge Yahoo + NSE rows for the same symbol in one build.
+    Upstox 5m only (Update path). No Yahoo / NSE fallback.
+    `base_dir` kept for call-site compatibility.
     """
-    from server.nse_charting_intraday import fetch_nse_charting_5m, get_nse_chart_token
-
+    del base_dir  # unused — Upstox-only path
     sym_list = [str(s).strip().upper() for s in symbols if str(s).strip()]
     out: dict[str, Fetch5mResult] = {}
     if not sym_list or not windows:
+        for sym in sym_list:
+            out[sym] = Fetch5mResult(rows=[], source="none")
         return out
 
-    yahoo_accum: dict[str, list[tuple]] = {s: [] for s in sym_list}
-    for win_start, win_end in windows:
-        chunk = fetch_5m_for_symbols(sym_list, win_start, win_end)
-        for sym, rows in chunk.items():
-            yahoo_accum.setdefault(sym, []).extend(rows)
-
+    # Collapse to one continuous window — Upstox chunks internally (28d).
+    win_start = min(w[0] for w in windows)
+    win_end = max(w[1] for w in windows)
+    upstox_rows = _fetch_5m_upstox(sym_list, [(win_start, win_end)])
     for sym in sym_list:
-        yahoo_rows = yahoo_accum.get(sym) or []
-        if yahoo_rows:
-            out[sym] = Fetch5mResult(rows=yahoo_rows, source="yahoo")
-            continue
-
-        token_cfg = get_nse_chart_token(sym, base_dir)
-        if not token_cfg:
-            out[sym] = Fetch5mResult(rows=[], source="none")
-            continue
-
-        nse_rows: list[tuple] = []
-        for win_start, win_end in windows:
-            nse_rows.extend(
-                fetch_nse_charting_5m(
-                    token_cfg["token"],
-                    win_start,
-                    win_end,
-                    chart_symbol=token_cfg.get("chartSymbol") or sym,
-                    pause_sec=0.0,
-                )
-            )
-        if nse_rows:
-            out[sym] = Fetch5mResult(rows=nse_rows, source="nse_charting")
+        rows = upstox_rows.get(sym) or []
+        if rows:
+            out[sym] = Fetch5mResult(rows=rows, source="upstox")
         else:
             out[sym] = Fetch5mResult(rows=[], source="none")
-
     return out
 
 
@@ -548,6 +816,7 @@ def build_bars_4h_for_symbols(
     progress_callback: Optional[Callable[[int, int], None]] = None,
     message_callback: Optional[Callable[[str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    also_30m: bool = True,
 ) -> dict[str, int]:
     def log(msg: str) -> None:
         if message_callback:
@@ -561,75 +830,165 @@ def build_bars_4h_for_symbols(
     sym_list = [str(s).strip().upper() for s in symbols if str(s).strip()]
     total = len(sym_list)
     if not sym_list:
-        return {"updated": 0, "failed": 0, "skipped": 0}
+        return {
+            "updated": 0,
+            "failed": 0,
+            "skipped": 0,
+            "processed": 0,
+            "sources": {"upstox": 0, "yahoo": 0, "nse": 0, "none": 0, "failed": 0},
+            "misses": [],
+        }
 
     now = datetime.now(IST)
+    target_sessions: list[date] = []
+    target_session: Optional[date] = None
     if backfill:
         session_dates = _session_dates_back(BARS_4H_HISTORY_SESSION_DAYS, holidays, special)
         if not session_dates:
             session_dates = [now.date()]
         fetch_start = datetime.combine(session_dates[0], SESSION_OPEN, tzinfo=IST)
-        windows = []
         end_d = now.date() + timedelta(days=1)
         win_end = datetime.combine(end_d, dtime.min, tzinfo=IST)
-        cur_end = win_end
-        while cur_end > fetch_start:
-            cur_start = max(fetch_start, cur_end - timedelta(days=BARS_4H_YAHOO_WINDOW_DAYS))
-            windows.append((cur_start, cur_end))
-            cur_end = cur_start
+        # Single continuous window — Upstox chunks by MINUTE_CHUNK_DAYS internally.
+        windows = [(fetch_start, win_end)]
     else:
-        session_dates = _session_dates_back(BARS_4H_INCREMENTAL_SESSION_DAYS, holidays, special)
-        fetch_start = datetime.combine(session_dates[0], SESSION_OPEN, tzinfo=IST)
-        windows = [(fetch_start, now + timedelta(days=1))]
+        # Incremental: cover the latest N completed sessions so mid-window holes refill.
+        target_sessions = recent_completed_4h_session_dates(
+            BARS_4H_INCREMENTAL_SESSION_DAYS,
+            holidays=holidays,
+            special_sessions=special,
+            base_dir=base_dir,
+            now=now,
+        )
+        target_session = target_sessions[0]
+        oldest = target_sessions[-1]
+        fetch_start = datetime.combine(oldest, SESSION_OPEN, tzinfo=IST)
+        fetch_end = datetime.combine(target_session, SESSION_CLOSE, tzinfo=IST) + timedelta(
+            minutes=5
+        )
+        windows = [(fetch_start, fetch_end)]
 
     updated = 0
     failed = 0
     skipped = 0
     processed = 0
+    source_totals = {"upstox": 0, "yahoo": 0, "nse": 0, "none": 0, "failed": 0}
+    misses: list[str] = []
+    target_session_strs = {d.strftime("%Y-%m-%d") for d in target_sessions}
+
+    upstox_primary = False
+    try:
+        from server import upstox_config
+
+        upstox_primary = bool(upstox_config.market_data_enabled())
+    except Exception:
+        upstox_primary = False
+    if message_callback:
+        if upstox_primary:
+            message_callback("4H 5m source: Upstox only (parallel history fetch)")
+        else:
+            message_callback("4H 5m source: Upstox not configured — symbols will be skipped")
+
+    def _bump_source(src: str) -> None:
+        key = "nse" if src == "nse_charting" else (src if src in source_totals else "none")
+        source_totals[key] = int(source_totals.get(key) or 0) + 1
 
     for batch_start in range(0, total, BARS_4H_BATCH_SIZE):
         if cancel_check and cancel_check():
             break
         batch = sym_list[batch_start : batch_start + BARS_4H_BATCH_SIZE]
         fetched = fetch_5m_with_fallback(batch, windows, base_dir)
-        batch_rows: dict[str, list[tuple]] = {s: [] for s in batch}
-        batch_sources: dict[str, IntradaySource] = {}
-        for sym in batch:
-            result = fetched.get(sym) or Fetch5mResult(rows=[], source="none")
-            batch_rows[sym] = result.rows
-            batch_sources[sym] = result.source
+        pending_upsert: list[tuple[str, list[Bar4H]]] = []
+        pending_sources: list[tuple[str, IntradaySource]] = []
+        batch_src_counts = {"upstox": 0, "yahoo": 0, "nse": 0, "none": 0}
 
         for sym in batch:
-            rows = batch_rows.get(sym) or []
-            source = batch_sources.get(sym) or "none"
+            result = fetched.get(sym) or Fetch5mResult(rows=[], source="none")
+            rows = result.rows
+            source = result.source
+            sk = "nse" if source == "nse_charting" else source
+            if sk not in batch_src_counts:
+                sk = "none"
+            batch_src_counts[sk] = int(batch_src_counts.get(sk) or 0) + 1
+
             if not rows:
                 if source == "none":
                     set_bars_4h_source(conn, sym, "none")
+                    misses.append(sym)
                 skipped += 1
                 processed += 1
+                _bump_source(source)
                 continue
             bars = aggregate_intraday_to_4h(sym, rows, holidays, special)
+            if not backfill and target_session_strs:
+                bars = [b for b in bars if b.session_date in target_session_strs]
             if not bars:
                 skipped += 1
                 processed += 1
+                _bump_source(source)
                 continue
-            try:
-                upsert_bars_4h(conn, sym, bars)
-                set_bars_4h_source(conn, sym, source)
-                updated += 1
-                log(f"4H {sym}: {source} ({len(rows)} x 5m -> {len(bars)} session bars)")
-            except Exception:
-                failed += 1
+            pending_upsert.append((sym, bars))
+            pending_sources.append((sym, source))
             processed += 1
+
+        try:
+            if pending_upsert:
+                upsert_bars_4h_many(conn, pending_upsert)
+                for sym, source in pending_sources:
+                    set_bars_4h_source(conn, sym, source)
+                    updated += 1
+                    _bump_source(source)
+        except Exception:
+            # Fall back per-symbol so one bad row does not lose the whole batch.
+            for sym, bars in pending_upsert:
+                source = next((s for s0, s in pending_sources if s0 == sym), "upstox")
+                try:
+                    upsert_bars_4h(conn, sym, bars)
+                    set_bars_4h_source(conn, sym, source)
+                    updated += 1
+                    _bump_source(source)
+                except Exception:
+                    failed += 1
+                    source_totals["failed"] = int(source_totals.get("failed") or 0) + 1
+
+        # Share the same 5m fetch: also write EOD 30m filter bars (no extra Upstox call).
+        if also_30m and fetched:
+            try:
+                from server.bars_30m import META_LAST_SUCCESS as META_30M_LAST_SUCCESS
+                from server.bars_30m import write_30m_many_from_5m
+
+                write_30m_many_from_5m(
+                    conn,
+                    fetched,
+                    holidays,
+                    special,
+                    target_session_strs=(None if backfill else target_session_strs) or None,
+                )
+                set_meta(conn, META_30M_LAST_SUCCESS, datetime.now(IST).isoformat())
+            except Exception as e_30:
+                log(f"30m co-write warning: {e_30}")
 
         if progress_callback:
             progress_callback(processed, total)
-        log(f"4H bars: {processed}/{total} (updated={updated}, skipped={skipped}, failed={failed})")
-        time.sleep(random.uniform(BARS_4H_RATE_DELAY_MIN, BARS_4H_RATE_DELAY_MAX))
+        log(
+            f"4H bars: {processed}/{total} (updated={updated}, skipped={skipped}, failed={failed}) | "
+            f"Source batch: Upstox={batch_src_counts.get('upstox', 0)} "
+            f"none={batch_src_counts.get('none', 0)} | "
+            f"totals Upstox={source_totals.get('upstox', 0)} none={source_totals.get('none', 0)} "
+            f"failed={source_totals.get('failed', 0)}"
+        )
+        time.sleep(_batch_pace_delay_sec(upstox_primary=upstox_primary))
 
     set_meta(conn, META_LAST_SUCCESS, datetime.now(IST).isoformat())
 
-    return {"updated": updated, "failed": failed, "skipped": skipped, "processed": processed}
+    return {
+        "updated": updated,
+        "failed": failed,
+        "skipped": skipped,
+        "processed": processed,
+        "sources": source_totals,
+        "misses": misses[:50],
+    }
 
 
 def bar_start_to_chart_time(bar_start: str) -> Optional[int]:

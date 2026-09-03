@@ -96,21 +96,42 @@ function Clear-ShowcaseAuthState {
 }
 
 function Stop-ShowcaseBackend {
+    # Prefer PID file + command-line match, then fall back to whoever owns the listen port
+    # (elevated/orphaned python sometimes has an empty CommandLine and survives the filter).
+    $stopIds = New-Object 'System.Collections.Generic.HashSet[int]'
+
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
             $_.CommandLine -and
             $_.CommandLine -like "*:$Port*" -and
             ($_.CommandLine -like "*cim_bootstrap*" -or $_.CommandLine -like "*run_uvicorn.py*")
         } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        ForEach-Object { [void]$stopIds.Add([int]$_.ProcessId) }
+
     if (Test-Path -LiteralPath $pidFile) {
         $oldPid = (Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue).Trim()
-        if ($oldPid -match '^\d+$') {
-            Stop-Process -Id ([int]$oldPid) -Force -ErrorAction SilentlyContinue
-        }
+        if ($oldPid -match '^\d+$') { [void]$stopIds.Add([int]$oldPid) }
         Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
     }
+
+    try {
+        Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+            ForEach-Object { [void]$stopIds.Add([int]$_.OwningProcess) }
+    } catch { }
+
+    foreach ($procId in $stopIds) {
+        if ($procId -le 0) { continue }
+        Write-Host "Stopping showcase backend PID $procId (port $Port)"
+        Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+        cmd /c "taskkill /F /PID $procId >nul 2>&1"
+    }
     Start-Sleep -Seconds 2
+
+    $still = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    if ($still.Count -gt 0) {
+        $left = ($still | Select-Object -ExpandProperty OwningProcess -Unique) -join ', '
+        throw "Port $Port still in use by PID(s) $left - stop it as Administrator (Access Denied usually means an elevated leftover process)."
+    }
 }
 
 function Wait-ShowcaseHealth {
@@ -138,8 +159,14 @@ if ($FreshAuth) {
     Clear-ShowcaseAuthState -Root $InstallRoot
 }
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-"" | Set-Content -LiteralPath $logFile -Encoding UTF8
-"" | Set-Content -LiteralPath $errFile -Encoding UTF8
+foreach ($lf in @($logFile, $errFile)) {
+    try {
+        "" | Set-Content -LiteralPath $lf -Encoding UTF8
+    } catch {
+        # Prior uvicorn may still hold the handle after a failed stop; don't block start.
+        Write-Host "Note: could not truncate $(Split-Path -Leaf $lf) (in use); appending to existing log." -ForegroundColor Yellow
+    }
+}
 
 $savedDev = $env:CIM_DEV
 $savedTools = $env:CIM_DEV_TOOLS

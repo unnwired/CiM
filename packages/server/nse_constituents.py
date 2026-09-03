@@ -14,67 +14,40 @@ from urllib.parse import quote
 import requests as req
 
 ARCHIVE_BASE = "https://nsearchives.nseindia.com/content/indices/"
+NIFTYINDICES_CONSTITUENT_BASE = "https://www.niftyindices.com/IndexConstituent/"
 
-# Yahoo / internal symbol -> NSE archive constituent list filename
-INDEX_ARCHIVE_CSV: dict[str, str] = {
-    "^NSEI": "ind_nifty50list.csv",
-    "^NSEBANK": "ind_niftybanklist.csv",
-    "^NSMIDCP": "ind_niftymidcap100list.csv",
-    "^NSEMDCP50": "ind_niftymidcap50list.csv",
-    "^CNXSC": "ind_niftysmallcap100list.csv",
-    "^CNXIT": "ind_niftyitlist.csv",
-    "^CNXFMCG": "ind_niftyfmcglist.csv",
-    "^CNXPHARMA": "ind_niftypharmalist.csv",
-    "NIFTY_HEALTHCARE.NS": "ind_niftyhealthcarelist.csv",
-    "^CNXAUTO": "ind_niftyautolist.csv",
-    "^CNXMETAL": "ind_niftymetallist.csv",
-    "^CNXREALTY": "ind_niftyrealtylist.csv",
-    "^CNXENERGY": "ind_niftyenergylist.csv",
-    "^CNXINFRA": "ind_niftyinfralist.csv",
-    "^CNXINDDEF": "ind_niftyindiadefence_list.csv",
-    "^CNXPSUBANK": "ind_niftypsubanklist.csv",
-    "^CNXPSE": "ind_niftypselist.csv",
-    "^CNXMNC": "ind_niftymnclist.csv",
-    "^CNXSERVICE": "ind_niftyservicelist.csv",
-    "^CNXMEDIA": "ind_niftymedialist.csv",
-    "^CNXDIVOP": "ind_niftydivopp50list.csv",
-    "^CNXNXT50": "ind_niftynext50list.csv",
-    "^CNX100": "ind_nifty100list.csv",
-    "^CNX200": "ind_nifty200list.csv",
-    "^CRSLDX": "ind_nifty500list.csv",
-    "^CNXSMLCP50": "ind_niftysmallcap50list.csv",
-    "^CNXCMDT": "ind_niftycommoditieslist.csv",
-}
 
-NSE_INDEX_MAP: dict[str, str] = {
-    "^NSEI": "NIFTY 50",
-    "^NSEBANK": "NIFTY BANK",
-    "^CNXIT": "NIFTY IT",
-    "^NSMIDCP": "NIFTY MIDCAP 100",
-    "^NSEMDCP50": "NIFTY MIDCAP 50",
-    "^CNXFMCG": "NIFTY FMCG",
-    "^CNXPHARMA": "NIFTY PHARMA",
-    "NIFTY_HEALTHCARE.NS": "NIFTY HEALTHCARE INDEX",
-    "^CNXAUTO": "NIFTY AUTO",
-    "^CNXMETAL": "NIFTY METAL",
-    "^CNXREALTY": "NIFTY REALTY",
-    "^CNXENERGY": "NIFTY ENERGY",
-    "^CNXINFRA": "NIFTY INFRA",
-    "^CNXINDDEF": "NIFTY INDIA DEFENCE",
-    "^CNXPSUBANK": "NIFTY PSU BANK",
-    "^CNXSC": "NIFTY SMALLCAP 100",
-    "^CNXCMDT": "NIFTY COMMODITIES",
-    "^CNXPSE": "NIFTY PSE",
-    "^CNXMNC": "NIFTY MNC",
-    "^CNXSERVICE": "NIFTY SERVICES SECTOR",
-    "^CNXMEDIA": "NIFTY MEDIA",
-    "^CNXDIVOP": "NIFTY DIVIDEND OPPORTUNITIES 50",
-    "^CNXNXT50": "NIFTY NEXT 50",
-    "^CNX100": "NIFTY 100",
-    "^CNX200": "NIFTY 200",
-    "^CRSLDX": "NIFTY 500",
-    "^CNXSMLCP50": "NIFTY SMLCAP 50",
-}
+def _load_index_maps() -> tuple[dict[str, str], dict[str, str]]:
+    """
+    Prefer cim_index_catalog. Fall back to bare import when `server` is shadowed
+    by server.py on sys.path (common in showcase flat layout) — otherwise only
+    Nifty 50/Bank remain and sector indices like FMCG return empty constituents.
+    """
+    try:
+        from server.cim_index_catalog import archive_csv_map, nse_name_map
+
+        return archive_csv_map(), nse_name_map()
+    except Exception:
+        pass
+    try:
+        from cim_index_catalog import archive_csv_map, nse_name_map
+
+        return archive_csv_map(), nse_name_map()
+    except Exception:
+        pass
+    return (
+        {
+            "^NSEI": "ind_nifty50list.csv",
+            "^NSEBANK": "ind_niftybanklist.csv",
+        },
+        {
+            "^NSEI": "NIFTY 50",
+            "^NSEBANK": "NIFTY BANK",
+        },
+    )
+
+
+INDEX_ARCHIVE_CSV, NSE_INDEX_MAP = _load_index_maps()
 
 HEADERS = {
     "User-Agent": (
@@ -113,14 +86,33 @@ def fetch_live_constituents(session: req.Session, nse_name: str) -> list[dict]:
 
 
 def _fetch_archive_text(csv_file: str) -> str:
-    url = ARCHIVE_BASE + csv_file
-    r = req.get(url, headers={"User-Agent": HEADERS["User-Agent"]}, timeout=30)
-    if r.status_code != 200:
-        raise RuntimeError(f"NSE archive HTTP {r.status_code} for {csv_file}")
-    text = r.text
-    if text.lstrip().startswith("<!"):
-        raise RuntimeError(f"NSE archive not CSV: {csv_file}")
-    return text
+    """
+    Prefer NSE archives; fall back to niftyindices.com IndexConstituent CSVs
+    (needed for newer indices like Chemicals when nsearchives has no file).
+    """
+    urls = [
+        ARCHIVE_BASE + csv_file,
+        NIFTYINDICES_CONSTITUENT_BASE + csv_file,
+    ]
+    errors: list[str] = []
+    for url in urls:
+        try:
+            r = req.get(url, headers={"User-Agent": HEADERS["User-Agent"]}, timeout=30)
+            if r.status_code != 200:
+                errors.append(f"{url} HTTP {r.status_code}")
+                continue
+            text = r.text
+            if text.lstrip().startswith("<!"):
+                errors.append(f"{url} not CSV")
+                continue
+            header = text.splitlines()[0] if text.splitlines() else ""
+            if "Symbol" not in header and "Symbol" not in text[:200]:
+                errors.append(f"{url} missing Symbol header")
+                continue
+            return text
+        except Exception as exc:
+            errors.append(f"{url} {exc}")
+    raise RuntimeError("; ".join(errors) if errors else f"No archive for {csv_file}")
 
 
 def parse_archive_constituents(text: str) -> list[dict[str, str]]:
@@ -341,27 +333,42 @@ def fetch_constituents_for_symbol(
 ) -> tuple[list[dict[str, Any]], str, Optional[str]]:
     """
     Returns (constituents, data_source, error).
-    data_source: 'local_eod' | 'nse_live_intraday'
+    data_source: 'local_eod' | 'nse_live' | 'nse_live_intraday'
+    Prefer NSE archive CSV; fall back to NSE live equity-stockIndices when no CSV.
     """
     nse_name = NSE_INDEX_MAP.get(symbol)
     if not nse_name:
         return [], "", f"Unknown index symbol {symbol}"
 
+    # India VIX and similar have no equity basket.
+    if str(symbol).strip().upper() == "INDIA_VIX" or "VIX" in nse_name.upper():
+        return [], "none", "No equity constituents for this index"
+
     csv_file = INDEX_ARCHIVE_CSV.get(symbol)
-    if not csv_file:
-        return [], "", "No archive constituent list configured for this index"
+    archive_err: Optional[str] = None
+    if csv_file:
+        try:
+            text = _fetch_archive_text(csv_file)
+            archive = parse_archive_constituents(text)
+            if archive:
+                rows = enrich_archive_rows(archive, conn)
+                if rows:
+                    return rows, "local_eod", None
+            archive_err = f"Archive list empty: {csv_file}"
+        except Exception as e:
+            archive_err = str(e)
 
+    # Live NSE fallback (needed for thematic indices without a public archive CSV).
     try:
-        text = _fetch_archive_text(csv_file)
-        archive = parse_archive_constituents(text)
-        if not archive:
-            return [], "", f"Archive list empty: {csv_file}"
-        rows = enrich_archive_rows(archive, conn)
+        sess = session or make_nse_session()
+        raw = fetch_live_constituents(sess, nse_name)
+        rows = parse_live_rows(raw, nse_name, conn)
+        if rows:
+            return rows, "nse_live", None
+        live_err = f"NSE live returned no constituents for {nse_name}"
     except Exception as e:
-        return [], "", str(e)
+        live_err = str(e)
 
-    if not rows:
-        return [], "", f"Archive list empty: {csv_file}"
-
-    # Market Map uses local EOD only — no NSE live overlay (avoids stale/partial live quotes).
-    return rows, "local_eod", None
+    if archive_err:
+        return [], "", f"{archive_err}; live: {live_err}"
+    return [], "", live_err

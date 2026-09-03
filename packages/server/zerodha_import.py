@@ -9,12 +9,16 @@ from datetime import date, datetime
 from typing import Any, Optional
 
 from server.pnl_ledger import (
+    BROKER_MANUAL,
+    BROKER_ZERODHA,
     _begin_cycle_if_needed,
     _normalize_symbol,
+    _sorted_open_positions,
     book_fifo,
     consolidate_open_lots,
     ensure_portfolio_stock,
     finalize_symbol_after_book,
+    infer_broker,
     mark_portfolio_pnl_tracked,
     parse_entry_price,
     parse_sale_date,
@@ -263,36 +267,45 @@ def _trade_ids_from_rows(rows: list[dict]) -> set[str]:
 
 
 def _strip_symbol_ledger_state(ledger: dict, symbols: set[str]) -> dict[str, int]:
-    """Remove open/closed history and cycle state for symbols before a Zerodha rebuild."""
+    """Remove Zerodha open/closed history for symbols before a Zerodha rebuild.
+
+    Paytm and manual lots/trades for the same NSE symbol are preserved.
+    """
+    from server.pnl_ledger import ensure_broker_tags
+
+    ensure_broker_tags(ledger)
     syms = {_normalize_symbol(s) for s in symbols}
-    counts = {"positions_removed": 0, "closed_removed": 0}
+    counts = {"positions_removed": 0, "closed_removed": 0, "positions_kept_other_broker": 0}
 
     kept_pos: list[dict] = []
     for p in ledger.get("positions", []):
-        if isinstance(p, dict) and _normalize_symbol(p.get("symbol")) in syms:
+        if not isinstance(p, dict):
+            continue
+        if _normalize_symbol(p.get("symbol")) in syms and infer_broker(p) == BROKER_ZERODHA:
             counts["positions_removed"] += 1
-        else:
-            kept_pos.append(p)
+            continue
+        if _normalize_symbol(p.get("symbol")) in syms:
+            counts["positions_kept_other_broker"] += 1
+        kept_pos.append(p)
     ledger["positions"] = kept_pos
 
     kept_closed: list[dict] = []
     for t in ledger.get("closed_trades", []):
         if not isinstance(t, dict):
             continue
-        if _normalize_symbol(t.get("symbol")) in syms:
-            if t.get("import_source") == "zerodha":
-                counts["closed_removed"] += 1
-            else:
-                kept_closed.append(t)
-        else:
-            kept_closed.append(t)
+        if _normalize_symbol(t.get("symbol")) in syms and infer_broker(t) == BROKER_ZERODHA:
+            counts["closed_removed"] += 1
+            continue
+        kept_closed.append(t)
     ledger["closed_trades"] = kept_closed
 
     for sym in syms:
-        if isinstance(ledger.get("active_cycle"), dict):
-            ledger["active_cycle"].pop(sym, None)
-        if isinstance(ledger.get("cycle_seq"), dict):
-            ledger["cycle_seq"].pop(sym, None)
+        # Only clear cycle state when no open lots remain for the symbol.
+        if symbol_open_qty(ledger, sym) <= 0:
+            if isinstance(ledger.get("active_cycle"), dict):
+                ledger["active_cycle"].pop(sym, None)
+            if isinstance(ledger.get("cycle_seq"), dict):
+                ledger["cycle_seq"].pop(sym, None)
 
     return counts
 
@@ -310,20 +323,112 @@ def _unregister_zerodha_trade_ids(ledger: dict, trade_ids: set[str]) -> int:
 
 
 def _clear_manual_open_lots(ledger: dict, symbols: set[str]) -> int:
-    """Drop manual open lots for symbols present in a Zerodha import (avoid double-count)."""
-    syms = {_normalize_symbol(s) for s in symbols}
-    kept: list[dict] = []
-    removed = 0
-    for p in ledger.get("positions", []):
-        if not isinstance(p, dict):
+    """Deprecated no-op — broker tags mean append import must not wipe Manual/Paytm lots.
+
+    Kept for callers/tests; always returns 0.
+    """
+    return 0
+
+
+def _promote_manual_lots_to_zerodha(ledger: dict, symbol: str, need_qty: int) -> int:
+    """Re-tag oldest Manual lots as Zerodha until need_qty is covered. Returns qty promoted.
+
+    Paytm lots are never promoted. Used when a Zerodha sell arrives but open Zerodha
+    qty is short — common when pre-import inventory was left as Manual.
+    """
+    need = int(need_qty or 0)
+    if need <= 0:
+        return 0
+    sym = _normalize_symbol(symbol)
+    promoted = 0
+    for lot in _sorted_open_positions(ledger, sym, brokers=(BROKER_MANUAL,)):
+        if promoted >= need:
+            break
+        lot_qty = int(lot.get("qty") or 0)
+        if lot_qty <= 0:
             continue
-        sym = _normalize_symbol(p.get("symbol"))
-        if sym in syms and not p.get("zerodha_trade_id") and not p.get("zerodha_trade_ids"):
-            removed += 1
-            continue
-        kept.append(p)
-    ledger["positions"] = kept
-    return removed
+        take = min(need - promoted, lot_qty)
+        if take >= lot_qty:
+            lot["broker"] = BROKER_ZERODHA
+            if not lot.get("import_source"):
+                lot["import_source"] = "manual_promoted_zerodha"
+            promoted += lot_qty
+        else:
+            # Split: keep remainder Manual, promote slice to Zerodha.
+            rem = lot_qty - take
+            lot["qty"] = rem
+            seed = {
+                "id": str(uuid.uuid4()),
+                "symbol": sym,
+                "entry_price": lot.get("entry_price"),
+                "qty": take,
+                "entry_date": lot.get("entry_date"),
+                "created_at": lot.get("created_at") or f"{lot.get('entry_date') or '1970-01-01'}T12:00:00",
+                "broker": BROKER_ZERODHA,
+                "import_source": "manual_promoted_zerodha",
+            }
+            ledger.setdefault("positions", []).append(seed)
+            promoted += take
+    return promoted
+
+
+def _seed_zerodha_gap_lot(
+    ledger: dict,
+    portfolio_items: list,
+    *,
+    symbol: str,
+    qty: int,
+    entry_price: float,
+    entry_date: str,
+) -> dict:
+    """Create a Zerodha open lot so a tradebook sell can book when buys are missing."""
+    sym = _normalize_symbol(symbol)
+    ensure_portfolio_stock(portfolio_items, sym)
+    if symbol_open_qty(ledger, sym) == 0:
+        _begin_cycle_if_needed(ledger, sym)
+    mark_portfolio_pnl_tracked(portfolio_items, sym)
+    pos = {
+        "id": str(uuid.uuid4()),
+        "symbol": sym,
+        "entry_price": float(entry_price),
+        "qty": int(qty),
+        "entry_date": entry_date,
+        "created_at": f"{entry_date}T00:00:00",
+        "broker": BROKER_ZERODHA,
+        "import_source": "zerodha_gap_seed",
+    }
+    ledger.setdefault("positions", []).append(pos)
+    sync_portfolio_entry_from_pnl(portfolio_items, ledger, sym)
+    return pos
+
+
+def _ensure_zerodha_qty_for_sell(
+    ledger: dict,
+    portfolio_items: list,
+    row: dict,
+) -> dict[str, int]:
+    """Make sure Zerodha open qty covers this sell (promote Manual, then gap-seed)."""
+    sym = row["symbol"]
+    need = int(row["quantity"])
+    have = symbol_open_qty(ledger, sym, brokers=(BROKER_ZERODHA,))
+    meta = {"promoted_manual_qty": 0, "gap_seed_qty": 0}
+    if need <= have:
+        return meta
+    short = need - have
+    promoted = _promote_manual_lots_to_zerodha(ledger, sym, short)
+    meta["promoted_manual_qty"] = promoted
+    short -= promoted
+    if short > 0:
+        _seed_zerodha_gap_lot(
+            ledger,
+            portfolio_items,
+            symbol=sym,
+            qty=short,
+            entry_price=float(row["price"]),
+            entry_date=row["trade_date"],
+        )
+        meta["gap_seed_qty"] = short
+    return meta
 
 
 def _row_fully_imported(row: dict, known: set[str]) -> bool:
@@ -353,6 +458,7 @@ def _import_buy_row(
         "zerodha_trade_id": row["trade_id"],
         "zerodha_trade_ids": list(row.get("trade_ids") or [row["trade_id"]]),
         "import_source": "zerodha",
+        "broker": BROKER_ZERODHA,
     }
     ledger.setdefault("positions", []).append(pos)
     sync_portfolio_entry_from_pnl(portfolio_items, ledger, sym)
@@ -369,15 +475,66 @@ def _import_buy_row(
     )
 
 
+def _closed_sell_qty_for_day(
+    ledger: dict,
+    symbol: str,
+    sale_date: str,
+    *,
+    exit_price: Optional[float] = None,
+) -> int:
+    """How many shares already closed for symbol on sale_date (optionally same exit)."""
+    sym = _normalize_symbol(symbol)
+    day = str(sale_date or "")[:10]
+    total = 0
+    for t in ledger.get("closed_trades", []) or []:
+        if not isinstance(t, dict):
+            continue
+        if _normalize_symbol(t.get("symbol")) != sym:
+            continue
+        if str(t.get("sale_date") or "")[:10] != day:
+            continue
+        if exit_price is not None:
+            try:
+                if abs(float(t.get("exit_price")) - float(exit_price)) > 0.51:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        q = t.get("qty_sold")
+        try:
+            total += int(float(q))
+        except (TypeError, ValueError):
+            pass
+    return total
+
+
 def _import_sell_row(
     ledger: dict,
     portfolio_items: list,
     row: dict,
     quote_snapshot: dict,
-) -> list[dict]:
+) -> tuple[list[dict], dict[str, int]]:
     sym = row["symbol"]
     ensure_portfolio_stock(portfolio_items, sym)
     mark_portfolio_pnl_tracked(portfolio_items, sym)
+
+    # If this sell was already booked (positions-today / manual) for the same day+exit,
+    # do not gap-seed and re-book — that double-counts realized P&L (Trent bug).
+    already = _closed_sell_qty_for_day(
+        ledger, sym, row["trade_date"], exit_price=float(row["price"]),
+    )
+    need = int(row["quantity"])
+    z_open = symbol_open_qty(ledger, sym, brokers=(BROKER_ZERODHA,))
+    m_open = symbol_open_qty(ledger, sym, brokers=(BROKER_MANUAL,))
+    if already >= need and (z_open + m_open) < need:
+        meta = {
+            "promoted_manual_qty": 0,
+            "gap_seed_qty": 0,
+            "skipped_duplicate_sell": need,
+        }
+        _register_zerodha_row_ids(ledger, row)
+        return [], meta
+
+    seed_meta = _ensure_zerodha_qty_for_sell(ledger, portfolio_items, row)
 
     trades = book_fifo(
         ledger,
@@ -387,14 +544,16 @@ def _import_sell_row(
         sale_date=row["trade_date"],
         quote_snapshot=quote_snapshot,
         portfolio_items=portfolio_items,
+        brokers=(BROKER_ZERODHA,),
     )
     for t in trades:
         t["zerodha_trade_id"] = row["trade_id"]
         t["zerodha_trade_ids"] = list(row.get("trade_ids") or [row["trade_id"]])
         t["import_source"] = "zerodha"
+        t["broker"] = BROKER_ZERODHA
     _register_zerodha_row_ids(ledger, row)
     finalize_symbol_after_book(ledger, portfolio_items, sym)
-    return trades
+    return trades, seed_meta
 
 
 def preview_zerodha_merge(
@@ -450,11 +609,14 @@ def merge_zerodha_tradebook(
         "closed_trades_added": 0,
         "manual_lots_removed": 0,
         "lots_consolidated": 0,
+        "gap_seed_qty": 0,
+        "manual_promoted_qty": 0,
         "symbols": [],
         "symbols_in_file": sorted(symbols_in_file),
         "date_from": None,
         "date_to": None,
         "errors": [],
+        "warnings": [],
         "portfolio_symbols_added": 0,
         "rebuild_strip": None,
         "trade_ids_cleared": 0,
@@ -483,9 +645,8 @@ def merge_zerodha_tradebook(
         if isinstance(it, dict)
     }
 
-    if pending and not dry_run and not rebuild:
-        symbols_with_pending = {r["symbol"] for r in pending}
-        summary["manual_lots_removed"] = _clear_manual_open_lots(ledger, symbols_with_pending)
+    # Append mode never wipes Manual/Paytm lots — broker tags own that boundary.
+    # (Previously cleared Manual lots here, which caused Zerodha sells to fail.)
 
     if pending:
         summary["date_from"] = pending[0]["trade_date"]
@@ -500,9 +661,39 @@ def merge_zerodha_tradebook(
                 _import_buy_row(ledger, portfolio_items, row)
                 summary["buys_applied"] += 1
             else:
-                trades = _import_sell_row(ledger, portfolio_items, row, qsnap)
-                summary["sells_applied"] += 1
-                summary["closed_trades_added"] += len(trades)
+                trades, seed_meta = _import_sell_row(ledger, portfolio_items, row, qsnap)
+                summary["gap_seed_qty"] += int(seed_meta.get("gap_seed_qty") or 0)
+                summary["manual_promoted_qty"] += int(seed_meta.get("promoted_manual_qty") or 0)
+                if seed_meta.get("skipped_duplicate_sell"):
+                    summary["warnings"].append({
+                        "symbol": sym,
+                        "trade_id": row["trade_id"],
+                        "message": (
+                            f"Skipped sell of {seed_meta['skipped_duplicate_sell']} — already "
+                            f"booked for {row['trade_date']} (avoids double-counting P&L)"
+                        ),
+                    })
+                else:
+                    summary["sells_applied"] += 1
+                    summary["closed_trades_added"] += len(trades)
+                if seed_meta.get("gap_seed_qty"):
+                    summary["warnings"].append({
+                        "symbol": sym,
+                        "trade_id": row["trade_id"],
+                        "message": (
+                            f"Seeded {seed_meta['gap_seed_qty']} Zerodha share(s) before sell "
+                            f"(buys missing from ledger / truncated tradebook)"
+                        ),
+                    })
+                if seed_meta.get("promoted_manual_qty"):
+                    summary["warnings"].append({
+                        "symbol": sym,
+                        "trade_id": row["trade_id"],
+                        "message": (
+                            f"Promoted {seed_meta['promoted_manual_qty']} Manual share(s) "
+                            f"to Zerodha for sell"
+                        ),
+                    })
         except ValueError as exc:
             summary["errors"].append({
                 "row": row.get("source_row"),
@@ -510,8 +701,8 @@ def merge_zerodha_tradebook(
                 "trade_id": row["trade_id"],
                 "message": str(exc),
             })
-            summary["ok"] = False
-            return summary
+            # Continue remaining rows — do not fail-fast on one bad sell.
+            continue
 
     if not dry_run:
         summary["lots_consolidated"] = consolidate_open_lots(ledger)
@@ -550,11 +741,14 @@ def _empty_tradebook_summary(*, dry_run: bool = False) -> dict[str, Any]:
         "closed_trades_added": 0,
         "manual_lots_removed": 0,
         "lots_consolidated": 0,
+        "gap_seed_qty": 0,
+        "manual_promoted_qty": 0,
         "symbols": [],
         "symbols_in_file": [],
         "date_from": None,
         "date_to": None,
         "errors": [],
+        "warnings": [],
         "portfolio_symbols_added": 0,
         "rebuild_strip": None,
         "trade_ids_cleared": 0,

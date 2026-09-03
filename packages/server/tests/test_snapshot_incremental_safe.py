@@ -15,6 +15,7 @@ from scrape_daily import (  # noqa: E402
     SNAPSHOT_INCREMENTAL_MAX_DAILY_BARS,
     _is_incremental_snapshot_run,
     _load_candles_batch,
+    _min_daily_bars_for_snapshot_timeframes,
 )
 
 
@@ -57,6 +58,13 @@ class TestSnapshotIncrementalSafe(unittest.TestCase):
 
     def test_default_incremental_bar_cap_sane(self):
         self.assertGreaterEqual(SNAPSHOT_INCREMENTAL_MAX_DAILY_BARS, 260)
+        self.assertGreaterEqual(SNAPSHOT_INCREMENTAL_MAX_DAILY_BARS, 1060)
+
+    def test_min_daily_bars_covers_weekly_ema200(self):
+        need_1w = _min_daily_bars_for_snapshot_timeframes(["1W"])
+        self.assertGreaterEqual(need_1w, 1060)
+        need_2w = _min_daily_bars_for_snapshot_timeframes(["2W"])
+        self.assertGreaterEqual(need_2w, 2060)
 
 
 if __name__ == "__main__":

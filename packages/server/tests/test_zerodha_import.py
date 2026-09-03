@@ -111,8 +111,11 @@ class TestZerodhaImport(unittest.TestCase):
         )
         summary = merge_zerodha_tradebook(ledger, items, SAMPLE_CSV, quote_map={})
         self.assertTrue(summary["ok"])
-        self.assertEqual(summary["manual_lots_removed"], 1)
-        self.assertEqual(symbol_open_qty(ledger, "MAZDOCK"), 16)
+        self.assertEqual(summary.get("manual_lots_removed", 0), 0)
+        # Manual lot kept; Zerodha buy adds alongside it.
+        self.assertEqual(symbol_open_qty(ledger, "MAZDOCK"), 20)
+        self.assertEqual(symbol_open_qty(ledger, "MAZDOCK", brokers=("manual",)), 4)
+        self.assertEqual(symbol_open_qty(ledger, "MAZDOCK", brokers=("zerodha",)), 16)
 
     def test_consolidate_open_lots(self):
         ledger = {

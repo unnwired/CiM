@@ -59,6 +59,11 @@ def is_hold_active() -> bool:
             if until.tzinfo is None:
                 until = until.replace(tzinfo=IST)
             if datetime.now(IST) > until.astimezone(IST):
+                # Expired hold left on disk — clear so ops aren't confused.
+                try:
+                    _clear_hold_files()
+                except Exception:
+                    pass
                 return False
         return bool(data.get("active"))
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
@@ -227,5 +232,39 @@ def collect_scheduler_conflicts(
             "at": nxt.isoformat(),
             "minutes": max(0, int((nxt - now).total_seconds() // 60)),
             "message": f"Scheduled task '{task_key}' is due within {imminent_minutes} minutes.",
+        })
+
+    for entry in cfg.get("filterSchedules") or []:
+        if not isinstance(entry, dict) or not entry.get("enabled"):
+            continue
+        entry_id = str(entry.get("id") or "").strip()
+        if not entry_id:
+            continue
+        task_key = f"filter:{entry_id}"
+        if ajs._fs_is_due_now(entry, state, now):
+            issues.append({
+                "type": "due_now",
+                "task": task_key,
+                "message": f"Filter schedule '{entry_id}' is due now.",
+            })
+            continue
+        nxt_raw = ajs._fs_next_run(entry, state, now)
+        if not nxt_raw:
+            continue
+        try:
+            nxt = datetime.fromisoformat(str(nxt_raw))
+            if nxt.tzinfo is None:
+                nxt = nxt.replace(tzinfo=IST)
+            nxt = nxt.astimezone(IST)
+        except (TypeError, ValueError):
+            continue
+        if nxt > horizon:
+            continue
+        issues.append({
+            "type": "imminent",
+            "task": task_key,
+            "at": nxt.isoformat(),
+            "minutes": max(0, int((nxt - now).total_seconds() // 60)),
+            "message": f"Filter schedule '{entry_id}' is due within {imminent_minutes} minutes.",
         })
     return issues

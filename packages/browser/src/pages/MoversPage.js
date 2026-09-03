@@ -1,13 +1,15 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
+import BasketToolbarButton from '../components/Basket';
+import { startBasketSymbolDrag } from '../utils/basketDnD';
 import axios from 'axios';
 import ChartContainer from '../components/chart/ChartContainer';
 import ChartHeaderBar from '../components/chart/ChartHeaderBar';
 import EMAControls from '../components/chart/EMAControls';
-import DrawingToolsDesignControl from '../components/chart/drawing/DrawingToolsDesignControl';
 import ExternalFinancialsLinks from '../components/ExternalFinancialsLinks';
 import { DrawingMirrorProvider } from '../components/chart/drawing/DrawingMirrorContext';
 import { DrawingWorkspaceProvider } from '../components/chart/drawing/DrawingWorkspaceContext';
 import { DrawingToolbarConnected, DrawingFloatPaletteConnected } from '../components/chart/drawing/DrawingToolbar';
+import StockListSplitBody from '../components/StockListSplitBody';
 import {
   EMA_PREFS_UPDATED_EVENT,
   VOLUME_PREFS_UPDATED_EVENT,
@@ -43,37 +45,59 @@ import {
 import { useIndicatorPanelAutoSave } from '../chartPrefs/useIndicatorPanelAutoSave';
 import { usePatchOverlay } from '../intraday/usePatchOverlay';
 import { useRegisterFocusedSymbol } from '../intraday/useRegisterFocusedSymbol';
-import { symbolsForMovers } from '../intraday/intradayRefreshScopes';
+import { useRegisterIntradaySymbols } from '../intraday/useRegisterIntradaySymbols';
+import { symbolsForChartFocus, symbolsForMovers } from '../intraday/intradayRefreshScopes';
 import { isIntradayLiveTimeframe } from '../intraday/patchOverlay';
 import { usePageLive } from '../intraday/pageLiveContext';
+import { useIntradayPatchOptional } from '../intraday/useIntradayPatch';
 import { useSyncedPanelHeights, columnCountForChartLayout, multiColumnHeightProps } from '../hooks/useSyncedPanelHeights';
 import { formatMarketCap, formatCompactCount, parseMarketCapInput } from '../utils/formatMarketCap';
 
 const LIMIT_OPTIONS = [20, 50, 100, 200, 400];
 const PAGE_SIZE_OPTIONS = [10, 20, 25, 50];
-const POLL_INTERVAL_KEY = 'cim.movers.pollIntervalSec';
-const POLL_INTERVAL_OPTIONS = [
-  { value: 0, label: 'None' },
-  { value: 15, label: '15 seconds' },
-  { value: 30, label: '30 seconds' },
-  { value: 60, label: '1 minute' },
-  { value: 120, label: '2 minutes' },
-];
+/** How often the Movers table re-ranks from the server cache while LIVE is on. */
+const LIVE_LIST_REFRESH_MS = 3000;
+/** How often visible movers rows pull LTPC/% from the movers cache while LIVE is on. */
+const LIVE_QUOTE_POLL_MS = 1500;
 
-function getPersistedPollInterval() {
-  if (typeof window === 'undefined') return 0;
+function readFloatingLiveActive() {
+  if (typeof window === 'undefined') return false;
   try {
-    const v = Number(window.localStorage.getItem(POLL_INTERVAL_KEY));
-    return POLL_INTERVAL_OPTIONS.some(o => o.value === v) ? v : 0;
+    const st = window.CiMLive && typeof window.CiMLive.getState === 'function'
+      ? window.CiMLive.getState()
+      : window.CiMLiveState;
+    if (!st) return false;
+    // Movers list is live only when Market movers mode (or explicit universe) is on.
+    if (st.moversUniverse) return true;
+    const ctx = st.contexts || {};
+    if (ctx.movers) return true;
   } catch {
-    return 0;
+    // ignore
+  }
+  return false;
+}
+
+const EARNINGS_TODAY_KEY = 'cim.movers.earningsToday';
+
+function readEarningsTodayPref() {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(EARNINGS_TODAY_KEY) === '1';
+  } catch {
+    return false;
   }
 }
 
-function persistPollInterval(sec) {
-  if (typeof window === 'undefined') return;
+function writeEarningsTodayPref(on) {
   try {
-    window.localStorage.setItem(POLL_INTERVAL_KEY, String(sec));
+    window.localStorage.setItem(EARNINGS_TODAY_KEY, on ? '1' : '0');
+  } catch {
+    // ignore
+  }
+  try {
+    window.dispatchEvent(new CustomEvent('cim:movers-earnings-today', {
+      detail: { enabled: !!on },
+    }));
   } catch {
     // ignore
   }
@@ -249,9 +273,8 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
   const [fetchError, setFetchError] = useState('');
   const [liveFetchNote, setLiveFetchNote] = useState('');
   const [liveSessionBanner, setLiveSessionBanner] = useState(null);
-  const [pollIntervalSec, setPollIntervalSec] = useState(() => getPersistedPollInterval());
-  const [appliedPollIntervalSec, setAppliedPollIntervalSec] = useState(0);
-  const [pollCountdown, setPollCountdown] = useState(null);
+  const [floatingLiveOn, setFloatingLiveOn] = useState(() => readFloatingLiveActive());
+  const [earningsToday, setEarningsToday] = useState(() => readEarningsTodayPref());
   const [selectedSymbol, setSelectedSymbol] = useState(null);
 
   const [timeframe, setTimeframe] = useState(DEFAULT_CHART_TIMEFRAME_1);
@@ -259,6 +282,7 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
   const [timeframe3, setTimeframe3] = useState(DEFAULT_CHART_TIMEFRAME_3);
   const [chartLayout, setChartLayout] = useState(DEFAULT_CHART_LAYOUT);
   const [lastCandleChange, setLastCandleChange] = useState(null);
+  const [lastCandlePrice, setLastCandlePrice] = useState(null);
   const [crosshairTime, setCrosshairTime] = useState(null);
 
   const [emas, setEmas] = useState(() => getPersistedEmaSet());
@@ -273,12 +297,39 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
   const [paneWidth, setPaneWidth] = useState(320);
   const chartPrefs = useChartPrefsContext();
   const { liveActive, liveTick } = usePageLive('movers');
-  const { overlayMoversRows, refreshTick: patchRefreshTick } = usePatchOverlay('movers');
-  const liveRows = useMemo(
-    () => overlayMoversRows(rows),
-    [rows, overlayMoversRows, patchRefreshTick],
-  );
+  const intraday = useIntradayPatchOptional();
+  const rowsRef = useRef([]);
+  const loadingRef = useRef(false);
+  const inFlightRef = useRef(false);
+  const abortRef = useRef(null);
+  const useLive = floatingLiveOn;
+
+  const { overlayMoversRows, getSnapshot } = usePatchOverlay('movers');
+  const liveRows = useMemo(() => {
+    // LIVE API already ranks with movers_live quotes + gainers/losers filter.
+    // Client overlay + re-filter fought the server cache (dual quote sources) → row flicker.
+    let next = useLive ? [...(rows || [])] : (overlayMoversRows(rows) || []);
+    if (mainTab === 'day' && !useLive) {
+      const wantLosers = daySide === 'losers';
+      next = next.filter((r) => {
+        const chg = Number(r?.change_pct);
+        if (!Number.isFinite(chg) || chg === 0) return false;
+        return wantLosers ? chg < 0 : chg > 0;
+      });
+      next = [...next].sort((a, b) => {
+        const ca = Number(a?.change_pct) || 0;
+        const cb = Number(b?.change_pct) || 0;
+        return wantLosers ? ca - cb : cb - ca;
+      });
+    }
+    return next;
+  }, [rows, overlayMoversRows, mainTab, daySide, useLive]);
+  // Chart focus + full movers list (so Refresh prices / live quote poll cover table rows).
   useRegisterFocusedSymbol('movers', useMemo(
+    () => symbolsForChartFocus(selectedSymbol),
+    [selectedSymbol],
+  ));
+  useRegisterIntradaySymbols('movers', useMemo(
     () => symbolsForMovers(rows),
     [rows],
   ));
@@ -289,8 +340,6 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
   const { getPanelHeights, heightsRef, handleHeightsChange, applyLayoutHeights, heightsRevision } = useSyncedPanelHeights({
     columnCount: columnCountForChartLayout(chartLayout),
   });
-  const rowsRef = useRef([]);
-  const loadingRef = useRef(false);
 
   const [viewOpen, setViewOpen] = useState(false);
   const [viewMenuRect, setViewMenuRect] = useState(null);
@@ -302,27 +351,96 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
   const safePage = Math.min(page, totalPages);
   const pageRows = liveRows.slice((safePage - 1) * pageSize, safePage * pageSize);
   const volumeColLabel = volumeMode === 'surge' ? 'Vol chg%' : volumeMode === 'rvol' ? 'RVOL 20d' : 'Volume';
-  const useLive = !showcaseWebClient && appliedPollIntervalSec > 0;
+  // Showcase funnel used to force useLive=false, so Market Movers fell back to EOD
   const selectedRow = useMemo(
     () => liveRows.find(r => String(r.symbol || '').toUpperCase() === String(selectedSymbol || '').toUpperCase()),
     [liveRows, selectedSymbol],
   );
-  const liveDayChangePct = selectedRow?.change_pct != null && Number.isFinite(Number(selectedRow.change_pct))
-    ? Number(selectedRow.change_pct)
-    : null;
+  const focusSnap = selectedSymbol ? getSnapshot(selectedSymbol) : null;
+  const symbolLive = !!(selectedSymbol && intraday?.isSymbolLive?.(selectedSymbol));
+  // Floating LIVE or page live enables chart overlay; focusSnap alone must not gate loading.
+  const chartLiveEnabled = !!(liveActive || useLive || symbolLive);
+  const liveDayChangePct = (() => {
+    // Prefer the movers row the user sees (post re-rank) over focusSnap so header matches list.
+    if (selectedRow?.change_pct != null && Number.isFinite(Number(selectedRow.change_pct))) {
+      return Number(selectedRow.change_pct);
+    }
+    const fromSnap = focusSnap?.change_pct;
+    if (fromSnap != null && Number.isFinite(Number(fromSnap))) return Number(fromSnap);
+    return null;
+  })();
+  const headerPrice = (() => {
+    const fromSnap = focusSnap?.price;
+    if (fromSnap != null && Number.isFinite(Number(fromSnap))) return Number(fromSnap);
+    if (lastCandlePrice != null && Number.isFinite(Number(lastCandlePrice))) return Number(lastCandlePrice);
+    const rowPx = selectedRow?.price;
+    return rowPx != null && Number.isFinite(Number(rowPx)) ? Number(rowPx) : null;
+  })();
+  const headerChange = (() => {
+    if (liveDayChangePct != null) return liveDayChangePct;
+    return lastCandleChange;
+  })();
 
   rowsRef.current = rows;
 
-  const configureLivePolling = useCallback(async (sec) => {
-    try {
-      await axios.post(`${API}/api/movers/live/configure`, { interval_seconds: sec });
-    } catch {
-      // server may be offline; EOD fallback still works
+  useEffect(() => {
+    const sym = String(selectedSymbol || '').trim().toUpperCase();
+    if (!sym || typeof window === 'undefined') return undefined;
+    window.dispatchEvent(new CustomEvent('cim:chart-focus-symbol', {
+      detail: { symbol: sym, source: 'movers' },
+    }));
+    if (useLive && intraday?.refreshPatch) {
+      intraday.refreshPatch([sym]).catch(() => {});
     }
+    return undefined;
+  }, [selectedSymbol, useLive, intraday]);
+
+  useEffect(() => {
+    const sync = (e) => {
+      const detail = e?.detail || {};
+      if (detail.enabled === false) {
+        setFloatingLiveOn(false);
+        return;
+      }
+      const moversMode = detail.movers === true || detail.context === 'movers' || readFloatingLiveActive();
+      setFloatingLiveOn(!!moversMode && detail.enabled !== false);
+    };
+    window.addEventListener('cim:live-active', sync);
+    window.addEventListener('cim:live-feed-toggle', sync);
+    setFloatingLiveOn(readFloatingLiveActive());
+    return () => {
+      window.removeEventListener('cim:live-active', sync);
+      window.removeEventListener('cim:live-feed-toggle', sync);
+    };
+  }, []);
+
+  useEffect(() => {
+    const sync = (e) => {
+      const next = !!(e?.detail && e.detail.enabled);
+      setEarningsToday(next);
+    };
+    window.addEventListener('cim:movers-earnings-today', sync);
+    setEarningsToday(readEarningsTodayPref());
+    return () => window.removeEventListener('cim:movers-earnings-today', sync);
   }, []);
 
   const fetchMovers = useCallback(async ({ background = false, minMcapOverride, light = false, preferLive = false } = {}) => {
-    if (background && loadingRef.current) return null;
+    // Background polls must not stack while a prior list request is still running
+    // (was measured stacking to ~10GB RSS / multi-minute hangs).
+    // Light LIVE polls may abort a prior light request so rankings keep reshuffling.
+    if (background && loadingRef.current) {
+      return null;
+    }
+    if (background && inFlightRef.current) {
+      if (light) {
+        try { abortRef.current?.abort(); } catch (_) { /* ignore */ }
+      } else {
+        return null;
+      }
+    }
+    if (inFlightRef.current && !background) {
+      try { abortRef.current?.abort(); } catch (_) { /* ignore */ }
+    }
     if (!background) {
       loadingRef.current = true;
       setLoading(true);
@@ -337,6 +455,7 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
       params.min_market_cap = mcapVal;
     }
     if (light) params.light = true;
+    if (earningsToday) params.earnings_today = true;
     if (mainTab === 'day') params.side = daySide;
     else params.volume_mode = volumeMode;
     const eodListUrl = mainTab === 'day' ? `${API}/api/movers/day-change` : `${API}/api/movers/volume`;
@@ -344,24 +463,37 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
     const wantLive = useLive || preferLive;
     const listUrl = wantLive ? liveListUrl : eodListUrl;
     const metaUrl = wantLive ? `${API}/api/movers/live/meta` : `${API}/api/movers/meta`;
+    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    abortRef.current = ac;
+    inFlightRef.current = true;
     try {
       let listRes;
       let usedEodFallback = false;
       try {
-        listRes = await axios.get(listUrl, { params, timeout: light ? 45000 : 120000 });
+        listRes = await axios.get(listUrl, { params, timeout: light ? 12000 : 120000, signal: ac?.signal });
       } catch (liveErr) {
+        if (axios.isCancel?.(liveErr) || liveErr?.code === 'ERR_CANCELED' || liveErr?.name === 'CanceledError') {
+          return null;
+        }
         if (!wantLive) throw liveErr;
+        // Do not chain a second 120s wait after a live timeout — use a short EOD fallback.
+        const wasTimeout = String(liveErr?.code || '') === 'ECONNABORTED'
+          || /timeout/i.test(String(liveErr?.message || ''));
         usedEodFallback = true;
-        listRes = await axios.get(eodListUrl, { params });
+        listRes = await axios.get(eodListUrl, {
+          params,
+          timeout: wasTimeout ? 20000 : 45000,
+          signal: ac?.signal,
+        });
       }
       let metaData = null;
       try {
-        const metaRes = await axios.get(metaUrl);
+        const metaRes = await axios.get(metaUrl, { signal: ac?.signal });
         metaData = metaRes.data || null;
       } catch {
         if (!wantLive) {
           try {
-            const metaRes = await axios.get(`${API}/api/movers/meta`);
+            const metaRes = await axios.get(`${API}/api/movers/meta`, { signal: ac?.signal });
             metaData = metaRes.data || null;
           } catch {
             // meta optional
@@ -371,9 +503,6 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
       let data = filterRowsByMinMcap(listRes.data?.data || [], mcapVal);
       if (background && rowsRef.current.length > 0) {
         setRows(data);
-        if (wantLive) {
-          if (useLive) setPollCountdown(appliedPollIntervalSec);
-        }
       } else {
         setRows(data);
         setMeta(metaData);
@@ -385,36 +514,46 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
           setLiveFetchNote('Live API unavailable — showing EOD data. Restart the backend.');
         } else {
           setLiveFetchNote('');
+          const liveSt = metaData?.live_status || {};
           setLiveSessionBanner({
             stockCount: data.length,
-            nseRefresh: metaData?.live_status?.last_nse_refresh_at || null,
-            marketClosed: metaData?.live_status?.market_open === false,
+            universeSize: liveSt.universe_size || liveSt.quotes_fresh_count || null,
+            marketClosed: liveSt.market_open === false,
+            streamConnected: liveSt.universe_connected === true,
           });
-          if (useLive) setPollCountdown(appliedPollIntervalSec);
         }
         if (!background) setPage(1);
       }
       if (data.length > 0) {
         const syms = data.map(r => String(r.symbol || '').toUpperCase());
-        setSelectedSymbol(prev => (prev && syms.includes(prev) ? prev : syms[0]));
+        if (!background) {
+          setSelectedSymbol(prev => (prev && syms.includes(prev) ? prev : syms[0]));
+        }
       } else if (!background) setSelectedSymbol(null);
       return data;
     } catch (e) {
+      if (axios.isCancel?.(e) || e?.code === 'ERR_CANCELED' || e?.name === 'CanceledError') {
+        return null;
+      }
       const msg = e.response?.data?.detail || e.message || 'Failed to load movers';
       if (background && wantLive) {
-        setLiveFetchNote('Live refresh paused (request failed). Next poll will retry.');
+        setLiveFetchNote('Live list refresh paused (request failed). Retrying…');
       } else {
         setFetchError(msg);
         setRows([]);
       }
       return null;
     } finally {
+      if (abortRef.current === ac) {
+        inFlightRef.current = false;
+        abortRef.current = null;
+      }
       if (!background) {
         loadingRef.current = false;
         setLoading(false);
       }
     }
-  }, [mainTab, daySide, volumeMode, limit, appliedMinMcapInr, useLive, appliedPollIntervalSec]);
+  }, [mainTab, daySide, volumeMode, limit, appliedMinMcapInr, useLive, earningsToday]);
 
   function applyFiltersAndFetch() {
     if (minMcap.trim() && !mcapValid) {
@@ -424,13 +563,6 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
     setMcapError('');
     const mcap = parsedMinMcap != null && Number.isFinite(parsedMinMcap) ? parsedMinMcap : null;
     setAppliedMinMcapInr(mcap);
-    setAppliedPollIntervalSec(pollIntervalSec);
-    persistPollInterval(pollIntervalSec);
-    configureLivePolling(pollIntervalSec);
-    if (pollIntervalSec <= 0) {
-      setPollCountdown(null);
-      setLiveSessionBanner(null);
-    }
   }
 
   useEffect(() => {
@@ -438,26 +570,43 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
   }, [fetchMovers]);
 
   useEffect(() => {
-    if (appliedPollIntervalSec <= 0) return undefined;
-    setPollCountdown(appliedPollIntervalSec);
-    const tickId = window.setInterval(() => {
-      setPollCountdown(prev => {
-        if (prev == null || prev <= 1) return appliedPollIntervalSec;
-        return prev - 1;
-      });
-    }, 1000);
-    return () => window.clearInterval(tickId);
-  }, [appliedPollIntervalSec]);
-
-  useEffect(() => {
-    if (!isActive || appliedPollIntervalSec <= 0) return undefined;
+    if (!isActive || !useLive) return undefined;
     const id = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
         fetchMovers({ background: true, light: true });
       }
-    }, appliedPollIntervalSec * 1000);
+    }, LIVE_LIST_REFRESH_MS);
     return () => window.clearInterval(id);
-  }, [isActive, appliedPollIntervalSec, fetchMovers]);
+  }, [isActive, useLive, fetchMovers, earningsToday]);
+
+  // EOD-only: patch table from intraday blob. LIVE movers API is already the table quote source.
+  useEffect(() => {
+    if (!isActive || useLive || !intraday?.ingestExternalQuotes) return undefined;
+    let cancelled = false;
+    const pollQuotes = async () => {
+      if (document.visibilityState !== 'visible') return;
+      const syms = symbolsForMovers(rowsRef.current);
+      if (!syms.length) return;
+      try {
+        const res = await axios.get(`${API}/api/live/quotes`, {
+          params: { symbols: syms.join(',') },
+          timeout: 8000,
+        });
+        if (cancelled) return;
+        const map = res.data?.symbols || {};
+        const n = Object.keys(map).length;
+        if (n) intraday.ingestExternalQuotes(map);
+      } catch (_) {
+        /* ignore transient poll errors */
+      }
+    };
+    pollQuotes();
+    const id = window.setInterval(pollQuotes, LIVE_QUOTE_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [isActive, useLive, intraday]);
 
   const { layoutHydrated, indicatorsHydrated } = useWebChartLayoutMount(CHART_PAGE_IDS.movers, {
     setChartLayout, setTimeframe, setTimeframe2, setTimeframe3, setPaneWidth,
@@ -592,7 +741,8 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
   useEffect(() => {
     const onRefresh = (e) => {
       const preferLive = e?.detail?.preferLive ?? showcaseWebClient;
-      fetchMovers({ preferLive, light: showcaseWebClient });
+      // Never full-page load on external refresh — that fights chart symbol switches.
+      fetchMovers({ preferLive, light: showcaseWebClient, background: true });
     };
     const onPrefetch = async (e) => {
       const resolve = e?.detail?.resolve;
@@ -601,21 +751,25 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
         const data = await fetchMovers({
           preferLive: true,
           light: showcaseWebClient,
+          background: true,
         });
         resolve(symbolsForMovers(data || []));
       } catch {
         resolve([]);
       }
     };
+    const onChartDataUpdated = () => {
+      fetchMovers({ background: true, preferLive: useLive, light: true });
+    };
     window.addEventListener(MOVERS_REFRESH_EVENT, onRefresh);
     window.addEventListener(MOVERS_LIVE_PREFETCH_EVENT, onPrefetch);
-    window.addEventListener(CHART_DATA_UPDATED_EVENT, onRefresh);
+    window.addEventListener(CHART_DATA_UPDATED_EVENT, onChartDataUpdated);
     return () => {
       window.removeEventListener(MOVERS_REFRESH_EVENT, onRefresh);
       window.removeEventListener(MOVERS_LIVE_PREFETCH_EVENT, onPrefetch);
-      window.removeEventListener(CHART_DATA_UPDATED_EVENT, onRefresh);
+      window.removeEventListener(CHART_DATA_UPDATED_EVENT, onChartDataUpdated);
     };
-  }, [fetchMovers]);
+  }, [fetchMovers, showcaseWebClient, useLive]);
   useEffect(() => { if (page !== safePage) setPage(safePage); }, [page, safePage]);
 
   function onDividerMouseDown(e) {
@@ -649,7 +803,7 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
 
   function renderPanel(sym, tf, setTf, onLastChange, cacheKey, hasBorderRight, dayChgOverride = null, columnIndex = 0) {
     if (!sym) return null;
-    const tfLive = liveActive && isIntradayLiveTimeframe(tf);
+    const tfLive = chartLiveEnabled && isIntradayLiveTimeframe(tf);
     return (
       <div key={cacheKey} style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0, borderRight: hasBorderRight ? '2px solid var(--border)' : 'none' }}>
         <ChartHeaderBar
@@ -657,7 +811,7 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
           timeframe={tf}
           onTimeframeChange={newTf => {
             setTf(newTf);
-            onLastChange(null);
+            onLastChange(null, null);
             setCrosshairTime(null);
           }}
         />
@@ -691,15 +845,20 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
         <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: 13, color: 'var(--text-primary)', flexShrink: 0 }}>
           {selectedSymbol || 'Market Movers'}
         </span>
-        {lastCandleChange !== null && (
+        {headerPrice != null && (
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-primary)', flexShrink: 0 }}>
+            ₹{headerPrice.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </span>
+        )}
+        {headerChange !== null && Number.isFinite(headerChange) && (
           <span style={{
             fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 600, flexShrink: 0,
-            color: lastCandleChange >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
-            backgroundColor: lastCandleChange >= 0 ? 'rgba(63,185,80,0.12)' : 'rgba(248,81,73,0.12)',
-            border: `1px solid ${lastCandleChange >= 0 ? '#3fb95044' : '#f8514944'}`,
+            color: headerChange >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
+            backgroundColor: headerChange >= 0 ? 'rgba(63,185,80,0.12)' : 'rgba(248,81,73,0.12)',
+            border: `1px solid ${headerChange >= 0 ? '#3fb95044' : '#f8514944'}`,
             borderRadius: 4, padding: '1px 6px',
           }}>
-            {lastCandleChange >= 0 ? '+' : ''}{lastCandleChange.toFixed(2)}%
+            {headerChange >= 0 ? '+' : ''}{headerChange.toFixed(2)}%
           </span>
         )}
         <div style={{ width: 1, height: 20, backgroundColor: 'var(--border)', flexShrink: 0 }} />
@@ -713,7 +872,7 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
 
         <div style={{ flex: 1, minWidth: 8 }} />
 
-        <DrawingToolsDesignControl />
+        <BasketToolbarButton />
 
         <div ref={indRef} style={{ position: 'relative', flexShrink: 0 }}>
           <button type="button" onClick={() => { setIndOpen(o => !o); setViewOpen(false); }}
@@ -772,7 +931,19 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
         </button>
       </div>
 
-      <div ref={wrapperRef} style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+      <StockListSplitBody
+        splitRef={wrapperRef}
+        footer={(
+          <>
+            {loading ? 'Loading…' : `${liveRows.length} stocks`}
+            <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+              <button type="button" disabled={safePage <= 1} onClick={() => setPage(p => Math.max(1, p - 1))} style={pagerBtnStyle(safePage > 1)}>Prev</button>
+              <span style={{ color: 'var(--text-secondary)' }}>Page {safePage} / {totalPages}</span>
+              <button type="button" disabled={safePage >= totalPages} onClick={() => setPage(p => Math.min(totalPages, p + 1))} style={pagerBtnStyle(safePage < totalPages)}>Next</button>
+            </span>
+          </>
+        )}
+      >
         <div style={{ width: paneWidth, minWidth: 240, flexShrink: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', borderRight: '1px solid var(--border)', position: 'relative' }}>
           <div style={{ borderBottom: '1px solid var(--border)', padding: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
             <div style={moversFormCardStyle}>
@@ -839,17 +1010,6 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
                   </InlineField>
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginTop: 8 }}>
-                  <InlineField label="Live refresh">
-                    <select
-                      value={pollIntervalSec}
-                      onChange={e => setPollIntervalSec(Number(e.target.value))}
-                      style={{ ...moversCompactSelectStyle, minWidth: 72 }}
-                    >
-                      {POLL_INTERVAL_OPTIONS.map(o => (
-                        <option key={o.value} value={o.value}>{o.label}</option>
-                      ))}
-                    </select>
-                  </InlineField>
                   <button
                     type="button"
                     onClick={applyFiltersAndFetch}
@@ -870,6 +1030,65 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
                   >
                     Apply filters
                   </button>
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      height: MOVERS_CTRL_H,
+                      padding: '0 8px',
+                      borderRadius: 4,
+                      border: `1px solid ${earningsToday ? 'var(--accent-blue)' : 'var(--border)'}`,
+                      background: earningsToday ? 'rgba(56,139,253,0.12)' : 'var(--bg-tertiary)',
+                    }}
+                    title="Intersect movers with stocks releasing earnings today (IST)"
+                  >
+                    <span style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: earningsToday ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                      whiteSpace: 'nowrap',
+                    }}
+                    >
+                      Earnings today
+                    </span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={earningsToday}
+                      aria-label="Show only stocks with earnings today"
+                      onClick={() => {
+                        const next = !earningsToday;
+                        setEarningsToday(next);
+                        writeEarningsTodayPref(next);
+                      }}
+                      style={{
+                        position: 'relative',
+                        width: 36,
+                        height: 20,
+                        flexShrink: 0,
+                        borderRadius: 10,
+                        border: '1px solid var(--border)',
+                        backgroundColor: earningsToday ? 'var(--accent-blue)' : 'var(--bg-primary)',
+                        cursor: 'pointer',
+                        padding: 0,
+                      }}
+                    >
+                      <span style={{
+                        position: 'absolute',
+                        top: 1,
+                        left: 1,
+                        width: 16,
+                        height: 16,
+                        borderRadius: '50%',
+                        backgroundColor: '#fff',
+                        boxShadow: '0 1px 2px rgba(0,0,0,0.35)',
+                        transform: earningsToday ? 'translateX(16px)' : 'translateX(0)',
+                        transition: 'transform 0.15s ease',
+                      }}
+                      />
+                    </button>
+                  </div>
                 </div>
               </section>
             </div>
@@ -878,11 +1097,6 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
               <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', paddingLeft: 2 }}>
                 Min cap: ≥ {formatMarketCap(parsedMinMcap)}
                 {appliedMinMcapInr != null && appliedMinMcapInr === parsedMinMcap ? ' · applied' : ' · press Apply filters'}
-              </div>
-            )}
-            {pollIntervalSec !== appliedPollIntervalSec && (
-              <div style={{ fontSize: 10, color: 'var(--text-muted)', paddingLeft: 2 }}>
-                Live refresh changed — press Apply filters to start
               </div>
             )}
             {(mcapError || fetchError || liveFetchNote) && (
@@ -902,21 +1116,23 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
             }}
           >
             {loading ? 'Loading…' : `${liveRows.length} stocks`}
+            {earningsToday ? ' · earnings today' : ''}
             {useLive && liveSessionBanner ? (
               <>
                 {' · '}
                 <span style={{ color: 'var(--accent-green)', fontWeight: 700 }}>Live</span>
-                {liveSessionBanner.nseRefresh ? ` · NSE ${liveSessionBanner.nseRefresh}` : ''}
+                {liveSessionBanner.streamConnected ? ' · stream' : ' · connecting'}
+                {liveSessionBanner.universeSize ? ` · ${liveSessionBanner.universeSize} quoted` : ''}
                 {liveSessionBanner.marketClosed ? ' · market closed' : ''}
+                {' · turn LIVE off for EOD'}
               </>
             ) : !useLive && meta?.as_of_date ? (
               ` · EOD ${meta.as_of_date}`
-            ) : null}
-            {useLive && pollCountdown != null && appliedPollIntervalSec > 0 ? (
-              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-green)', fontWeight: 600 }}>
-                {` · ${pollCountdown}s`}
-              </span>
-            ) : null}
+            ) : useLive ? (
+              ' · Live (floating LIVE on)'
+            ) : (
+              ' · turn floating LIVE on for tick updates'
+            )}
           </div>
 
           <div style={{ flex: 1, overflowY: 'auto' }}>
@@ -945,7 +1161,12 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
                   return (
                     <tr
                       key={sym}
-                      onClick={() => { setSelectedSymbol(sym); setLastCandleChange(null); setCrosshairTime(null); }}
+                      onClick={() => {
+                        setSelectedSymbol(sym);
+                        setLastCandleChange(null);
+                        setLastCandlePrice(null);
+                        setCrosshairTime(null);
+                      }}
                       onContextMenu={(e) => {
                         e.preventDefault();
                         if (onContextMenuRequest) {
@@ -961,7 +1182,15 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
                       style={{ cursor: 'pointer', background: active ? 'rgba(56,139,253,0.12)' : 'transparent', borderBottom: '1px solid var(--border-light)' }}
                     >
                       <td style={{ padding: '5px 8px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{row.rank}</td>
-                      <td style={{ padding: '5px 4px', fontFamily: 'var(--font-mono)', fontWeight: 600, color: active ? 'var(--accent-blue)' : 'var(--text-primary)' }}>{sym}</td>
+                      <td
+                        draggable
+                        onDragStart={(e) => {
+                          e.stopPropagation();
+                          startBasketSymbolDrag(e, sym, 'stock');
+                        }}
+                        title={`${sym} — drag to Basket`}
+                        style={{ padding: '5px 4px', fontFamily: 'var(--font-mono)', fontWeight: 600, color: active ? 'var(--accent-blue)' : 'var(--text-primary)', cursor: 'grab' }}
+                      >{sym}</td>
                       <td style={{ padding: '5px 4px', textAlign: 'right', fontFamily: 'var(--font-mono)' }}>{formatPrice(row.price)}</td>
                       <td style={{ padding: '5px 4px', textAlign: 'right', fontFamily: 'var(--font-mono)', color: chgColor }}>{formatPct(row.change_pct)}</td>
                       {mainTab === 'volume' && <td style={{ padding: '5px 4px', textAlign: 'right', fontFamily: 'var(--font-mono)' }}>{volCell}</td>}
@@ -972,15 +1201,12 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
               </tbody>
             </table>
             {!loading && pageRows.length === 0 && (
-              <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)', fontSize: 11 }}>{useLive
-                  ? 'No live movers match these filters. Try lowering min market cap, set Live refresh to None for EOD, or refresh OHLC.'
-                  : 'No results. Adjust min market cap or refresh OHLC.'}</div>
+              <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)', fontSize: 11 }}>{earningsToday
+                  ? 'No movers with earnings releasing today match these filters.'
+                  : useLive
+                    ? 'No live movers match these filters. Try lowering min market cap, turn LIVE off for EOD, or refresh OHLC.'
+                    : 'No results. Adjust min market cap or refresh OHLC.'}</div>
             )}
-          </div>
-          <div style={{ padding: '8px 10px', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--text-muted)' }}>
-            <button type="button" disabled={safePage <= 1} onClick={() => setPage(p => Math.max(1, p - 1))} style={pagerBtnStyle(safePage > 1)}>Prev</button>
-            <span style={{ color: 'var(--text-secondary)' }}>Page {safePage} / {totalPages}</span>
-            <button type="button" disabled={safePage >= totalPages} onClick={() => setPage(p => Math.min(totalPages, p + 1))} style={pagerBtnStyle(safePage < totalPages)}>Next</button>
           </div>
         </div>
 
@@ -1002,15 +1228,15 @@ export default function MoversPage({ onOpenChart, isActive = false, showcaseWebC
                 <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minWidth: 400, position: 'relative' }}>
                   <DrawingToolbarConnected />
                   <DrawingFloatPaletteConnected />
-                  {renderPanel(selectedSymbol, timeframe, tf => setTimeframe(tf), pct => setLastCandleChange(pct), `${selectedSymbol}-p1-${timeframe}`, chartLayout !== 'single', liveDayChangePct, 0)}
-                  {(chartLayout === '2h' || chartLayout === '3h') && renderPanel(selectedSymbol, timeframe2, tf => setTimeframe2(tf), () => {}, `${selectedSymbol}-p2-${timeframe2}`, chartLayout === '3h', liveDayChangePct, 1)}
-                  {chartLayout === '3h' && renderPanel(selectedSymbol, timeframe3, tf => setTimeframe3(tf), () => {}, `${selectedSymbol}-p3-${timeframe3}`, false, liveDayChangePct, 2)}
+                  {renderPanel(selectedSymbol, timeframe, tf => { setTimeframe(tf); setLastCandleChange(null); setLastCandlePrice(null); }, (pct, price) => { setLastCandleChange(pct); setLastCandlePrice(price ?? null); }, `${selectedSymbol}-p1-${timeframe}`, chartLayout !== 'single', liveDayChangePct, 0)}
+                  {(chartLayout === '2h' || chartLayout === '3h') && renderPanel(selectedSymbol, timeframe2, tf => setTimeframe2(tf), (pct, price) => { setLastCandleChange(pct); setLastCandlePrice(price ?? null); }, `${selectedSymbol}-p2-${timeframe2}`, chartLayout === '3h', liveDayChangePct, 1)}
+                  {chartLayout === '3h' && renderPanel(selectedSymbol, timeframe3, tf => setTimeframe3(tf), (pct, price) => { setLastCandleChange(pct); setLastCandlePrice(price ?? null); }, `${selectedSymbol}-p3-${timeframe3}`, false, liveDayChangePct, 2)}
                 </div>
               </DrawingWorkspaceProvider>
             </DrawingMirrorProvider>
           )}
         </div>
-      </div>
+      </StockListSplitBody>
     </div>
   );
 }

@@ -261,3 +261,21 @@ code {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
 }
+
+/* Closed <select> label: scroll when text wider than the box (left → right → left). */
+@keyframes cim-select-marquee {
+  0%, 12% { transform: translateX(0); }
+  45%, 55% { transform: translateX(calc(-1 * var(--cim-marquee-travel, 0px))); }
+  88%, 100% { transform: translateX(0); }
+}
+
+.cim-select-marquee {
+  animation: cim-select-marquee 9.5s ease-in-out infinite;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cim-select-marquee {
+    animation: none;
+  }
+}

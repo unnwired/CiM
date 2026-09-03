@@ -73,8 +73,23 @@ function formatPreviewSummary(preview) {
   if (preview.manual_lots_removed) {
     lines.push(`Manual lots replaced for import: ${preview.manual_lots_removed}`);
   }
+  if (preview.manual_promoted_qty) {
+    lines.push(`Manual lots promoted to Zerodha for sells: ${preview.manual_promoted_qty}`);
+  }
+  if (preview.gap_seed_qty) {
+    lines.push(`Gap-seeded Zerodha shares (missing buys): ${preview.gap_seed_qty}`);
+  }
   if (preview.lots_consolidated) {
     lines.push(`Lots consolidated after import: ${preview.lots_consolidated}`);
+  }
+  if (preview.warnings?.length) {
+    preview.warnings.slice(0, 8).forEach((w) => {
+      const sym = w.symbol ? `${w.symbol}: ` : '';
+      lines.push(`Note: ${sym}${w.message || w}`);
+    });
+    if (preview.warnings.length > 8) {
+      lines.push(`…and ${preview.warnings.length - 8} more note(s)`);
+    }
   }
   return lines;
 }

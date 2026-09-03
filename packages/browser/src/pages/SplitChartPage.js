@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
+import BasketToolbarButton from '../components/Basket';
 import ChartContainer from '../components/chart/ChartContainer';
 import { DrawingWorkspaceProvider } from '../components/chart/drawing/DrawingWorkspaceContext';
 import { DrawingToolbarConnected, DrawingFloatPaletteConnected } from '../components/chart/drawing/DrawingToolbar';
-import DrawingToolsDesignControl from '../components/chart/drawing/DrawingToolsDesignControl';
 import ExternalFinancialsLinks from '../components/ExternalFinancialsLinks';
 import EMAControls    from '../components/chart/EMAControls';
 import axios          from 'axios';
@@ -389,7 +389,7 @@ export default function SplitChartPage({ symbol: initialSymbol, onOpenChart, onO
           )}
         </div>
 
-        <DrawingToolsDesignControl />
+        <BasketToolbarButton />
 
         {/* Indicators */}
         <div ref={indRef} style={{ position: 'relative', flexShrink: 0 }}>
@@ -534,7 +534,7 @@ function SymbolSearch({ symbol, onChange, lastChange, lastPrice }) {
 // ── Panel header with timeframe switcher ────────────────────────────────────────
 // ── Panel header with timeframe switcher ──────────────────────────────────────────────
 const PANEL_TF_GROUPS = {
-  D: ['4H','1D','2D','3D','4D','5D','6D','7D'],
+  D: ['30m','4H','1D','2D','3D','4D','5D','6D','7D'],
   W: ['1W','2W','3W','4W'],
   M: ['1M','2M','3M','4M','5M','6M','7M','8M','9M','10M','11M','12M'],
 };

@@ -52,8 +52,10 @@ export default function IndexChartContainer({
         const msg = typeof detail === 'string' && detail.trim()
           ? detail
           : (timeframe === '4H'
-            ? '4H chart unavailable. Run Update to build session bars (Yahoo first, NSE fallback).'
-            : err.message);
+            ? '4H chart unavailable. Run Update after 15:30 IST. Upstox primary; Yahoo/NSE fallback.'
+            : timeframe === '30m'
+              ? '30m chart unavailable. Run Update after 15:30 IST (same 5m build as 4H).'
+              : err.message);
         setError(msg);
         setLoading(false);
       });

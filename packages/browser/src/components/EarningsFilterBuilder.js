@@ -16,10 +16,69 @@ const MONTH_OPTIONS = [
 ];
 
 const WINDOW_OPTIONS = [
+  { value: 'current_trading_day', label: 'Current trading day' },
+  { value: 'previous_day', label: 'Previous day' },
+  { value: 'previous_5_days', label: 'Previous 5 days' },
+  { value: 'next_day', label: 'Next day' },
+  { value: 'next_5_days', label: 'Next 5 days' },
   { value: 'this_week', label: 'This week (Monday to Sunday)' },
   { value: 'prev_week', label: 'Previous week (Monday to Sunday)' },
+  { value: 'next_week', label: 'Next week (Monday to Sunday)' },
   { value: 'month_range', label: 'Month range' },
 ];
+
+const WINDOW_CHIP_LABELS = {
+  current_trading_day: 'Current trading day',
+  previous_day: 'Previous day',
+  previous_5_days: 'Previous 5 days',
+  next_day: 'Next day',
+  next_5_days: 'Next 5 days',
+  this_week: 'This week',
+  prev_week: 'Prev week',
+  next_week: 'Next week',
+  today: 'Current trading day',
+  yesterday: 'Previous day',
+  today_yesterday: 'Current trading day',
+  today_and_yesterday: 'Current trading day',
+};
+
+const REPORTED_WINDOWS = new Set([
+  'current_trading_day',
+  'previous_day',
+  'previous_5_days',
+  'this_week',
+  'prev_week',
+  'month_range',
+]);
+
+const UPCOMING_WINDOWS = new Set([
+  'current_trading_day',
+  'next_day',
+  'next_5_days',
+  'this_week',
+  'next_week',
+  'month_range',
+]);
+
+function normalizeWindowKey(raw) {
+  const k = String(raw || '').trim().toLowerCase();
+  if (k === 'today' || k === 'today_yesterday' || k === 'today_and_yesterday') return 'current_trading_day';
+  if (k === 'yesterday') return 'previous_day';
+  if (k === 'previous_week') return 'prev_week';
+  return k || 'month_range';
+}
+
+const SCOPE_OPTIONS = [
+  { value: 'reported', label: 'Reported', chip: 'Reported' },
+  { value: 'upcoming', label: 'Upcoming', chip: 'Upcoming' },
+  { value: 'both', label: 'Both', chip: 'Reported + upcoming' },
+];
+
+const SCOPE_HELP = {
+  reported: 'Stocks that already reported in this window, matched on release date.',
+  upcoming: 'Stocks scheduled to report in this window, matched on next release date.',
+  both: 'Stocks that reported or are scheduled to report in this window.',
+};
 
 const sectionLabel = {
   fontSize: 11,
@@ -89,9 +148,12 @@ function monthLabel(month, year) {
 
 function buildChipLabel(def) {
   const parts = ['Earnings'];
-  const rw = def.report_window || 'month_range';
-  if (rw === 'this_week') parts.push('This week');
-  else if (rw === 'prev_week') parts.push('Prev week');
+  const scope = def.earnings_scope || 'reported';
+  if (scope !== 'reported') {
+    parts.push(SCOPE_OPTIONS.find(o => o.value === scope)?.chip || scope);
+  }
+  const rw = normalizeWindowKey(def.report_window || 'month_range');
+  if (WINDOW_CHIP_LABELS[rw]) parts.push(WINDOW_CHIP_LABELS[rw]);
   else {
     parts.push(`${monthLabel(def.from_month, def.from_year)} – ${monthLabel(def.to_month, def.to_year)}`);
   }
@@ -121,7 +183,8 @@ export default function EarningsFilterBuilder({ onApply, onCancel, initialValues
   const { year: maxYear, month: maxMonth } = currentYearMonth();
   const minYear = 2024;
 
-  const [reportWindow, setReportWindow] = useState(init.report_window || 'month_range');
+  const [scope, setScope] = useState(init.earnings_scope || 'reported');
+  const [reportWindow, setReportWindow] = useState(normalizeWindowKey(init.report_window || 'month_range'));
   const [fromYear, setFromYear] = useState(init.from_year ?? maxYear);
   const [fromMonth, setFromMonth] = useState(
     clampMonthForYear(init.from_year ?? maxYear, init.from_month ?? maxMonth, maxYear, maxMonth),
@@ -144,6 +207,36 @@ export default function EarningsFilterBuilder({ onApply, onCancel, initialValues
 
   const isEditMode = !!initialValues;
 
+  // Reported earnings cannot land in a future month; upcoming ones only do.
+  const allowsFutureMonths = scope !== 'reported';
+  const boundMonth = allowsFutureMonths ? 12 : maxMonth;
+  const surpriseEnabled = scope !== 'upcoming';
+
+  function handleScopeChange(next) {
+    setScope(next);
+    if (next === 'reported') {
+      setFromMonth(m => clampMonthForYear(fromYear, m, maxYear, maxMonth));
+      setToMonth(m => clampMonthForYear(toYear, m, maxYear, maxMonth));
+    }
+    const allowed = next === 'upcoming' ? UPCOMING_WINDOWS
+      : next === 'reported' ? REPORTED_WINDOWS
+      : new Set([...REPORTED_WINDOWS, ...UPCOMING_WINDOWS]);
+    if (!allowed.has(reportWindow)) {
+      setReportWindow('current_trading_day');
+    }
+  }
+
+  const windowOptions = useMemo(() => {
+    if (scope === 'upcoming') {
+      return WINDOW_OPTIONS.filter(o => UPCOMING_WINDOWS.has(o.value));
+    }
+    if (scope === 'reported') {
+      return WINDOW_OPTIONS.filter(o => REPORTED_WINDOWS.has(o.value));
+    }
+    // both: all TV windows + month range
+    return WINDOW_OPTIONS;
+  }, [scope]);
+
   function validate() {
     setFormErr('');
     if (reportWindow === 'month_range') {
@@ -152,6 +245,7 @@ export default function EarningsFilterBuilder({ onApply, onCancel, initialValues
         return false;
       }
     }
+    if (!surpriseEnabled) return true;
     const fields = [
       { raw: epsMin, label: 'EPS min %' },
       { raw: epsMax, label: 'EPS max %' },
@@ -171,11 +265,12 @@ export default function EarningsFilterBuilder({ onApply, onCancel, initialValues
     if (!validate()) return;
     const def = {
       filter_type: 'earnings',
+      earnings_scope: scope,
       report_window: reportWindow,
-      eps_surprise_min: surpriseBoundIsSet(epsMin) ? parseSurprisePct(epsMin) : null,
-      eps_surprise_max: surpriseBoundIsSet(epsMax) ? parseSurprisePct(epsMax) : null,
-      revenue_surprise_min: surpriseBoundIsSet(revMin) ? parseSurprisePct(revMin) : null,
-      revenue_surprise_max: surpriseBoundIsSet(revMax) ? parseSurprisePct(revMax) : null,
+      eps_surprise_min: surpriseEnabled && surpriseBoundIsSet(epsMin) ? parseSurprisePct(epsMin) : null,
+      eps_surprise_max: surpriseEnabled && surpriseBoundIsSet(epsMax) ? parseSurprisePct(epsMax) : null,
+      revenue_surprise_min: surpriseEnabled && surpriseBoundIsSet(revMin) ? parseSurprisePct(revMin) : null,
+      revenue_surprise_max: surpriseEnabled && surpriseBoundIsSet(revMax) ? parseSurprisePct(revMax) : null,
     };
     if (reportWindow === 'month_range') {
       def.from_year = fromYear;
@@ -187,15 +282,16 @@ export default function EarningsFilterBuilder({ onApply, onCancel, initialValues
   }
 
   const preview = buildChipLabel({
+    earnings_scope: scope,
     report_window: reportWindow,
     from_year: fromYear,
     from_month: fromMonth,
     to_year: toYear,
     to_month: toMonth,
-    eps_surprise_min: surpriseBoundIsSet(epsMin) ? parseSurprisePct(epsMin) : null,
-    eps_surprise_max: surpriseBoundIsSet(epsMax) ? parseSurprisePct(epsMax) : null,
-    revenue_surprise_min: surpriseBoundIsSet(revMin) ? parseSurprisePct(revMin) : null,
-    revenue_surprise_max: surpriseBoundIsSet(revMax) ? parseSurprisePct(revMax) : null,
+    eps_surprise_min: surpriseEnabled && surpriseBoundIsSet(epsMin) ? parseSurprisePct(epsMin) : null,
+    eps_surprise_max: surpriseEnabled && surpriseBoundIsSet(epsMax) ? parseSurprisePct(epsMax) : null,
+    revenue_surprise_min: surpriseEnabled && surpriseBoundIsSet(revMin) ? parseSurprisePct(revMin) : null,
+    revenue_surprise_max: surpriseEnabled && surpriseBoundIsSet(revMax) ? parseSurprisePct(revMax) : null,
   });
 
   return (
@@ -247,13 +343,43 @@ export default function EarningsFilterBuilder({ onApply, onCancel, initialValues
             lineHeight: 1.45,
           }}
           >
-            Reported earnings by release date. Surprise % uses the same rules as the Earnings tab (0 = met estimate).
+            {SCOPE_HELP[scope]}
+            {surpriseEnabled && ' Surprise % uses the same rules as the Earnings tab (0 = met estimate).'}
+          </div>
+
+          <div>
+            <div style={sectionLabel}>Scope</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+              {SCOPE_OPTIONS.map(o => {
+                const active = scope === o.value;
+                return (
+                  <button
+                    key={o.value}
+                    type="button"
+                    onClick={() => handleScopeChange(o.value)}
+                    style={{
+                      padding: '6px 8px',
+                      borderRadius: 4,
+                      fontSize: 12,
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                      backgroundColor: active ? 'var(--accent-blue)' : 'var(--bg-tertiary)',
+                      border: `1px solid ${active ? 'var(--accent-blue)' : 'var(--border)'}`,
+                      color: active ? '#fff' : 'var(--text-secondary)',
+                      fontWeight: active ? 600 : 400,
+                    }}
+                  >
+                    {o.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           <div>
             <div style={sectionLabel}>Period</div>
             <select value={reportWindow} onChange={e => setReportWindow(e.target.value)} style={selectStyle}>
-              {WINDOW_OPTIONS.map(o => (
+              {windowOptions.map(o => (
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
             </select>
@@ -265,14 +391,14 @@ export default function EarningsFilterBuilder({ onApply, onCancel, initialValues
                 <div style={sectionLabel}>From</div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <select value={fromMonth} onChange={e => setFromMonth(Number(e.target.value))} style={selectStyle}>
-                    {renderMonthOptions(fromYear, maxYear, maxMonth)}
+                    {renderMonthOptions(fromYear, maxYear, boundMonth)}
                   </select>
                   <select
                     value={fromYear}
                     onChange={e => {
                       const y = Number(e.target.value);
                       setFromYear(y);
-                      setFromMonth(m => clampMonthForYear(y, m, maxYear, maxMonth));
+                      setFromMonth(m => clampMonthForYear(y, m, maxYear, boundMonth));
                     }}
                     style={{ ...selectStyle, width: 88, flexShrink: 0 }}
                   >
@@ -286,14 +412,14 @@ export default function EarningsFilterBuilder({ onApply, onCancel, initialValues
                 <div style={sectionLabel}>To</div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <select value={toMonth} onChange={e => setToMonth(Number(e.target.value))} style={selectStyle}>
-                    {renderMonthOptions(toYear, maxYear, maxMonth)}
+                    {renderMonthOptions(toYear, maxYear, boundMonth)}
                   </select>
                   <select
                     value={toYear}
                     onChange={e => {
                       const y = Number(e.target.value);
                       setToYear(y);
-                      setToMonth(m => clampMonthForYear(y, m, maxYear, maxMonth));
+                      setToMonth(m => clampMonthForYear(y, m, maxYear, boundMonth));
                     }}
                     style={{ ...selectStyle, width: 88, flexShrink: 0 }}
                   >
@@ -306,25 +432,29 @@ export default function EarningsFilterBuilder({ onApply, onCancel, initialValues
             </div>
           )}
 
-          <div>
+          <div style={{ opacity: surpriseEnabled ? 1 : 0.5 }}>
             <div style={sectionLabel}>Surprise % (optional)</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
               <div>
                 <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4 }}>EPS min</div>
-                <input value={epsMin} onChange={e => setEpsMin(e.target.value)} placeholder="—" style={inputStyle} title="Minimum EPS surprise % (≥). 0 = met or beat." />
+                <input value={epsMin} onChange={e => setEpsMin(e.target.value)} disabled={!surpriseEnabled} placeholder="—" style={inputStyle} title="Minimum EPS surprise % (≥). 0 = met or beat." />
               </div>
               <div>
                 <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4 }}>EPS max</div>
-                <input value={epsMax} onChange={e => setEpsMax(e.target.value)} placeholder="—" style={inputStyle} />
+                <input value={epsMax} onChange={e => setEpsMax(e.target.value)} disabled={!surpriseEnabled} placeholder="—" style={inputStyle} />
               </div>
               <div>
                 <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4 }}>Rev min</div>
-                <input value={revMin} onChange={e => setRevMin(e.target.value)} placeholder="—" style={inputStyle} title="Minimum revenue surprise % (≥). 0 = met or beat." />
+                <input value={revMin} onChange={e => setRevMin(e.target.value)} disabled={!surpriseEnabled} placeholder="—" style={inputStyle} title="Minimum revenue surprise % (≥). 0 = met or beat." />
               </div>
               <div>
                 <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4 }}>Rev max</div>
-                <input value={revMax} onChange={e => setRevMax(e.target.value)} placeholder="—" style={inputStyle} />
+                <input value={revMax} onChange={e => setRevMax(e.target.value)} disabled={!surpriseEnabled} placeholder="—" style={inputStyle} />
               </div>
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 6, lineHeight: 1.4 }}>
+              {scope === 'upcoming' && 'Surprise % needs a published result, so it is off for upcoming.'}
+              {scope === 'both' && 'Applies to the reported half only; upcoming names are never dropped by these bounds.'}
             </div>
           </div>
 

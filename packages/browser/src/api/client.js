@@ -57,19 +57,3 @@ export async function fetchTimeframes() {
   const res = await api.get('/api/timeframes');
   return res.data;
 }
-
-/** `instrumentType`: `stock` | `index` — same ticker can exist as both; notes are scoped per kind. */
-export async function getInstrumentNote(symbol, instrumentType = 'stock') {
-  const res = await api.get(`/api/instrument-notes/${encodeURIComponent(symbol)}`, {
-    params: { type: instrumentType },
-  });
-  return res.data;
-}
-
-export async function putInstrumentNote(symbol, { instrumentType = 'stock', note = '' } = {}) {
-  const res = await api.put(`/api/instrument-notes/${encodeURIComponent(symbol)}`, {
-    instrument_type: instrumentType,
-    note,
-  });
-  return res.data;
-}

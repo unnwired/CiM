@@ -28,11 +28,22 @@ export function snapshotPrice(snap) {
   return px != null ? Math.round(px * 100) / 100 : null;
 }
 
+/** Prefer live 1D % over stale server 0% (same rule as chart header). */
+export function resolveStockRowDayChangePct(row, snap) {
+  const live = snapshotChangePct(snap);
+  if (live == null) return finite(row?.['Change %']);
+  const official = finite(row?.['Change %']);
+  if (official != null && Math.abs(official) < 0.005 && Math.abs(live) >= 0.005) {
+    return live;
+  }
+  return live;
+}
+
 /** Screener / portfolio table row (Symbol, Price, Change %). */
 export function applyPatchToStockRow(row, snap) {
   if (!row || !snap) return row;
   const px = snapshotPrice(snap);
-  const chg = snapshotChangePct(snap);
+  const chg = resolveStockRowDayChangePct(row, snap);
   if (px == null && chg == null) return row;
   const out = { ...row };
   if (px != null) out.Price = px;
@@ -84,16 +95,55 @@ export function applyPatchToMapIndexSummary(row, snap) {
   return { ...row, index_change_pct: chg };
 }
 
-/** Potential swings / generic { price, change_pct, symbol }. */
+/** Potential swings / constituents / generic { price, last_price, change_pct, symbol }. */
 export function applyPatchToGenericQuoteRow(row, snap) {
   if (!row || !snap) return row;
   const px = snapshotPrice(snap);
   const chg = snapshotChangePct(snap);
   if (px == null && chg == null) return row;
   const out = { ...row };
-  if (px != null) out.price = px;
+  if (px != null) {
+    out.price = px;
+    out.last_price = px;
+  }
   if (chg != null) out.change_pct = chg;
   return out;
+}
+
+/**
+ * Earnings beats row — Upstox live price + 1D %.
+ * 1M % is derived from live LTP vs month_ref_close captured at fetch time (no TradingView).
+ */
+export function applyPatchToEarningsRow(row, snap) {
+  if (!row || !snap) return row;
+  const px = snapshotPrice(snap);
+  const chg = snapshotChangePct(snap);
+  if (px == null && chg == null) return row;
+  const out = { ...row };
+  if (px != null) out.price = px;
+  if (chg != null) out.change_1d_pct = chg;
+  const ref = finite(row.month_ref_close);
+  if (px != null && ref != null && ref > 0) {
+    out.change_1m_pct = Math.round(((px - ref) / ref) * 10000) / 100;
+  }
+  return out;
+}
+
+/** Capture a fixed month reference close from fetch-time price + 1M % (for live 1M derivation). */
+export function monthRefCloseFromRow(row) {
+  const px = finite(row?.price);
+  const m1 = finite(row?.change_1m_pct);
+  if (px == null || px <= 0 || m1 == null) return null;
+  const denom = 1 + m1 / 100;
+  if (!Number.isFinite(denom) || Math.abs(denom) < 1e-9) return null;
+  return Math.round((px / denom) * 100) / 100;
+}
+
+export function attachEarningsMonthRefClose(row) {
+  if (!row || typeof row !== 'object') return row;
+  const ref = monthRefCloseFromRow(row);
+  if (ref == null) return row;
+  return { ...row, month_ref_close: ref };
 }
 
 /** P&L open row — price, 1D %, unrealized P/L and P/L % from session quote. */

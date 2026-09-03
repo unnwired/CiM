@@ -201,7 +201,14 @@ keep_server_py = frozenset({
     '__init__.py', 'app_code_crypto.py', 'cim_bootstrap.py', 'product_config.py',
     '_cim_dist_embedded.py', 'license_client.py', 'license_routes.py', 'http_ssl.py',
     'session_store.py', 'user_data_paths.py', 'web_auth.py', 'showcase_host_gate.py',
+    'client_user_agent.py', 'auth_social_proof.py',
 })
+# Drop stale encrypted copies of bootstrap modules (plaintext import path must win).
+for stem in sorted({p[:-3] if p.endswith('.py') else p for p in keep_server_py} | set(c.PLAINTEXT_BOOTSTRAP_STEMS)):
+    stale = server_dir / f'{stem}.pyc.enc'
+    if stale.is_file():
+        stale.unlink()
+        print(f'Removed stale encrypted bootstrap module: {stale.name}')
 for py_path in sorted(server_dir.glob('*.py')):
     if py_path.name in keep_server_py:
         continue
@@ -266,6 +273,8 @@ $plainFiles = @(
     "server\product_config.py",
     "server\license_client.py",
     "server\license_routes.py",
+    "server\client_user_agent.py",
+    "server\auth_social_proof.py",
     "server\session_store.py",
     "server\user_data_paths.py",
     "server\web_auth.py",

@@ -10,7 +10,6 @@ import StockListColumnHeader from '../components/StockListColumnHeader';
 import StockListGridCell from '../components/StockListGridCell';
 import { useStockListColumnWidths } from '../hooks/useStockListColumnWidths';
 import { columnWidthKey } from '../hooks/stockListColumnStorage';
-import InstrumentNotesIcon from '../components/InstrumentNotesIcon';
 import { formatMarketCap } from '../utils/formatMarketCap';
 
 const API = '';
@@ -19,7 +18,6 @@ const API = '';
 const INDEX_CONSTITUENT_COLS = [
   { key: 'symbol', widthKey: 'symbol', label: 'Symbol', width: 90 },
   { key: 'market_cap', widthKey: 'market_cap', label: 'Mkt Cap', width: 110 },
-  { key: 'note', widthKey: 'note', label: '', width: 36 },
   { key: 'last_price', widthKey: 'price', label: 'Price', width: 85 },
   { key: 'change_pct', widthKey: 'change_1d', label: '1D Chg %', width: 80 },
   { key: 'change_30d', widthKey: 'change_30d', label: '30D %', width: 80 },
@@ -46,7 +44,6 @@ export default function IndexConstituents({ index, onBack, onOpenChart }) {
   }, [index.symbol]);
 
   function handleSort(col) {
-    if (col === 'note') return;
     if (sortBy === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
     else { setSortBy(col); setSortDir('asc'); }
   }
@@ -124,7 +121,7 @@ export default function IndexConstituents({ index, onBack, onOpenChart }) {
       <div ref={headerScrollRef} style={{ ...stockListHeaderStripStyle, overflowX: 'hidden', overflowY: 'hidden' }}>
         <div style={stockListGridTrackStyle(gridTemplateColumns)}>
         {COLS.map((col, colIdx) => {
-          const sortable = col.key !== 'note';
+          const sortable = true;
           const activeSort = sortable && sortBy === col.key;
           const wk = columnWidthKey(col);
           return (
@@ -175,10 +172,8 @@ export default function IndexConstituents({ index, onBack, onOpenChart }) {
               onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'transparent'; }}
             >
               {COLS.map((col, colIdx) => (
-                <StockListGridCell key={col.key} colKey={col.key} isLast={colIdx === COLS.length - 1} onClick={col.key === 'note' ? e => e.stopPropagation() : undefined}>
-                  {col.key === 'note' ? (
-                    <InstrumentNotesIcon symbol={stock.symbol} instrumentType="stock" />
-                  ) : col.key === 'symbol' ? (
+                <StockListGridCell key={col.key} colKey={col.key} isLast={colIdx === COLS.length - 1}>
+                  {col.key === 'symbol' ? (
                     <span style={{
                       fontFamily: 'var(--font-mono)',
                       fontWeight: 600,

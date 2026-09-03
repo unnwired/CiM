@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import unittest
 
@@ -47,6 +48,33 @@ class TestEarningsPlusLookup(unittest.TestCase):
         attach_earnings_plus_flags(self.conn, rows)
         self.assertTrue(rows[0]["earnings_plus"])
         self.assertFalse(rows[1]["earnings_plus"])
+
+    def test_period_mismatch_excludes_stale_qualified(self):
+        self.conn.execute(
+            """
+            CREATE TABLE screener_quarterly (
+                symbol TEXT NOT NULL,
+                basis TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                fetched_at TEXT,
+                source_url TEXT,
+                PRIMARY KEY (symbol, basis)
+            )
+            """
+        )
+        payload = {
+            "periods": [
+                {"period": "Mar 2026", "date_key": "2026-03-31"},
+                {"period": "Jun 2026", "date_key": "2026-06-30"},
+            ]
+        }
+        self.conn.execute(
+            "INSERT INTO screener_quarterly VALUES (?,?,?,?,?)",
+            ("RELIANCE", "consolidated", json.dumps(payload), "t", None),
+        )
+        self.conn.commit()
+        q = read_qualified_symbols(self.conn, ["RELIANCE"])
+        self.assertEqual(q, set())
 
 
 if __name__ == "__main__":

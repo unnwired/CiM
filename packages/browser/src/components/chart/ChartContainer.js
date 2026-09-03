@@ -6,7 +6,7 @@ import {
   LineSeries,
   HistogramSeries,
 } from 'lightweight-charts';
-import { fetchChartData, fetchEarningsChartEvents } from '../../api/client';
+import { fetchChartData, fetchEarningsChartEvents, fetchStockDetail } from '../../api/client';
 import { useIntradayPatchOptional } from '../../intraday/useIntradayPatch';
 import { sanitizeBarsForDisplay } from '../../intraday/mergeLiveBars';
 import { CHART_DATA_UPDATED_EVENT, dispatchChromeIntroReadyOnce } from '../../chartEvents';
@@ -29,16 +29,66 @@ import {
   EARNINGS_MARKER_STATUS_COLOR,
   shouldShowEarningsMarkers,
 } from '../../utils/earningsChartMarkers';
+import {
+  buildAnchoredCorpMarkers,
+  buildBottomCorpMarkers,
+  mergeBottomChartMarkers,
+  shouldShowCorpMarkers,
+} from '../../utils/corpChartMarkers';
 import { daysSinceYmd, formatEarningsBadgeDate } from '../../utils/portfolioEarnings';
 import {
   chartTimeDiffMs,
   formatChartAxisLabel,
   normalizeChartTimeKey,
 } from '../../utils/chartTime';
+import {
+  appendFutureWhitespace,
+  buildFutureWhitespaceBars,
+} from '../../utils/chartFutureTime';
+import {
+  CROSSHAIR_RESTORE_GUARD_MS,
+  isSpuriousCrosshairMove,
+  restoreCrosshairAtPointY,
+  shouldBroadcastCrosshair,
+  shouldIgnoreCrosshairEvent,
+} from '../../utils/chartCrosshairPin';
+import {
+  CHART_RIGHT_PRICE_SCALE,
+  computeSeriesLeadOffset,
+  resolveSyncedCrosshairTime,
+  resolveSyncedCrosshairTimeToPrice,
+} from '../../utils/chartPanelSync';
 import { loadPersistedIndicatorPanelHeights } from '../../chartPrefs/indicatorPanelHeightsStore';
+
+/** In-memory Market Sector lookup so full-chart / split panels avoid repeat detail fetches. */
+const marketSectorCache = new Map();
+
+function normalizePricePanelTitle(title) {
+  if (title == null) return null;
+  const s = String(title).trim();
+  if (!s || s === '—' || s === '-') return null;
+  return s;
+}
+
+function fetchMarketSector(symbol) {
+  const key = String(symbol || '').trim().toUpperCase();
+  if (!key) return Promise.resolve(null);
+  if (marketSectorCache.has(key)) return Promise.resolve(marketSectorCache.get(key));
+  return fetchStockDetail(key)
+    .then((detail) => {
+      const sector = normalizePricePanelTitle(detail?.['Market Sector']);
+      marketSectorCache.set(key, sector);
+      return sector;
+    })
+    .catch(() => {
+      marketSectorCache.set(key, null);
+      return null;
+    });
+}
 
 const MIN_PANEL_H  = 80;
 const EARNINGS_PLUS_COLOR = '#d29922';
+
 
 /** Normalize LW chart times (string, BusinessDay, unix) for reliable bar lookup. */
 function normalizeChartTime(t) {
@@ -108,7 +158,7 @@ function changePctAtBarIndex(bars, idx, chartData, dayChangePctOverride, timefra
   const prev = bars[idx - 1];
   if (prev?.close == null || cur?.close == null || Number(prev.close) === 0) return null;
   const barPct = ((Number(cur.close) - Number(prev.close)) / Number(prev.close)) * 100;
-  if (idx === n - 1 && (!timeframe || timeframe === '1D' || timeframe === '4H')) {
+  if (idx === n - 1 && (!timeframe || timeframe === '1D' || timeframe === '4H' || timeframe === '30m')) {
     const dayPct = pickDayOverDayPctFromChartPayload(
       chartData ? { ...chartData, bars } : null,
       dayChangePctOverride,
@@ -142,6 +192,24 @@ function formatVolume(val) {
   if (val >= 1e6) return (val / 1e6).toFixed(2) + ' M';
   if (val >= 1e3) return (val / 1e3).toFixed(2) + ' K';
   return String(Math.round(val));
+}
+
+/** Suppress crosshair-move echo while applying programmatic setCrosshairPosition. */
+function runWithCrosshairMuted(mutedRef, fn) {
+  if (!fn) return;
+  if (mutedRef) mutedRef.current = true;
+  try {
+    fn();
+  } finally {
+    if (mutedRef) mutedRef.current = false;
+  }
+}
+
+function isCrosshairFromSelf(crosshairTime, syncKey) {
+  if (crosshairTime == null || !syncKey) return false;
+  if (typeof crosshairTime !== 'object') return false;
+  const src = crosshairTime.source;
+  return src != null && src === syncKey;
 }
 
 /** Bar-over-bar % on the loaded series (correct for 2D/2W/1M last candle). */
@@ -215,7 +283,7 @@ function baseChartOpts(width, height, timeframe = '1D') {
     },
     timeScale: {
       borderColor:    '#30363d',
-      timeVisible:    tf === '4H',
+      timeVisible:    tf === '4H' || tf === '30M',
       secondsVisible: false,
       rightOffset:    15,
     },
@@ -323,11 +391,12 @@ function HoverLegend({ items }) {
 // ─── PricePanel ──────────────────────────────────────────────────────────────
 
 function PricePanel({
-  width, height, chartData, timeframe = '1D', emas, volumeVisible, syncRef, syncMutedRef, panelResizeDragRef, markerRelayoutEpoch = 0, onHoverTime, onLastChange, onCrosshairMove, crosshairTime,
+  width, height, chartData, timeframe = '1D', emas, volumeVisible, syncRef, syncMutedRef, crosshairMutedRef, crosshairSyncKey, panelResizeDragRef, markerRelayoutEpoch = 0, onHoverTime, onLastChange, onCrosshairMove, crosshairTime,
   dayChangePctOverride,
   pricePanelTitle,
   earningsEvents = [],
   earningsPlusHelper = null,
+  corpMarkers = [],
   onEarningsMarkerSelect,
   drawingEnabled, drawings, setDrawings, activeTool, lineColor, lineWidth, selectedDrawingId, setSelectedDrawingId,
   isDrawingTarget, onPriceSurfaceMouseDownCapture, onRequestToolbarUpdate,
@@ -338,23 +407,29 @@ function PricePanel({
   const vol          = useRef(null);
   const [markerLayoutVersion, setMarkerLayoutVersion] = useState(0);
 
-  // Receive crosshair from sibling split panels
+  // Receive crosshair from sibling chart columns only — never echo back to the source panel.
   useEffect(() => {
     if (!crosshairTime || !chart.current || !candle.current) return;
+    if (isCrosshairFromSelf(crosshairTime, crosshairSyncKey)) return;
     try {
-      const { time, price } = crosshairTime;
+      const { time, price, pointY } = crosshairTime;
       if (!time) return;
-      // Convert the source panel's price to this panel's coordinate then back to price
-      // This makes the horizontal line free-flow at the same Y coordinate
-      const srcCoord = price != null
-        ? candle.current.priceToCoordinate(price)
-        : null;
-      const displayPrice = srcCoord != null
-        ? candle.current.coordinateToPrice(srcCoord)
-        : (price ?? 0);
-      chart.current.setCrosshairPosition(displayPrice ?? 0, time, candle.current);
+      runWithCrosshairMuted(crosshairMutedRef, () => {
+        let displayPrice = price ?? 0;
+        if (pointY != null && Number.isFinite(Number(pointY))) {
+          const fromY = candle.current.coordinateToPrice(Number(pointY));
+          if (fromY != null && Number.isFinite(Number(fromY))) displayPrice = Number(fromY);
+        } else if (price != null) {
+          const srcCoord = candle.current.priceToCoordinate(price);
+          if (srcCoord != null) {
+            const fromCoord = candle.current.coordinateToPrice(srcCoord);
+            if (fromCoord != null && Number.isFinite(Number(fromCoord))) displayPrice = Number(fromCoord);
+          }
+        }
+        chart.current.setCrosshairPosition(displayPrice, time, candle.current);
+      });
     } catch {}
-  }, [crosshairTime]);
+  }, [crosshairTime, crosshairSyncKey]);
 
   const emaMap       = useRef({});
   const bars         = useRef([]);
@@ -370,16 +445,58 @@ function PricePanel({
     bars.current = chartData.bars;
   }
   const barList = barListRef.current;
+  const futureWhitespaceBars = useMemo(
+    () => buildFutureWhitespaceBars(chartData?.bars, timeframe),
+    [chartData?.bars, timeframe],
+  );
+  const lastCandle = barList.length ? barList[barList.length - 1] : null;
+  const lastBarOhlcKey = lastCandle
+    ? `${lastCandle.time}|${lastCandle.open}|${lastCandle.high}|${lastCandle.low}|${lastCandle.close}`
+    : '';
+  const barsRevisionRef = useRef({ len: 0, lastKey: '' });
+  const userCrosshairPinRef = useRef(null);
+  const crosshairRestoreGuardUntilRef = useRef(0);
+  const lastCrosshairBroadcastRef = useRef(null);
+  const pointerActiveRef = useRef(false);
+  const lastPointerRef = useRef({ at: 0, y: null, x: null });
+
+  const restorePinnedCrosshair = useCallback((guardMs = CROSSHAIR_RESTORE_GUARD_MS) => {
+    const pin = userCrosshairPinRef.current;
+    if (!pin || !chart.current || !candle.current) return;
+    crosshairRestoreGuardUntilRef.current = Date.now() + guardMs;
+    runWithCrosshairMuted(crosshairMutedRef, () => {
+      restoreCrosshairAtPointY(chart.current, candle.current, pin);
+    });
+  }, [crosshairMutedRef]);
 
   useEffect(() => {
     if (!el.current || width <= 0 || innerH <= 0) return;
     dead.current     = false;
     rangeSetRef.current = false;
 
+    const host = el.current;
+    const onPointerMove = (ev) => {
+      pointerActiveRef.current = true;
+      lastPointerRef.current = { at: Date.now(), y: ev.offsetY, x: ev.offsetX };
+    };
+    const onPointerEnter = (ev) => {
+      pointerActiveRef.current = true;
+      lastPointerRef.current = { at: Date.now(), y: ev.offsetY, x: ev.offsetX };
+    };
+    const onPointerLeave = () => {
+      pointerActiveRef.current = false;
+      lastPointerRef.current = { at: 0, y: null, x: null };
+      userCrosshairPinRef.current = null;
+      lastCrosshairBroadcastRef.current = null;
+    };
+    host.addEventListener('pointermove', onPointerMove);
+    host.addEventListener('pointerenter', onPointerEnter);
+    host.addEventListener('pointerleave', onPointerLeave);
+
     const c = createChart(el.current, {
       ...baseChartOpts(width, innerH, timeframe),
       rightPriceScale: {
-        borderColor:  '#30363d',
+        ...CHART_RIGHT_PRICE_SCALE,
         scaleMargins: { top: 0.08, bottom: 0.15 },
       },
     });
@@ -395,12 +512,26 @@ function PricePanel({
     const vs = c.addSeries(HistogramSeries, {
       priceScaleId: 'vol', priceLineVisible: false, lastValueVisible: false,
     });
-    c.priceScale('vol').applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } });
+    c.priceScale('vol').applyOptions({
+      visible: false,
+      minimumWidth: 0,
+      scaleMargins: { top: 0.75, bottom: 0 },
+    });
     vol.current = vs;
 
     c.subscribeCrosshairMove(p => {
       if (dead.current) return;
+      if (crosshairMutedRef?.current) return;
+      if (shouldIgnoreCrosshairEvent(crosshairRestoreGuardUntilRef.current)) return;
+
       if (!p?.point || !p?.time) {
+        // Live bar updates make LW clear the crosshair — keep pin while pointer is still over chart.
+        if (pointerActiveRef.current && userCrosshairPinRef.current) {
+          restorePinnedCrosshair();
+          return;
+        }
+        userCrosshairPinRef.current = null;
+        lastCrosshairBroadcastRef.current = null;
         setHover(null);
         syncRef.current.forEach(entry => {
           if (entry.chart === c) return;
@@ -409,6 +540,25 @@ function PricePanel({
         if (onHoverTime) onHoverTime(null);
         return;
       }
+
+      const spurious = isSpuriousCrosshairMove({
+        pointerActive: pointerActiveRef.current,
+        lastPointerAt: lastPointerRef.current.at,
+        lastPointerY: lastPointerRef.current.y,
+        eventPointY: p.point.y,
+      });
+      if (spurious) {
+        if (userCrosshairPinRef.current) {
+          const yDiff = Math.abs(
+            Number(p.point.y) - Number(userCrosshairPinRef.current.pointY),
+          );
+          if (yDiff > 1.5) restorePinnedCrosshair();
+        }
+        return;
+      }
+
+      const pinY = lastPointerRef.current.y != null ? lastPointerRef.current.y : p.point.y;
+      userCrosshairPinRef.current = { time: p.time, pointY: pinY };
       const list = barListRef.current;
       const resolved = resolveHoverFromCrosshair(p, cs, list);
       if (!resolved) {
@@ -419,24 +569,36 @@ function PricePanel({
       setHover(resolved);
       if (onHoverTime) onHoverTime(p.time);
       if (onCrosshairMove) {
-        // Get the actual mouse Y coordinate price from this panel's price scale
         const price = candle.current
-          ? candle.current.coordinateToPrice(p.point.y)
+          ? candle.current.coordinateToPrice(pinY)
           : null;
-        onCrosshairMove({ time: p.time, price });
-      }
-      syncRef.current.forEach(entry => {
-        if (entry.chart === c || !entry.series) return;
-        let y = 0;
-        if (entry.indicatorKind === 'stoch') {
-          const k = seriesValueAtTime(chartData?.stochrsi?.k, p.time);
-          const d = seriesValueAtTime(chartData?.stochrsi?.d, p.time);
-          y = k != null && Number.isFinite(k) ? k : (d != null && Number.isFinite(d) ? d : 50);
-        } else if (entry.indicatorKind === 'macd') {
-          const m = seriesValueAtTime(chartData?.macd?.macd, p.time);
-          y = m != null && Number.isFinite(m) ? m : 0;
+        const payload = {
+          time: p.time,
+          price,
+          pointY: pinY,
+          pointX: p.point.x,
+          source: crosshairSyncKey || undefined,
+        };
+        if (shouldBroadcastCrosshair(lastCrosshairBroadcastRef.current, payload)) {
+          lastCrosshairBroadcastRef.current = payload;
+          onCrosshairMove(payload);
         }
-        try { entry.chart.setCrosshairPosition(y, p.time, entry.series); } catch {}
+      }
+      runWithCrosshairMuted(crosshairMutedRef, () => {
+        syncRef.current.forEach(entry => {
+          if (entry.chart === c || !entry.series) return;
+          let y = 0;
+          if (entry.indicatorKind === 'stoch') {
+            const k = seriesValueAtTime(chartData?.stochrsi?.k, p.time);
+            const d = seriesValueAtTime(chartData?.stochrsi?.d, p.time);
+            y = k != null && Number.isFinite(k) ? k : (d != null && Number.isFinite(d) ? d : 50);
+          } else if (entry.indicatorKind === 'macd') {
+            const m = seriesValueAtTime(chartData?.macd?.macd, p.time);
+            y = m != null && Number.isFinite(m) ? m : 0;
+          }
+          const targetTime = resolveSyncedCrosshairTime(c, p.point.x, p.time, entry.chart, entry.offset);
+          try { entry.chart.setCrosshairPosition(y, targetTime, entry.series); } catch {}
+        });
       });
     });
 
@@ -457,6 +619,9 @@ function PricePanel({
 
     return () => {
       dead.current = true;
+      host.removeEventListener('pointermove', onPointerMove);
+      host.removeEventListener('pointerenter', onPointerEnter);
+      host.removeEventListener('pointerleave', onPointerLeave);
       syncRef.current = syncRef.current.filter(e => e.chart !== c);
       try { c.remove(); } catch {}
       chart.current     = null;
@@ -481,7 +646,76 @@ function PricePanel({
   useEffect(() => {
     if (!candle.current || !chartData?.bars?.length) return;
     bars.current = chartData.bars;
-    candle.current.setData(chartData.bars);
+    const fullData = appendFutureWhitespace(chartData.bars, futureWhitespaceBars);
+    const len = chartData.bars.length;
+    const prev = barsRevisionRef.current;
+    const dataUnchanged = (
+      prev.len === len
+      && len > 0
+      && prev.lastKey !== ''
+      && prev.lastKey === lastBarOhlcKey
+    );
+    // Live refreshTick often rebuilds the bars array with identical OHLC.
+    // Calling setData on every tick resets LW crosshair and causes flicker.
+    if (dataUnchanged) {
+      return;
+    }
+    const canUpdateLastBar = (
+      prev.len === len
+      && len > 0
+      && prev.lastKey !== ''
+      && prev.lastKey !== lastBarOhlcKey
+    );
+
+    // Stretch mute across the LW paint that follows update/setData.
+    if (crosshairMutedRef) crosshairMutedRef.current = true;
+    crosshairRestoreGuardUntilRef.current = Date.now() + CROSSHAIR_RESTORE_GUARD_MS;
+    try {
+      if (canUpdateLastBar) {
+        try {
+          candle.current.update(fullData[len - 1]);
+        } catch {
+          candle.current.setData(fullData);
+        }
+      } else {
+        candle.current.setData(fullData);
+      }
+    } finally {
+      // Keep muted briefly so LW's post-update crosshair snap is ignored.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (crosshairMutedRef) crosshairMutedRef.current = false;
+        });
+      });
+    }
+    if (vol.current) {
+      if (canUpdateLastBar && volumeVisible) {
+        const b = chartData.bars[len - 1];
+        try {
+          vol.current.update({
+            time: b.time,
+            value: b.volume,
+            color: b.close >= b.open ? '#3fb95033' : '#f8514933',
+          });
+        } catch {
+          vol.current.setData(chartData.bars.map(b => ({
+            time: b.time, value: b.volume,
+            color: b.close >= b.open ? '#3fb95033' : '#f8514933',
+          })));
+        }
+      } else {
+        vol.current.setData(volumeVisible
+          ? chartData.bars.map(b => ({
+            time: b.time, value: b.volume,
+            color: b.close >= b.open ? '#3fb95033' : '#f8514933',
+          }))
+          : []
+        );
+      }
+    }
+
+    barsRevisionRef.current = { len, lastKey: lastBarOhlcKey };
+
     if (!rangeSetRef.current) {
       rangeSetRef.current = true;
       const total = chartData.bars.length;
@@ -490,19 +724,13 @@ function PricePanel({
         to:   total + 15,
       });
     }
-    setMarkerLayoutVersion(v => v + 1);
-  }, [candle.current, chartData?.bars]);
-
-  useEffect(() => {
-    if (!vol.current || !chartData?.bars?.length) return;
-    vol.current.setData(volumeVisible
-      ? chartData.bars.map(b => ({
-          time: b.time, value: b.volume,
-          color: b.close >= b.open ? '#3fb95033' : '#f8514933',
-        }))
-      : []
-    );
-  }, [vol.current, chartData?.bars, volumeVisible]);
+    if (userCrosshairPinRef.current) {
+      restorePinnedCrosshair();
+      requestAnimationFrame(() => restorePinnedCrosshair());
+    } else if (!canUpdateLastBar) {
+      setMarkerLayoutVersion(v => v + 1);
+    }
+  }, [candle.current, chartData?.bars, futureWhitespaceBars, lastBarOhlcKey, volumeVisible, restorePinnedCrosshair]);
 
   useEffect(() => {
     if (!chart.current || !candle.current) return;
@@ -545,15 +773,34 @@ function PricePanel({
       .sort((a, b) => b.earnings_release_date.localeCompare(a.earnings_release_date));
   }, [earningsLookup, barList]);
   const latestVisibleEarningsEvent = visibleEarningsEvents[0] || null;
+  const corpAnchored = useMemo(
+    () => buildAnchoredCorpMarkers(corpMarkers, barList.map((bar) => bar.time)),
+    [corpMarkers, barList],
+  );
+  const corpByAnchor = useMemo(() => {
+    const map = new Map();
+    corpAnchored.forEach((row) => map.set(row.chart_anchor_date, row));
+    return map;
+  }, [corpAnchored]);
+  const displayCorpEvent = hover
+    ? corpByAnchor.get(normalizeChartTime(hover.time))
+    : null;
   const bottomChartMarkers = useMemo(() => {
     if (!chart.current) return [];
-    return buildBottomEarningsMarkers(
+    const earnings = buildBottomEarningsMarkers(
       visibleEarningsEvents,
       barList.map(bar => bar.time),
       (time) => chart.current?.timeScale().timeToCoordinate(time) ?? null,
       width,
-    );
-  }, [visibleEarningsEvents, barList, width, markerLayoutVersion]);
+    ).map((m) => ({ ...m, markerKind: 'earnings', buttonLabel: 'E' }));
+    const corp = buildBottomCorpMarkers(
+      corpMarkers,
+      barList.map(bar => bar.time),
+      (time) => chart.current?.timeScale().timeToCoordinate(time) ?? null,
+      width,
+    ).map((m) => ({ ...m, markerKind: m.marker?.kind || 'corp', buttonLabel: m.label }));
+    return mergeBottomChartMarkers(earnings, corp);
+  }, [visibleEarningsEvents, corpMarkers, barList, width, markerLayoutVersion]);
   let displayIdx = -1;
   if (displayBar && barList.length >= 2) {
     if (!hover) {
@@ -580,6 +827,18 @@ function PricePanel({
       label: 'E',
       value: 'E',
       color: getEarningsMarkerColor(displayEarningsEvent.outcome_kind),
+    }] : []),
+    ...(displayCorpEvent?.kind === 'split' ? [{
+      kind: 'badge',
+      label: 'S',
+      value: 'S',
+      color: displayCorpEvent.color,
+    }] : []),
+    ...(displayCorpEvent?.kind === 'dividend' ? [{
+      kind: 'badge',
+      label: 'D',
+      value: 'D',
+      color: displayCorpEvent.color,
     }] : []),
     { label: 'V', value: displayBar.volume != null
         ? formatVolume(displayBar.volume) : '—',
@@ -719,12 +978,22 @@ function PricePanel({
           <button
             key={marker.id}
             type="button"
-            onClick={() => onEarningsMarkerSelect && onEarningsMarkerSelect(marker.event)}
+            onClick={() => {
+              if (marker.markerKind === 'earnings' && marker.event) {
+                onEarningsMarkerSelect && onEarningsMarkerSelect(marker.event);
+              }
+            }}
             aria-label={
-              `Open earnings details for ${marker.event.earnings_release_date}`
-              + (marker.event.comparison_note ? `. ${marker.event.comparison_note}` : '')
+              marker.markerKind === 'earnings'
+                ? `Open earnings details for ${marker.event.earnings_release_date}`
+                  + (marker.event.comparison_note ? `. ${marker.event.comparison_note}` : '')
+                : (marker.title || `${marker.buttonLabel} corporate action`)
             }
-            title={marker.event.comparison_note || ''}
+            title={
+              marker.markerKind === 'earnings'
+                ? (marker.event?.comparison_note || '')
+                : (marker.title || '')
+            }
             style={{
               position: 'absolute',
               left: marker.x,
@@ -745,7 +1014,7 @@ function PricePanel({
               boxShadow: '0 1px 4px rgba(0,0,0,0.35)',
             }}
           >
-            E
+            {marker.buttonLabel || 'E'}
           </button>
         ))}
         {drawingEnabled && (
@@ -794,6 +1063,10 @@ function StochRSIPanel({ width, height, chartData, timeframe = '1D', offset, onC
   const dead  = useRef(false);
   const [hover, setHover] = useState(null);
   const innerH = height - 24;
+  const futureWhitespaceBars = useMemo(
+    () => buildFutureWhitespaceBars(chartData?.bars, timeframe),
+    [chartData?.bars, timeframe],
+  );
 
   useEffect(() => {
     if (!el.current || width <= 0 || innerH <= 0) return;
@@ -801,9 +1074,8 @@ function StochRSIPanel({ width, height, chartData, timeframe = '1D', offset, onC
 
     const c = createChart(el.current, {
       ...baseChartOpts(width, innerH, timeframe),
-      // Fixed 0–100 band with vertical inset so the 100 guide + axis labels are not clipped at pane edges.
       rightPriceScale: {
-        borderColor: '#30363d',
+        ...CHART_RIGHT_PRICE_SCALE,
         scaleMargins: { top: 0.12, bottom: 0.1 },
       },
     });
@@ -855,13 +1127,16 @@ function StochRSIPanel({ width, height, chartData, timeframe = '1D', offset, onC
       syncRef.current.forEach(entry => {
         if (entry.chart === c || !entry.series) return;
         let y = 0;
+        let targetTime = p.time;
         if (entry.indicatorKind === 'price') {
           y = barCloseAtTime(chartData?.bars, p.time) ?? 0;
+          targetTime = resolveSyncedCrosshairTimeToPrice(c, p.point.x, p.time, entry.chart, offset);
         } else if (entry.indicatorKind === 'macd') {
           const m = seriesValueAtTime(chartData?.macd?.macd, p.time);
           y = m != null && Number.isFinite(m) ? m : 0;
+          targetTime = resolveSyncedCrosshairTime(c, p.point.x, p.time, entry.chart, entry.offset);
         }
-        try { entry.chart.setCrosshairPosition(y, p.time, entry.series); } catch {}
+        try { entry.chart.setCrosshairPosition(y, targetTime, entry.series); } catch {}
       });
       const k = kS.current ? p.seriesData?.get(kS.current) : null;
       const d = dS.current ? p.seriesData?.get(dS.current) : null;
@@ -905,9 +1180,11 @@ function StochRSIPanel({ width, height, chartData, timeframe = '1D', offset, onC
 
   useEffect(() => {
     if (!kS.current || !dS.current) return;
-    if (chartData?.stochrsi?.k?.length) kS.current.setData(chartData.stochrsi.k);
+    if (chartData?.stochrsi?.k?.length) {
+      kS.current.setData(appendFutureWhitespace(chartData.stochrsi.k, futureWhitespaceBars));
+    }
     if (chartData?.stochrsi?.d?.length) dS.current.setData(chartData.stochrsi.d);
-  }, [kS.current, chartData?.stochrsi]);
+  }, [kS.current, chartData?.stochrsi, futureWhitespaceBars]);
 
   const displayK = hoverTime && chartData?.stochrsi?.k
     ? findClosest(chartData.stochrsi.k, hoverTime)?.value ?? null
@@ -944,6 +1221,10 @@ function MACDPanel({ width, height, chartData, timeframe = '1D', offset, onClose
   const dead  = useRef(false);
   const [hover, setHover] = useState(null);
   const innerH = height - 24;
+  const futureWhitespaceBars = useMemo(
+    () => buildFutureWhitespaceBars(chartData?.bars, timeframe),
+    [chartData?.bars, timeframe],
+  );
 
   useEffect(() => {
     if (!el.current || width <= 0 || innerH <= 0) return;
@@ -951,7 +1232,10 @@ function MACDPanel({ width, height, chartData, timeframe = '1D', offset, onClose
 
     const c = createChart(el.current, {
       ...baseChartOpts(width, innerH, timeframe),
-      rightPriceScale: { borderColor: '#30363d', scaleMargins: { top: 0.1, bottom: 0.1 } },
+      rightPriceScale: {
+        ...CHART_RIGHT_PRICE_SCALE,
+        scaleMargins: { top: 0.1, bottom: 0.1 },
+      },
     });
     chart.current = c;
 
@@ -982,14 +1266,17 @@ function MACDPanel({ width, height, chartData, timeframe = '1D', offset, onClose
       syncRef.current.forEach(entry => {
         if (entry.chart === c || !entry.series) return;
         let y = 0;
+        let targetTime = p.time;
         if (entry.indicatorKind === 'price') {
           y = barCloseAtTime(chartData?.bars, p.time) ?? 0;
+          targetTime = resolveSyncedCrosshairTimeToPrice(c, p.point.x, p.time, entry.chart, offset);
         } else if (entry.indicatorKind === 'stoch') {
           const k = seriesValueAtTime(chartData?.stochrsi?.k, p.time);
           const d = seriesValueAtTime(chartData?.stochrsi?.d, p.time);
           y = k != null && Number.isFinite(k) ? k : (d != null && Number.isFinite(d) ? d : 50);
+          targetTime = resolveSyncedCrosshairTime(c, p.point.x, p.time, entry.chart, entry.offset);
         }
-        try { entry.chart.setCrosshairPosition(y, p.time, entry.series); } catch {}
+        try { entry.chart.setCrosshairPosition(y, targetTime, entry.series); } catch {}
       });
       const m = macdS.current ? p.seriesData?.get(macdS.current) : null;
       const s = sigS.current  ? p.seriesData?.get(sigS.current)  : null;
@@ -1048,9 +1335,11 @@ function MACDPanel({ width, height, chartData, timeframe = '1D', offset, onClose
         return { ...d, color };
       }));
     }
-    if (chartData?.macd?.macd?.length)   macdS.current.setData(chartData.macd.macd);
+    if (chartData?.macd?.macd?.length) {
+      macdS.current.setData(appendFutureWhitespace(chartData.macd.macd, futureWhitespaceBars));
+    }
     if (chartData?.macd?.signal?.length) sigS.current.setData(chartData.macd.signal);
-  }, [macdS.current, chartData?.macd]);
+  }, [macdS.current, chartData?.macd, futureWhitespaceBars]);
 
   const displayMacd = hoverTime && chartData?.macd?.macd
     ? findClosest(chartData.macd.macd, hoverTime)?.value ?? null
@@ -1108,12 +1397,42 @@ export default function ChartContainer({
 }) {
   const isPreloaded = preloadedData !== undefined;
   const intraday = useIntradayPatchOptional();
+  const intradayRef = useRef(intraday);
   const [_chartData, _setChartData] = useState(null);
   const [_loading,   _setLoading]   = useState(true);
   const [_error,     _setError]     = useState(null);
+  const [resolvedSector, setResolvedSector] = useState(null);
   const chartData = isPreloaded ? preloadedData : _chartData;
   const loading   = isPreloaded ? (preloadedLoading ?? true) : _loading;
   const error     = isPreloaded ? (preloadedError ?? null)   : _error;
+  const symbolLive = !!intraday?.isSymbolLive?.(symbol);
+  const sessionIntradayAllowed = !!intraday?.sessionIntradayAllowed;
+  const applyLiveOverlay = !!symbol && !!intraday?.enabled && sessionIntradayAllowed
+    && (liveToday || symbolLive);
+  const parentPricePanelTitle = normalizePricePanelTitle(pricePanelTitle);
+  const effectivePricePanelTitle = parentPricePanelTitle || resolvedSector || '—';
+
+  useEffect(() => {
+    intradayRef.current = intraday;
+  }, [intraday]);
+
+  // Full chart / movers / split views often omit Market Sector; resolve from stock detail.
+  useEffect(() => {
+    if (parentPricePanelTitle) {
+      setResolvedSector(null);
+      return undefined;
+    }
+    if (!symbol) {
+      setResolvedSector(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setResolvedSector(null);
+    fetchMarketSector(symbol).then((sector) => {
+      if (!cancelled) setResolvedSector(sector);
+    });
+    return () => { cancelled = true; };
+  }, [symbol, parentPricePanelTitle]);
 
   const displayChartData = useMemo(() => {
     if (!chartData?.bars?.length) return chartData;
@@ -1121,13 +1440,16 @@ export default function ChartContainer({
     let dayChangePct = chartData.day_change_pct;
     let liveTodayBar = chartData.live_today_bar;
 
-    if (liveToday && intraday?.enabled && symbol) {
+    if (applyLiveOverlay) {
       const merged = intraday.applyToChartBars(bars, symbol, timeframe);
       const hasLiveBar = merged.bars?.some((b) => b.live);
-      if (hasLiveBar || merged.dayChangePct != null) {
+      if (hasLiveBar) {
         bars = sanitizeBarsForDisplay(merged.bars);
-        dayChangePct = merged.dayChangePct ?? dayChangePct;
-        liveTodayBar = hasLiveBar ?? liveTodayBar;
+        liveTodayBar = true;
+      }
+      // Server day_change_pct matches list — live patch must not override it.
+      if (chartData.day_change_pct == null && merged.dayChangePct != null) {
+        dayChangePct = merged.dayChangePct;
       }
     }
 
@@ -1140,9 +1462,31 @@ export default function ChartContainer({
       day_change_pct: dayChangePct,
       live_today_bar: liveTodayBar,
     };
-  }, [chartData, liveToday, intraday, intraday?.refreshTick, symbol, timeframe]);
+  }, [chartData, applyLiveOverlay, intraday, intraday?.refreshTick, symbol, timeframe]);
+
+  // Keep a stable bars reference when OHLC did not change — stops LW setData flicker on live ticks.
+  const stableDisplayRef = useRef(null);
+  const displayChartDataStable = useMemo(() => {
+    const bars = displayChartData?.bars;
+    if (!bars?.length) {
+      stableDisplayRef.current = displayChartData;
+      return displayChartData;
+    }
+    const last = bars[bars.length - 1];
+    const key = `${bars.length}|${last.time}|${last.open}|${last.high}|${last.low}|${last.close}|${displayChartData.day_change_pct ?? ''}`;
+    const prev = stableDisplayRef.current;
+    if (prev && prev.__ohlcKey === key) return prev;
+    const next = { ...displayChartData, __ohlcKey: key };
+    stableDisplayRef.current = next;
+    return next;
+  }, [displayChartData]);
+
+
   const syncRef      = useRef([]);
   const syncMutedRef = useRef(false);
+  const crosshairMutedRef = useRef(false);
+  const displayChartDataRef = useRef(displayChartDataStable);
+  displayChartDataRef.current = displayChartDataStable;
   const panelResizeDragRef = useRef(false);
   const snapNeighborsRef = useRef({ left: null, right: null });
   const activeResizeEdgeRef = useRef(null);
@@ -1154,6 +1498,11 @@ export default function ChartContainer({
   const [earningsPlusHelper, setEarningsPlusHelper] = useState(null);
   const [selectedEarningsEvent, setSelectedEarningsEvent] = useState(null);
   const shouldLoadChartEarningsMarkers = shouldShowEarningsMarkers(timeframe);
+  const corpMarkers = useMemo(() => {
+    if (!shouldShowCorpMarkers(timeframe)) return [];
+    const rows = displayChartDataStable?.corp_markers;
+    return Array.isArray(rows) ? rows : [];
+  }, [displayChartDataStable?.corp_markers, timeframe]);
 
   const effectiveDrawingScope = CHART_DRAWINGS_ENABLED ? drawingScopeId : null;
   const { drawings, setDrawings } = useChartDrawings(effectiveDrawingScope);
@@ -1227,39 +1576,48 @@ export default function ChartContainer({
     setSelectedEarningsEvent(null);
   }, [symbol]);
 
-  // Sync charts when crosshair arrives from sibling panel (split layouts). Stock `price`
-  // must only apply to the candle series — never to StochRSI (0–100) or MACD scales.
+  // Sync indicator panes when crosshair arrives from a sibling chart column.
   useEffect(() => {
     if (!crosshairTime) {
-      syncRef.current.forEach(entry => {
-        try { entry.chart.clearCrosshairPosition(); } catch {}
+      runWithCrosshairMuted(crosshairMutedRef, () => {
+        syncRef.current.forEach(entry => {
+          try { entry.chart.clearCrosshairPosition(); } catch {}
+        });
       });
       return;
     }
-    const t = typeof crosshairTime === 'object' ? crosshairTime.time : crosshairTime;
-    const p = typeof crosshairTime === 'object' ? crosshairTime.price : null;
+    if (isCrosshairFromSelf(crosshairTime, drawingScopeId)) return;
+    const t = crosshairTime.time ?? crosshairTime;
+    const p = crosshairTime.price ?? null;
     if (!t) return;
     setHoverTime(t);
-    syncRef.current.forEach(entry => {
-      if (!entry.chart || !entry.series) return;
-      if (entry.isPriceMaster) {
-        try { entry.chart.setCrosshairPosition(p ?? 0, t, entry.series); } catch {}
-        return;
-      }
-      let y = 50;
-      if (entry.indicatorKind === 'stoch') {
-        const k = seriesValueAtTime(chartData?.stochrsi?.k, t);
-        const d = seriesValueAtTime(chartData?.stochrsi?.d, t);
-        y = k != null && Number.isFinite(k) ? k : (d != null && Number.isFinite(d) ? d : 50);
-      } else if (entry.indicatorKind === 'macd') {
-        const m = seriesValueAtTime(chartData?.macd?.macd, t);
-        y = m != null && Number.isFinite(m) ? m : 0;
-      } else {
-        y = 0;
-      }
-      try { entry.chart.setCrosshairPosition(y, t, entry.series); } catch {}
+    const data = displayChartDataRef.current;
+    runWithCrosshairMuted(crosshairMutedRef, () => {
+      syncRef.current.forEach(entry => {
+        if (!entry.chart || !entry.series) return;
+        if (entry.isPriceMaster) {
+          try { entry.chart.setCrosshairPosition(p ?? 0, t, entry.series); } catch {}
+          return;
+        }
+        let y = 50;
+        if (entry.indicatorKind === 'stoch') {
+          const k = seriesValueAtTime(data?.stochrsi?.k, t);
+          const d = seriesValueAtTime(data?.stochrsi?.d, t);
+          y = k != null && Number.isFinite(k) ? k : (d != null && Number.isFinite(d) ? d : 50);
+        } else if (entry.indicatorKind === 'macd') {
+          const m = seriesValueAtTime(data?.macd?.macd, t);
+          y = m != null && Number.isFinite(m) ? m : 0;
+        } else {
+          y = 0;
+        }
+        const priceEntry = syncRef.current.find((e) => e.isPriceMaster);
+        const targetTime = priceEntry?.chart && entry.offset
+          ? resolveSyncedCrosshairTime(priceEntry.chart, crosshairTime.pointX, t, entry.chart, entry.offset)
+          : t;
+        try { entry.chart.setCrosshairPosition(y, targetTime, entry.series); } catch {}
+      });
     });
-  }, [crosshairTime, chartData]);
+  }, [crosshairTime, drawingScopeId]);
 
   const wrapperRef   = useRef(null);
   const [dims, setDims] = useState({ width: 0, height: 0 });
@@ -1330,24 +1688,35 @@ export default function ChartContainer({
   const dayChangeOverrideRef = useRef(dayChangePctOverride);
   dayChangeOverrideRef.current = dayChangePctOverride;
 
+  const reloadGenRef = useRef(0);
+  const applyLiveOverlayRef = useRef(applyLiveOverlay);
+  applyLiveOverlayRef.current = applyLiveOverlay;
+  const liveTodayRef = useRef(liveToday);
+  liveTodayRef.current = liveToday;
   const reloadChart = useCallback(({ background = false } = {}) => {
     if (isPreloaded) return;
     if (!symbol) return;
+    const gen = ++reloadGenRef.current;
     if (!background) {
       _setLoading(true);
       _setError(null);
       _setChartData(null);
     }
     const emaPeriods = emas.map(e => e.period);
-    fetchChartData(symbol, timeframe, emaPeriods, 700, liveToday)
+    const reqSymbol = symbol;
+    const reqTf = timeframe;
+    fetchChartData(reqSymbol, reqTf, emaPeriods, 700, liveTodayRef.current)
       .then((data) => {
-        if (liveToday && intraday?.enabled) {
-          const merged = intraday.applyToChartBars(data.bars, symbol, timeframe);
+        if (gen !== reloadGenRef.current) return;
+        const liveApi = intradayRef.current;
+        if (applyLiveOverlayRef.current && liveApi?.enabled) {
+          const merged = liveApi.applyToChartBars(data.bars, reqSymbol, reqTf);
+          const hasLiveBar = merged.bars?.some((b) => b.live);
           data = {
             ...data,
-            bars: merged.bars,
-            day_change_pct: merged.dayChangePct ?? data.day_change_pct,
-            live_today_bar: merged.bars?.some((b) => b.live) ?? data.live_today_bar,
+            bars: hasLiveBar ? merged.bars : data.bars,
+            day_change_pct: data.day_change_pct ?? merged.dayChangePct ?? null,
+            live_today_bar: hasLiveBar ?? data.live_today_bar,
           };
         }
         _setChartData(data);
@@ -1362,14 +1731,23 @@ export default function ChartContainer({
           }
         }
       })
-      .catch(err => { _setError(err.message || 'Failed to load'); _setLoading(false); });
-  }, [isPreloaded, symbol, timeframe, emaKey, liveToday, intraday]);
+      .catch((err) => {
+        if (gen !== reloadGenRef.current) return;
+        _setError(err.message || 'Failed to load');
+        _setLoading(false);
+      });
+  // liveToday / applyLiveOverlay via refs — avoid full reload thrash on live flag flips.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPreloaded, symbol, timeframe, emaKey, emas]);
 
   useEffect(() => {
     if (!liveToday || !intraday?.enabled || intraday.refreshTick == null) return undefined;
+    if (intraday.liveStreamActive) return undefined;
+    // Overlay merge already updates bars on refreshTick — full reload resets crosshair/scale.
+    if (applyLiveOverlay) return undefined;
     reloadChart({ background: true });
     return undefined;
-  }, [intraday?.refreshTick, intraday?.enabled, liveToday, reloadChart]);
+  }, [intraday?.refreshTick, intraday?.enabled, intraday?.liveStreamActive, liveToday, applyLiveOverlay, reloadChart]);
 
   useEffect(() => {
     reloadChart();
@@ -1381,25 +1759,30 @@ export default function ChartContainer({
 
   useEffect(() => {
     if (!liveToday || liveRefreshKey == null) return undefined;
+    if (intraday?.liveStreamActive) return undefined;
+    if (applyLiveOverlay) return undefined;
     reloadChart({ background: true });
     return undefined;
-  }, [liveRefreshKey, liveToday, reloadChart]);
+  }, [liveRefreshKey, liveToday, intraday?.liveStreamActive, applyLiveOverlay, reloadChart]);
 
   useEffect(() => {
-    if (!isPreloaded || loading || error || !displayChartData?.bars?.length) return;
+    if (!isPreloaded || loading || error || !displayChartDataStable?.bars?.length) return;
     dispatchChromeIntroReadyOnce();
     const cb = onLastChangeRef.current;
     if (!cb) return;
-    const pct = pickDayOverDayPctFromChartPayload(displayChartData, dayChangeOverrideRef.current);
-    const last = displayChartData.bars[displayChartData.bars.length - 1];
+    const pct = pickDayOverDayPctFromChartPayload(displayChartDataStable, dayChangeOverrideRef.current);
+    const last = displayChartDataStable.bars[displayChartDataStable.bars.length - 1];
     if (pct == null || !Number.isFinite(pct) || last?.close == null) return;
     cb(Math.round(pct * 100) / 100, last.close);
-  }, [isPreloaded, loading, error, displayChartData, liveToday, intraday?.refreshTick]);
+  }, [isPreloaded, loading, error, displayChartDataStable, liveToday, intraday?.refreshTick]);
 
   useEffect(() => {
     if (!onLastChange || dayChangePctOverride == null || !Number.isFinite(Number(dayChangePctOverride))) return;
-    onLastChange(Math.round(Number(dayChangePctOverride) * 100) / 100, null);
-  }, [onLastChange, dayChangePctOverride, symbol]);
+    const bars = displayChartDataStable?.bars;
+    const lastClose = bars?.length ? Number(bars[bars.length - 1]?.close) : null;
+    const price = Number.isFinite(lastClose) ? lastClose : null;
+    onLastChange(Math.round(Number(dayChangePctOverride) * 100) / 100, price);
+  }, [onLastChange, dayChangePctOverride, symbol, displayChartDataStable]);
 
   useEffect(() => {
     const onChartDataUpdated = () => reloadChart({ background: true });
@@ -1477,11 +1860,8 @@ export default function ChartContainer({
   );
   const priceH = Math.max(MIN_PANEL_H, dims.height - indicatorTotal);
 
-  const priceLen    = displayChartData?.bars?.length        || 0;
-  const stochLen    = displayChartData?.stochrsi?.k?.length || 0;
-  const macdLen     = displayChartData?.macd?.macd?.length  || 0;
-  const stochOffset = Math.max(0, priceLen - stochLen);
-  const macdOffset  = Math.max(0, priceLen - macdLen);
+  const stochOffset = computeSeriesLeadOffset(displayChartDataStable?.bars, displayChartDataStable?.stochrsi?.k);
+  const macdOffset  = computeSeriesLeadOffset(displayChartDataStable?.bars, displayChartDataStable?.macd?.macd);
 
   if (loading) return (
     <div ref={wrapperRef} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
@@ -1507,15 +1887,18 @@ export default function ChartContainer({
             key={`price-${dims.width}-${timeframe}`}
             width={dims.width}
             height={priceH}
-            chartData={displayChartData}
+            chartData={displayChartDataStable}
             timeframe={timeframe}
             emas={emas}
             volumeVisible={volumeVisible}
             earningsEvents={earningsEvents}
             earningsPlusHelper={earningsPlusHelper}
+            corpMarkers={corpMarkers}
             onEarningsMarkerSelect={setSelectedEarningsEvent}
             syncRef={syncRef}
             syncMutedRef={syncMutedRef}
+            crosshairMutedRef={crosshairMutedRef}
+            crosshairSyncKey={drawingScopeId}
             panelResizeDragRef={panelResizeDragRef}
             markerRelayoutEpoch={markerRelayoutEpoch}
             onCrosshairMove={onCrosshairMove}
@@ -1523,7 +1906,7 @@ export default function ChartContainer({
             onHoverTime={setHoverTime}
             onLastChange={onLastChange}
             dayChangePctOverride={dayChangePctOverride}
-            pricePanelTitle={pricePanelTitle}
+            pricePanelTitle={effectivePricePanelTitle}
             drawingEnabled={drawingEnabled}
             drawings={drawings}
             setDrawings={setDrawings}
@@ -1546,7 +1929,7 @@ export default function ChartContainer({
             const commonProps = {
               width:      dims.width,
               height:     h,
-              chartData:  displayChartData,
+              chartData:  displayChartDataStable,
               timeframe,
               offset,
               syncRef,

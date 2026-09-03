@@ -285,6 +285,46 @@ def fetch_yfinance_quotes(symbols: list[str]) -> list[dict[str, Any]]:
     return list(entries_by_sym.values())
 
 
+def fetch_upstox_quotes(
+    symbols: list[str],
+    *,
+    index_names: Optional[dict[str, str]] = None,
+) -> tuple[list[dict[str, Any]], Optional[str]]:
+    """Upstox full quotes when Analytics Token is configured."""
+    try:
+        from server import upstox_client
+
+        return upstox_client.fetch_quotes(symbols, index_names=index_names)
+    except Exception as e:
+        return [], str(e)
+
+
+def fetch_primary_equity_quotes(symbols: list[str]) -> list[dict[str, Any]]:
+    """Equity live quotes — Upstox only (no Yahoo on regular path)."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw in symbols or []:
+        sym = str(raw or "").strip().upper()
+        if not sym or sym in seen:
+            continue
+        if not _is_patchable_equity_symbol(sym):
+            continue
+        seen.add(sym)
+        ordered.append(sym)
+    if not ordered:
+        return []
+
+    try:
+        from server import upstox_config
+
+        if upstox_config.market_data_enabled():
+            rows, _err = fetch_upstox_quotes(ordered)
+            return rows or []
+    except Exception:
+        pass
+    return []
+
+
 def fetch_nse_all_indices() -> dict[str, dict[str, Any]]:
     """NSE /api/allIndices — cached briefly to keep patch requests fast."""
     import time as time_module
@@ -349,25 +389,37 @@ def fetch_live_quotes(
     entries: list[dict[str, Any]] = []
     errors: list[str] = []
 
+    upstox_enabled = False
+    try:
+        from server import upstox_config
+
+        upstox_enabled = upstox_config.market_data_enabled()
+    except Exception:
+        upstox_enabled = False
+
     if indices:
-        nse_idx = fetch_nse_all_indices()
-        for sym in indices:
-            name = str(index_names.get(sym) or sym).strip().upper()
-            if name.startswith("NSE:"):
-                name = name[4:].replace("_", " ")
-            snap = nse_idx.get(name) or nse_idx.get(sym)
-            if snap:
-                entries.append({**snap, "symbol": sym})
-        missing_idx = [s for s in indices if s not in {e["symbol"] for e in entries}]
-        if missing_idx:
-            entries.extend(fetch_yfinance_quotes(missing_idx))
+        idx_entries: list[dict[str, Any]] = []
+        if upstox_enabled:
+            ux_rows, ux_err = fetch_upstox_quotes(indices, index_names=index_names)
+            if ux_rows:
+                idx_entries.extend(ux_rows)
+            if ux_err and not ux_rows:
+                errors.append(ux_err)
+        elif indices:
+            errors.append("Upstox market data is not configured for indices.")
+        entries.extend(idx_entries)
 
     if equity:
-        yf_rows = fetch_yfinance_quotes(equity)
-        got = {r["symbol"] for r in yf_rows}
-        entries.extend(yf_rows)
-        if len(got) < len(equity):
-            errors.append("Some symbols had no Yahoo quote.")
+        if upstox_enabled:
+            ux_rows, ux_err = fetch_upstox_quotes(equity)
+            got = {r["symbol"] for r in ux_rows}
+            entries.extend(ux_rows)
+            if ux_err and len(got) < len(equity):
+                errors.append(ux_err)
+            if len(got) < len(equity):
+                errors.append(f"Upstox miss for {len(equity) - len(got)} equity symbol(s).")
+        else:
+            errors.append("Upstox market data is not configured.")
 
     if not entries and symbols:
         errors.append("Live quote providers returned no data.")

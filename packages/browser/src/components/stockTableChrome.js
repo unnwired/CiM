@@ -1,6 +1,8 @@
 /**
- * Shared layout for Pulse / Portfolio / Watchlist stock list panes (header + rows + footer).
+ * Shared layout for list + chart split pages (header + rows + full-width status footer).
  * Keep these in sync when adjusting any of those tables.
+ *
+ * Body shell: StockListSplitBody — column → [list|divider|chart] → full-width footer.
  */
 export const STOCK_LIST_HEADER_HEIGHT = 36;
 export const STOCK_LIST_ROW_HEIGHT = 32;
@@ -12,9 +14,29 @@ export const stockListHeaderStripStyle = {
   flexShrink: 0,
 };
 
+/** Outer column wrapping the split row + page-wide footer. */
+export const stockListSplitColumnStyle = {
+  flex: 1,
+  minHeight: 0,
+  display: 'flex',
+  flexDirection: 'column',
+  overflow: 'hidden',
+};
+
+/** Horizontal list | divider | chart row (put wrapperRef / resize measurements here). */
+export const stockListSplitRowStyle = {
+  flex: 1,
+  minHeight: 0,
+  display: 'flex',
+  overflow: 'hidden',
+};
+
+/** Full-width status bar under the split (not nested in the list pane). */
 export const stockListFooterStripStyle = {
   height: STOCK_LIST_FOOTER_HEIGHT,
   flexShrink: 0,
+  width: '100%',
+  boxSizing: 'border-box',
   backgroundColor: 'var(--bg-secondary)',
   borderTop: '1px solid var(--border)',
   display: 'flex',

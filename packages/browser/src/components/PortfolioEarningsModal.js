@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { EarningsQuarterlyPanelContent } from './EarningsQuarterlyPanel';
 import ExternalFinancialsLinks from './ExternalFinancialsLinks';
@@ -22,6 +22,10 @@ export default function PortfolioEarningsModal({
   const dialogRef = useRef(null);
   const closeButtonRef = useRef(null);
   const previouslyFocusedRef = useRef(null);
+  const [screenerBasis, setScreenerBasis] = useState('consolidated');
+  const onBasisChange = useCallback((next) => {
+    setScreenerBasis(next === 'standalone' ? 'standalone' : 'consolidated');
+  }, []);
 
   useEffect(() => {
     previouslyFocusedRef.current = document.activeElement;
@@ -148,6 +152,7 @@ export default function PortfolioEarningsModal({
             symbol={symbol}
             profileWidthPx={PORTFOLIO_EARNINGS_MODAL_PROFILE_WIDTH_PX}
             scrollTableToLatest
+            onBasisChange={onBasisChange}
           />
         </div>
         <div
@@ -180,6 +185,7 @@ export default function PortfolioEarningsModal({
             layout="inline"
             includeTvEarnings
             onOpenChart={onOpenChart || null}
+            basis={screenerBasis}
             screenerLabel="Screener ↗"
             tradingViewLabel="TV Overview ↗"
           />

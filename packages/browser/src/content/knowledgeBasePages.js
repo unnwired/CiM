@@ -8,6 +8,7 @@ export const KNOWLEDGE_BASE_PAGE_GROUPS = [
 export const KNOWLEDGE_BASE_PAGES = [
   { id: 'dashboard', label: 'NSE', group: 'main' },
   { id: 'indices', label: 'Indices', group: 'main' },
+  { id: 'funds', label: 'Funds', group: 'main' },
   { id: 'market-map', label: 'Market Map', group: 'main' },
   { id: 'market-pulse', label: 'Market Pulse', group: 'main' },
   { id: 'market-movers', label: 'Market Movers', group: 'main' },

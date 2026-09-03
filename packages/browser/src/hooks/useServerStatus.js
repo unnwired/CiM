@@ -25,11 +25,12 @@ export function useServerStatus(enabled) {
       try {
         const healthRes = await api.get('/api/health');
         if (cancelled) return;
-        setHealthState(mapHealthToDot(
+        const next = mapHealthToDot(
           healthRes.data,
           healthRes.status >= 200 && healthRes.status < 300,
-        ));
-      } catch {
+        );
+        setHealthState(next);
+      } catch (err) {
         if (!cancelled) setHealthState('red');
       }
     }

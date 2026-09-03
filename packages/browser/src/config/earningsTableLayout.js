@@ -1,13 +1,15 @@
 /** Shared earnings table + quarterly expand panel layout (upcoming is the reference). */
 
-export const EARNINGS_UPCOMING_COLUMN_COUNT = 8;
-export const EARNINGS_REPORTED_COLUMN_COUNT = 12;
+export const EARNINGS_UPCOMING_COLUMN_COUNT = 10;
+export const EARNINGS_REPORTED_COLUMN_COUNT = 14;
 
 /** Fixed column widths so reported/upcoming tables and expand panels align. */
 export const EARNINGS_COL_WIDTH = {
   symbol: 100,
+  sector: 120,
   marketCap: 76,
   price: 76,
+  pe: 56,
   changePct: 62,
   date: 92,
   eps: 68,
@@ -17,8 +19,10 @@ export const EARNINGS_COL_WIDTH = {
 
 const UPCOMING_WIDTH_SUM =
   EARNINGS_COL_WIDTH.symbol
+  + EARNINGS_COL_WIDTH.sector
   + EARNINGS_COL_WIDTH.marketCap
   + EARNINGS_COL_WIDTH.price
+  + EARNINGS_COL_WIDTH.pe
   + EARNINGS_COL_WIDTH.changePct * 2
   + EARNINGS_COL_WIDTH.date
   + EARNINGS_COL_WIDTH.eps
@@ -33,11 +37,13 @@ const REPORTED_EXTRA_SUM =
 export const EARNINGS_UPCOMING_TABLE_MIN_WIDTH_PX = UPCOMING_WIDTH_SUM;
 export const EARNINGS_REPORTED_TABLE_MIN_WIDTH_PX = UPCOMING_WIDTH_SUM + REPORTED_EXTRA_SUM;
 
-/** Col widths for <colgroup> — upcoming (8 cols). */
+/** Col widths for <colgroup> — upcoming (10 cols). */
 export const UPCOMING_COLGROUP = [
   EARNINGS_COL_WIDTH.symbol,
+  EARNINGS_COL_WIDTH.sector,
   EARNINGS_COL_WIDTH.marketCap,
   EARNINGS_COL_WIDTH.price,
+  EARNINGS_COL_WIDTH.pe,
   EARNINGS_COL_WIDTH.changePct,
   EARNINGS_COL_WIDTH.changePct,
   EARNINGS_COL_WIDTH.date,
@@ -45,9 +51,9 @@ export const UPCOMING_COLGROUP = [
   EARNINGS_COL_WIDTH.revenue,
 ];
 
-/** Col widths for <colgroup> — reported (12 cols). */
+/** Col widths for <colgroup> — reported (14 cols). */
 export const REPORTED_COLGROUP = [
-  ...UPCOMING_COLGROUP.slice(0, 6),
+  ...UPCOMING_COLGROUP.slice(0, 8),
   EARNINGS_COL_WIDTH.eps,
   EARNINGS_COL_WIDTH.eps,
   EARNINGS_COL_WIDTH.surprise,

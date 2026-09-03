@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
@@ -226,18 +227,25 @@ class WebHostAuthMiddleware(BaseHTTPMiddleware):
         set_request_context(None, None)
         path = request.url.path or ""
 
+        # Health must never await license refresh or session I/O — it is the liveness probe.
+        if path == "/api/health":
+            return await call_next(request)
+
         if not path.startswith("/api/") or _is_public_api_path(path):
             if path.startswith("/api/"):
                 sid, session = load_browser_session(self.base_dir, request)
                 if sid and session:
-                    session = ensure_browser_session_fresh(self.base_dir, sid) or session
+                    # Never block the ASGI event loop on Cloudflare token refresh.
+                    session = await run_in_threadpool(
+                        ensure_browser_session_fresh, self.base_dir, sid
+                    ) or session
                     set_request_context(sid, session)
             return await call_next(request)
 
         sid, session = load_browser_session(self.base_dir, request)
         if not sid:
             return JSONResponse(status_code=401, content={"detail": "Sign in required"})
-        session = ensure_browser_session_fresh(self.base_dir, sid)
+        session = await run_in_threadpool(ensure_browser_session_fresh, self.base_dir, sid)
         if not session or not session_is_valid(session):
             return JSONResponse(status_code=401, content={"detail": "Sign in required"})
         set_request_context(sid, session)

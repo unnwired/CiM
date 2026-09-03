@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { formatINRFromCrores } from '../utils/formatMarketCap';
+import { formatINRFromCrores, formatMarketCap } from '../utils/formatMarketCap';
 import { screenerFinancialsUrl } from '../utils/externalFinancialsLinks';
 import { openExternalUrl } from '../utils/openExternalUrl';
 import ScreenerProfileSidebar from './ScreenerProfileSidebar';
@@ -87,16 +87,18 @@ function QuarterPdfLink({ href }) {
   );
 }
 
-/** Metric rows + Raw PDF last (Screener layout: below EPS). */
-function buildDisplayRows(rows, periods) {
-  const metrics = rows.filter(r => !(r.is_pdf || r.slug === 'raw_pdf'));
-  const existing = rows.find(r => r.is_pdf || r.slug === 'raw_pdf');
+/** Metric rows + TV overlay before Raw PDF (Screener layout: PDF below EPS). */
+function buildDisplayRows(rows, periods, tvRows = []) {
+  const metrics = (rows || []).filter(r => !(r.is_pdf || r.slug === 'raw_pdf'));
+  const tv = (tvRows || []).filter(r => r && r.source === 'tradingview');
+  const existing = (rows || []).find(r => r.is_pdf || r.slug === 'raw_pdf');
+  const beforePdf = [...metrics, ...tv];
   if (existing) {
-    return [...metrics, existing];
+    return [...beforePdf, existing];
   }
-  const pdfValues = periods.map(p => p.pdf_url ?? null);
+  const pdfValues = (periods || []).map(p => p.pdf_url ?? null);
   return [
-    ...metrics,
+    ...beforePdf,
     { label: 'Raw PDF', slug: 'raw_pdf', values: pdfValues, is_pdf: true },
   ];
 }
@@ -107,6 +109,15 @@ function formatCell(row, raw) {
     return href ? <QuarterPdfLink href={href} /> : '—';
   }
   if (raw == null || raw === '') return '—';
+  // TradingView overlay: EPS as ₹ decimals; revenue as full INR (M/B/T).
+  if (row.source === 'tradingview') {
+    if (row.value_kind === 'eps' || String(row.slug || '').includes('eps')) {
+      return `₹${fmtEps(raw)}`;
+    }
+    if (row.value_kind === 'revenue' || String(row.slug || '').includes('rev')) {
+      return formatMarketCap(raw);
+    }
+  }
   const label = (row.label || '').toLowerCase();
   if (label.includes('eps')) return `₹${fmtEps(raw)}`;
   if (label.includes('%') || label.includes('opm') || label.includes('tax')) return fmtPct(raw);
@@ -234,7 +245,8 @@ function headerColor(meta, colIdx, hoveredMonth, hoverRolesByCol) {
 export function EarningsQuarterlyPanelContent({
   symbol,
   profileWidthPx,
-  scrollTableToLatest = false,
+  scrollTableToLatest = true,
+  onBasisChange = null,
 }) {
   const showRefreshButton = isLoopbackHost();
   const [basis, setBasis] = useState('consolidated');
@@ -245,6 +257,10 @@ export function EarningsQuarterlyPanelContent({
   const [error, setError] = useState(null);
   /** Month family (0–11) under pointer — shows fixed blue/gold/purple YoY trio for that month. */
   const [hoveredMonth, setHoveredMonth] = useState(null);
+
+  useEffect(() => {
+    if (typeof onBasisChange === 'function') onBasisChange(basis);
+  }, [basis, onBasisChange]);
 
   const load = useCallback(async ({ refresh = false } = {}) => {
     if (!symbol) return;
@@ -290,7 +306,11 @@ export function EarningsQuarterlyPanelContent({
 
   const periods = useMemo(() => data?.periods ?? [], [data]);
   const rows = data?.rows ?? [];
-  const displayRows = useMemo(() => buildDisplayRows(rows, periods), [rows, periods]);
+  const tvRows = data?.tv_rows ?? [];
+  const displayRows = useMemo(
+    () => buildDisplayRows(rows, periods, tvRows),
+    [rows, periods, tvRows],
+  );
   const columnMeta = useMemo(() => buildYoYColumnMeta(periods), [periods]);
   const hoverRolesByCol = useMemo(
     () => buildMonthFamilyRoles(periods, hoveredMonth),
@@ -428,9 +448,14 @@ export function EarningsQuarterlyPanelContent({
               </button>
             )}
             {screenerHref && (
-              <button
-                type="button"
-                onClick={e => { e.stopPropagation(); openExternalUrl(screenerHref); }}
+              <a
+                href={screenerHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={basis === 'standalone'
+                  ? `Screener.in standalone — ${symbol}`
+                  : `Screener.in consolidated — ${symbol}`}
+                onClick={e => { e.stopPropagation(); openExternalUrl(screenerHref, e); }}
                 style={{
                   fontSize: 10,
                   padding: '3px 8px',
@@ -439,10 +464,13 @@ export function EarningsQuarterlyPanelContent({
                   backgroundColor: 'var(--bg-tertiary)',
                   color: 'var(--accent-blue)',
                   cursor: 'pointer',
+                  textDecoration: 'none',
+                  display: 'inline-flex',
+                  alignItems: 'center',
                 }}
               >
                 Screener ↗
-              </button>
+              </a>
             )}
           </div>
         </div>
@@ -588,10 +616,10 @@ export function EarningsQuarterlyPanelContent({
   );
 }
 
-export default function EarningsQuarterlyPanel({ symbol, columnCount }) {
+export default function EarningsQuarterlyPanel({ symbol, columnCount, onBasisChange = null }) {
   return (
     <td colSpan={columnCount} style={{ padding: 0, borderBottom: '1px solid var(--border)', backgroundColor: 'var(--bg-primary)' }}>
-      <EarningsQuarterlyPanelContent symbol={symbol} />
+      <EarningsQuarterlyPanelContent symbol={symbol} onBasisChange={onBasisChange} />
     </td>
   );
 }

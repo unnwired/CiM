@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import re
 import signal
 import sys
 import subprocess
@@ -21,7 +22,7 @@ from fastapi import FastAPI, Query, HTTPException, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from typing import Optional, Set, Tuple
+from typing import Callable, Optional, Set, Tuple
 from collections import defaultdict
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -40,6 +41,10 @@ def _sibling_module_path(stem: str) -> Path:
 def _load_module_from_path(module_name: str, path: Path):
     if not path.exists():
         raise RuntimeError(f"Cannot load {module_name}: missing {path}")
+    # Sibling modules (market_sectors, etc.) may use bare imports; keep server/ on path.
+    parent = str(path.resolve().parent)
+    if parent not in sys.path:
+        sys.path.insert(0, parent)
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Cannot load {module_name} from {path}")
@@ -117,8 +122,14 @@ from tradingview_earnings import (  # noqa: E402
     current_year_ist,
     fetch_earnings_beats,
     fetch_earnings_calendar,
+    fetch_recent_reported_for_resync,
     fetch_upcoming_estimates_for_symbols,
+    is_beat_report_row,
+    is_tv_eps_rev_beat_row,
+    symbols_with_earnings_today,
+    RECENT_RESYNC_LOOKBACK_DAYS,
 )
+import tv_quarterly_overlay  # noqa: E402
 from server.core.cache import (
     CACHE_PROFILE_AGGRESSIVE,
     CACHE_PROFILE_NORMAL,
@@ -126,6 +137,7 @@ from server.core.cache import (
     caches as _app_caches,
 )
 from server.core.migrations import run_startup_migrations
+from server import price_lookback  # noqa: E402
 import screener_quarters  # noqa: E402
 from screener_symbol_slug import SCREENER_COMPANY_SLUG_ALIASES  # noqa: E402
 from macd_hist_chain_filter import (  # noqa: E402
@@ -135,6 +147,11 @@ from macd_hist_chain_filter import (  # noqa: E402
     parse_hist_chain,
 )
 from avg_volume_filter import query_avg_volume_symbols  # noqa: E402
+from annual_vs_ttm_filter import (  # noqa: E402
+    normalize_annual_vs_ttm_params,
+    query_annual_vs_ttm_symbols,
+)
+from screener_screen_filter import query_screener_screen_symbols  # noqa: E402
 from filter_rebuild_registry import (  # noqa: E402
     INDICATOR_FAMILIES,
     public_options_payload,
@@ -146,8 +163,10 @@ from range_channel_filter import (  # noqa: E402
 from snapshot_bars import chart_candles_for_timeframe  # noqa: E402
 SCRAPE_INDICES_PATH = BASE_DIR / "scrape_indices.py"
 SCRAPE_FINANCIALS_PATH = BASE_DIR / "scrape_financials.py"
+SCRAPE_MF_PATH = BASE_DIR / "scrape_mf.py"
 SCRAPE_DAILY_PATH = BASE_DIR / "scrape_daily.py"
 SCRAPE_4H_PATH = BASE_DIR / "scrape_4h.py"
+SCRAPE_30M_PATH = BASE_DIR / "scrape_30m.py"
 
 VALID_SORT_COLUMNS = {
     "Symbol", "Market Cap", "Price", "Change %",
@@ -158,11 +177,15 @@ VALID_SORT_COLUMNS = {
     "Market Sector",
 }
 
-SNAPSHOT_TIMEFRAMES = ("4H", "1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W", "4W", "1M")
-SNAPSHOT_LIGHT_TIMEFRAMES = ("4H", "1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W")
+SNAPSHOT_TIMEFRAMES = ("30m", "4H", "1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W", "4W", "1M")
+SNAPSHOT_LIGHT_TIMEFRAMES = ("30m", "4H", "1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W")
 # If fewer than this fraction of screener symbols have a row for a timeframe, skip snapshots
 # for filters and use candle-based paths (partial snapshot data would otherwise cap matches).
 SNAPSHOT_FILTER_MIN_COVERAGE = 0.80
+# Timeframes the daily rebuild keeps current. Their snapshots must not trail the newest
+# daily bar; 4W/1M come from the full rebuild only, so they keep the coverage-only check.
+# 30m/4H are EOD session bars — last rebuild is authoritative (not in freshness set).
+SNAPSHOT_FRESHNESS_TIMEFRAMES = frozenset({"1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W"})
 # Keep in sync with scrape_daily.MACD_HIST_CHAIN_MAX_BARS
 MACD_HIST_CHAIN_MAX_BARS = 60
 FULL_REBUILD_CONFIRM_TOKEN = "REBUILD_FULL_UNIVERSE"
@@ -197,6 +220,7 @@ FEEDBACK_SMTP_PASS = os.getenv("NSE_PULSE_SMTP_PASS", "")
 FEEDBACK_FROM_EMAIL = os.getenv("NSE_PULSE_FROM_EMAIL", FEEDBACK_SMTP_USER or "noreply@cim.local")
 
 TIMEFRAME_CONFIG = {
+    "30m": {"anchor": "session_30m"},
     "4H":  {"anchor": "session_4h"},
     "1D":  {"anchor": "day",   "days": 1},
     "2D":  {"anchor": "day",   "days": 2},
@@ -255,6 +279,13 @@ try:
 except Exception as _settings_err:
     print(f"[settings] routes not loaded: {_settings_err}")
 
+try:
+    from server.live_routes import router as _live_router
+
+    app.include_router(_live_router)
+except Exception as _live_err:
+    print(f"[live] routes not loaded: {_live_err}")
+
 FRONTEND_BUILD_DIR = resolve_frontend_build_dir(BASE_DIR)
 if FRONTEND_BUILD_DIR.exists():
     static_dir = FRONTEND_BUILD_DIR / "static"
@@ -267,12 +298,13 @@ app.add_middleware(
         o.strip()
         for o in os.getenv(
             "CIM_ALLOWED_ORIGINS",
-            "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000",
+            "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000"
+            ",http://localhost:8001,http://127.0.0.1:8001,http://localhost:8002,http://127.0.0.1:8002",
         ).split(",")
         if o.strip()
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -311,9 +343,22 @@ def _on_startup():
     market_cap_live.seed_issued_from_pilot_json(DB_PATH, DATA_DIR)
     market_sectors.ensure_default_mapping_file(DATA_DIR)
     try:
+        market_sectors.ensure_index_sector_cores(DATA_DIR, DB_PATH)
+    except Exception as sector_core_err:
+        print(f"[index-industry-sectors] init warning: {sector_core_err}")
+    try:
         if hasattr(movers_live, "configure_paths"):
             movers_live.configure_paths(data_dir=DATA_DIR)
         movers_live.init(get_db_connection)
+        from server import upstox_instruments
+
+        upstox_instruments.configure_paths(data_dir=DATA_DIR)
+        try:
+            from server import upstox_history
+
+            upstox_history.configure_paths(data_dir=DATA_DIR)
+        except Exception:
+            pass
     except Exception as e:
         print(f"[movers_live] init warning: {e}")
     try:
@@ -321,6 +366,35 @@ def _on_startup():
         print("[admin_job_scheduler] started (all tasks opt-in until enabled in Admin Scheduler)")
     except Exception as e:
         print(f"[admin_job_scheduler] init warning: {e}")
+    try:
+        from server import alert_evaluator
+        from tradingview_earnings import fetch_earnings_calendar as _fetch_earnings_calendar
+
+        def _alert_fetch_earnings(**kwargs):
+            """Same filter path as /api/earnings-beats (incl. Earnings+ + screener prices)."""
+            earnings_plus = str(kwargs.pop("earnings_plus", "all") or "all").strip().lower()
+            if earnings_plus not in EARNINGS_PLUS_FILTER_MODES:
+                earnings_plus = "all"
+            mode = str(kwargs.get("mode") or "").strip().lower()
+            payload = _fetch_earnings_calendar(**kwargs)
+            if mode == "reported":
+                filtered_rows, earnings_plus_cache = _apply_reported_earnings_plus_filter(
+                    payload.get("rows") or [],
+                    earnings_plus,
+                )
+                payload["earnings_plus_cache"] = earnings_plus_cache
+                payload["rows"] = filtered_rows
+                payload["count"] = len(filtered_rows)
+                if earnings_plus != "all":
+                    payload["total_matches"] = len(filtered_rows)
+                    if payload.get("matched_symbols") is not None:
+                        payload["matched_symbols"] = len(filtered_rows)
+            return _enrich_earnings_rows_with_screener_prices(payload)
+
+        alert_evaluator.start(BASE_DIR, DB_PATH, _alert_fetch_earnings)
+        print("[alert_evaluator] started")
+    except Exception as e:
+        print(f"[alert_evaluator] init warning: {e}")
     # Phase C: keep critical lookups indexed for chart/filter performance.
     try:
         conn = get_db_connection()
@@ -605,24 +679,6 @@ def _reported_row_has_complete_outcome(row: dict | None) -> bool:
     )
 
 
-def _is_dual_beat_report_row(row: dict) -> bool:
-    try:
-        eps = float(row.get("eps_surprise_pct"))
-        rev = float(row.get("revenue_surprise_pct"))
-    except (TypeError, ValueError):
-        return False
-    if eps < 0 or rev < 0:
-        return False
-    if (
-        row.get("eps_actual") is None
-        and row.get("revenue_actual") is None
-        and eps == 0
-        and rev == 0
-    ):
-        return False
-    return True
-
-
 def _base_event_from_row(
     *,
     symbol: str,
@@ -667,7 +723,7 @@ def _event_from_reported_row(row: dict) -> dict | None:
     earnings_release_date = str(row.get("earnings_release_date") or "").strip()
     if not symbol or not earnings_release_date:
         return None
-    outcome_kind = "beat" if _is_dual_beat_report_row(row) else "miss"
+    outcome_kind = "beat" if is_beat_report_row(row) else "miss"
     return _base_event_from_row(
         symbol=symbol,
         earnings_release_date=earnings_release_date,
@@ -689,7 +745,7 @@ def _event_from_incomplete_reported_row(row: dict) -> dict | None:
     earnings_release_date = str(row.get("earnings_release_date") or "").strip()
     if not symbol or not earnings_release_date:
         return None
-    outcome_kind = "beat" if _is_dual_beat_report_row(row) else "miss"
+    outcome_kind = "beat" if is_beat_report_row(row) else "miss"
     return _base_event_from_row(
         symbol=symbol,
         earnings_release_date=earnings_release_date,
@@ -772,10 +828,47 @@ def _screener_row_value(row: dict | None, index: int) -> float | None:
     return _parse_screener_numeric(values[index])
 
 
+def _payload_latest_period_meta(payload: dict | None) -> tuple[str | None, str | None]:
+    """Return (period_label, date_key) for the last Screener quarter column."""
+    if not isinstance(payload, dict):
+        return None, None
+    periods = payload.get("periods") or []
+    if not periods:
+        return None, None
+    last = periods[-1] if isinstance(periods[-1], dict) else {}
+    label = str(last.get("period") or "").strip() or None
+    date_key = str(last.get("date_key") or "").strip() or None
+    return label, date_key
+
+
+def _fmt_earnings_plus_metric(value: float | None, *, percent: bool = False) -> str:
+    if value is None:
+        return "n/a"
+    if percent:
+        return f"{value:g}%"
+    if abs(value - round(value)) < 1e-9:
+        return f"{int(round(value))}"
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
 EARNINGS_PLUS_CACHE_REFRESH_HOURS = 18
-EARNINGS_PLUS_REFRESH_WORKERS = 4
+# Keep at 1: Screener scrapes write screener_quarterly; parallel workers lock SQLite.
+EARNINGS_PLUS_REFRESH_WORKERS = 1
 EARNINGS_PLUS_REFRESH_STALL_SEC = 120
+# TradingView print ↔ Screener quarterly update: expect Screener the same day,
+# a day early, or up to a couple of days later — not a quarter-end calendar span.
+EARNINGS_PLUS_SCREENER_SYNC_DAYS = 2
+# Prefer standalone when consolidated Screener quarters lag by more than this.
+EARNINGS_PLUS_BASIS_LAG_DAYS = 80
+# Used only by provisional chart fallback (TV estimates vs Screener actuals), not E+ badges.
+EARNINGS_PLUS_CHART_PERIOD_MAX_DAYS = 150
+# Start Screener/E+ pull this many days before an upcoming TV earnings date.
+EARNINGS_PLUS_UPCOMING_PRESCAN_LEAD_DAYS = 1
 _earnings_plus_progress_lock = threading.Lock()
+_earnings_plus_db_write_lock = threading.Lock()
+_earnings_plus_bg_sync_lock = threading.Lock()
+_earnings_plus_bg_sync_pending: set[str] = set()
+_earnings_plus_bg_sync_running = False
 
 
 def _now_db_timestamp() -> str:
@@ -805,14 +898,33 @@ def _earnings_plus_refresh_after_timestamp() -> str:
     return (datetime.now() + timedelta(hours=EARNINGS_PLUS_CACHE_REFRESH_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _earnings_plus_cache_is_stale(entry: dict | None) -> bool:
+def _earnings_plus_period_mismatch(entry: dict | None, local_latest_period_date_key: str | None) -> bool:
+    """True when local Screener quarters moved past the quarter the cache was scored on."""
+    if not entry:
+        return bool(str(local_latest_period_date_key or "").strip())
+    cached = str(entry.get("latest_period_date_key") or "").strip()
+    local = str(local_latest_period_date_key or "").strip()
+    if local and cached and local != cached:
+        return True
+    if local and not cached:
+        return True
+    return False
+
+
+def _earnings_plus_cache_is_stale(
+    entry: dict | None,
+    local_latest_period_date_key: str | None = None,
+) -> bool:
     """
     Whether an Earnings+ cache row should be treated as stale for filters/charts/refresh.
 
-    Qualified / not_qualified verdicts for a fixed quarter do not expire when Screener
-    source_fetched_at ages out — only insufficient or failed rows need re-fetch.
+    Qualified / not_qualified do not age out by clock alone, but they ARE stale when
+    local Screener quarterly data has a newer latest period than the cached decision.
+    Insufficient / failed rows still expire on refresh_after / source age.
     """
     if not entry:
+        return True
+    if _earnings_plus_period_mismatch(entry, local_latest_period_date_key):
         return True
     decision = str(entry.get("decision") or "").strip().lower()
     if decision in ("qualified", "not_qualified"):
@@ -898,14 +1010,53 @@ def _evaluate_earnings_plus_payload(payload: dict | None, basis: str) -> dict:
     latest_period_label = str(latest_period.get("period") or "").strip()
     previous_period_label = str(previous_period.get("period") or "").strip()
     previous_year_period_label = str(previous_year_period.get("period") or "").strip()
-    matches = (
-        latest_opm >= previous_opm
-        and latest_opm >= previous_year_opm
-        and latest_profit > previous_profit
-        and latest_profit > previous_year_profit
-        and latest_eps > previous_eps
-        and latest_eps > previous_year_eps
-    )
+
+    opm_qoq_ok = latest_opm >= previous_opm
+    opm_yoy_ok = latest_opm >= previous_year_opm
+    profit_qoq_ok = latest_profit > previous_profit
+    profit_yoy_ok = latest_profit > previous_year_profit
+    eps_qoq_ok = latest_eps > previous_eps
+    eps_yoy_ok = latest_eps > previous_year_eps
+    matches = all((opm_qoq_ok, opm_yoy_ok, profit_qoq_ok, profit_yoy_ok, eps_qoq_ok, eps_yoy_ok))
+
+    opm_l = _fmt_earnings_plus_metric(latest_opm, percent=True)
+    opm_q = _fmt_earnings_plus_metric(previous_opm, percent=True)
+    opm_y = _fmt_earnings_plus_metric(previous_year_opm, percent=True)
+    np_l = _fmt_earnings_plus_metric(latest_profit)
+    np_q = _fmt_earnings_plus_metric(previous_profit)
+    np_y = _fmt_earnings_plus_metric(previous_year_profit)
+    eps_l = _fmt_earnings_plus_metric(latest_eps)
+    eps_q = _fmt_earnings_plus_metric(previous_eps)
+    eps_y = _fmt_earnings_plus_metric(previous_year_eps)
+
+    if matches:
+        note = (
+            f"{basis_label} Earnings+: {latest_period_label} beats "
+            f"{previous_period_label} (QoQ) and {previous_year_period_label} (YoY) — "
+            f"OPM {opm_l} (≥ {opm_q}, ≥ {opm_y}); "
+            f"Net Profit {np_l} (> {np_q}, > {np_y}); "
+            f"EPS {eps_l} (> {eps_q}, > {eps_y})."
+        )
+    else:
+        fails: list[str] = []
+        if not opm_qoq_ok:
+            fails.append(f"OPM {opm_l} < QoQ {previous_period_label} {opm_q}")
+        if not opm_yoy_ok:
+            fails.append(f"OPM {opm_l} < YoY {previous_year_period_label} {opm_y}")
+        if not profit_qoq_ok:
+            fails.append(f"Net Profit {np_l} ≤ QoQ {previous_period_label} {np_q}")
+        if not profit_yoy_ok:
+            fails.append(f"Net Profit {np_l} ≤ YoY {previous_year_period_label} {np_y}")
+        if not eps_qoq_ok:
+            fails.append(f"EPS {eps_l} ≤ QoQ {previous_period_label} {eps_q}")
+        if not eps_yoy_ok:
+            fails.append(f"EPS {eps_l} ≤ YoY {previous_year_period_label} {eps_y}")
+        note = (
+            f"{basis_label} does not qualify for Earnings+ in {latest_period_label}: "
+            + "; ".join(fails)
+            + "."
+        )
+
     return {
         "decision": "qualified" if matches else "not_qualified",
         "basis_used": basis,
@@ -913,12 +1064,7 @@ def _evaluate_earnings_plus_payload(payload: dict | None, basis: str) -> dict:
         "latest_period_date_key": str(latest_period.get("date_key") or "").strip(),
         "previous_period": previous_period_label,
         "previous_year_period": previous_year_period_label,
-        "note": (
-            f"{basis_label} Screener quality badge: {latest_period_label} beats "
-            f"{previous_period_label} and {previous_year_period_label} on OPM, Net Profit, and EPS."
-            if matches else
-            f"{basis_label} Screener quarterly data does not qualify for Earnings+ in {latest_period_label}."
-        ),
+        "note": note,
         "source_fetched_at": payload.get("fetched_at"),
     }
 
@@ -953,6 +1099,7 @@ def _load_earnings_plus_basis_evaluation(
     *,
     fetch_if_missing: bool,
     refresh_stale: bool,
+    force_refresh: bool = False,
 ) -> tuple[dict, str | None, bool]:
     """Returns (evaluation, last_error, source_stale)."""
     last_error = None
@@ -962,9 +1109,14 @@ def _load_earnings_plus_basis_evaluation(
         sym,
         basis,
         fetch_if_missing=fetch_if_missing,
-        force_refresh=False,
+        force_refresh=bool(force_refresh),
     )
-    if refresh_stale and payload and _timestamp_is_stale(payload.get("fetched_at")):
+    if (
+        not force_refresh
+        and refresh_stale
+        and payload
+        and _timestamp_is_stale(payload.get("fetched_at"))
+    ):
         payload, status = screener_quarters.get_quarters(
             DB_PATH,
             DATA_DIR,
@@ -982,10 +1134,28 @@ def _load_earnings_plus_basis_evaluation(
     return evaluation, last_error, source_stale
 
 
+def _earnings_plus_period_date(evaluation: dict | None):
+    if not evaluation:
+        return None
+    return _parse_ymd_date(evaluation.get("latest_period_date_key"))
+
+
+def _earnings_plus_basis_is_lagging(older_ev: dict | None, newer_ev: dict | None) -> bool:
+    """True when older_ev's latest quarter is materially behind newer_ev (incomplete consol)."""
+    older_day = _earnings_plus_period_date(older_ev)
+    newer_day = _earnings_plus_period_date(newer_ev)
+    if older_day is None or newer_day is None:
+        return False
+    return (newer_day - older_day).days >= EARNINGS_PLUS_BASIS_LAG_DAYS
+
+
 def _pick_best_earnings_plus_entry(sym: str, basis_results: list[tuple[str, dict, str | None, bool]], computed_at: str) -> dict:
     """
-    Use consolidated when it can be evaluated (qualified or not_qualified).
-    Standalone is only used when consolidated data is insufficient_data or missing.
+    Prefer consolidated when it can be evaluated (qualified or not_qualified).
+    If consolidated quarters lag standalone by a full quarter+, use standalone — otherwise
+    names like JUSTDIAL stay "qualified" on ancient consolidated while July reported the
+    current quarter on standalone.
+    Standalone is also used when consolidated is insufficient_data or missing.
     """
     by_basis = {basis: (ev, err, stale) for basis, ev, err, stale in basis_results}
     last_error = None
@@ -1000,12 +1170,18 @@ def _pick_best_earnings_plus_entry(sym: str, basis_results: list[tuple[str, dict
         )
 
     consolidated = by_basis.get("consolidated")
+    standalone = by_basis.get("standalone")
     if consolidated:
-        c_decision = str(consolidated[0].get("decision") or "").strip().lower()
+        c_ev = consolidated[0]
+        c_decision = str(c_ev.get("decision") or "").strip().lower()
         if c_decision in ("qualified", "not_qualified"):
+            if standalone and _earnings_plus_basis_is_lagging(c_ev, standalone[0]):
+                s_decision = str(standalone[0].get("decision") or "").strip().lower()
+                if s_decision in ("qualified", "not_qualified", "insufficient_data"):
+                    return _entry_from_basis("standalone")
             return _entry_from_basis("consolidated")
 
-    if by_basis.get("standalone"):
+    if standalone:
         return _entry_from_basis("standalone")
 
     return {
@@ -1029,6 +1205,7 @@ def _build_earnings_plus_cache_entry(
     *,
     fetch_if_missing: bool,
     refresh_stale: bool,
+    force_refresh: bool = False,
 ) -> dict:
     sym = _normalize_symbol_token(symbol)
     computed_at = _now_db_timestamp()
@@ -1039,6 +1216,7 @@ def _build_earnings_plus_cache_entry(
             basis,
             fetch_if_missing=fetch_if_missing,
             refresh_stale=refresh_stale,
+            force_refresh=force_refresh,
         )
         basis_results.append((basis, evaluation, last_error, source_stale))
     return _pick_best_earnings_plus_entry(sym, basis_results, computed_at)
@@ -1084,6 +1262,65 @@ def _upsert_earnings_plus_cache_entry(conn: sqlite3.Connection, entry: dict) -> 
     )
 
 
+def _read_local_screener_latest_period_keys(
+    conn: sqlite3.Connection,
+    symbols: list[str],
+) -> dict[str, str]:
+    """Prefer consolidated Screener latest date_key; fall back to standalone."""
+    normalized = [
+        sym for sym in dict.fromkeys(_normalize_symbol_token(symbol) for symbol in symbols)
+        if sym
+    ]
+    if not normalized:
+        return {}
+    placeholders = ",".join("?" * len(normalized))
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"""
+            SELECT symbol, basis, payload_json
+            FROM screener_quarterly
+            WHERE symbol IN ({placeholders})
+            """,
+            normalized,
+        )
+        rows = cur.fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    by_sym: dict[str, dict[str, str]] = {}
+    for symbol, basis, payload_json in rows:
+        sym = _normalize_symbol_token(symbol)
+        if not sym:
+            continue
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else payload_json
+        except (TypeError, json.JSONDecodeError):
+            continue
+        _, date_key = _payload_latest_period_meta(payload if isinstance(payload, dict) else None)
+        if not date_key:
+            continue
+        bucket = by_sym.setdefault(sym, {})
+        basis_key = str(basis or "").strip().lower()
+        if basis_key in ("consolidated", "standalone"):
+            bucket[basis_key] = date_key
+    out: dict[str, str] = {}
+    for sym, bases in by_sym.items():
+        # Use the newest local quarter across bases so lagging consolidated cannot hide
+        # a fresher standalone period (JUSTDIAL-style) from staleness checks.
+        consol = bases.get("consolidated") or ""
+        stand = bases.get("standalone") or ""
+        if consol and stand:
+            c_day = _parse_ymd_date(consol)
+            s_day = _parse_ymd_date(stand)
+            if c_day and s_day:
+                out[sym] = stand if s_day >= c_day else consol
+            else:
+                out[sym] = consol or stand
+        else:
+            out[sym] = consol or stand or ""
+    return {k: v for k, v in out.items() if v}
+
+
 def _read_earnings_plus_cache_entries(conn: sqlite3.Connection, symbols: list[str]) -> dict[str, dict]:
     ensure_earnings_plus_cache_table(conn)
     normalized = [
@@ -1105,11 +1342,13 @@ def _read_earnings_plus_cache_entries(conn: sqlite3.Connection, symbols: list[st
         """,
         normalized,
     )
+    local_keys = _read_local_screener_latest_period_keys(conn, normalized)
     results: dict[str, dict] = {}
     for row in cur.fetchall():
         entry = dict(row)
-        entry["is_stale"] = _earnings_plus_cache_is_stale(entry)
-        results[_normalize_symbol_token(entry.get("symbol"))] = entry
+        sym = _normalize_symbol_token(entry.get("symbol"))
+        entry["is_stale"] = _earnings_plus_cache_is_stale(entry, local_keys.get(sym))
+        results[sym] = entry
     return results
 
 
@@ -1118,20 +1357,146 @@ def _read_earnings_plus_cache_entry(conn: sqlite3.Connection, symbol: str) -> di
     return entries.get(_normalize_symbol_token(symbol))
 
 
+def _ensure_earnings_plus_cache_current(
+    conn: sqlite3.Connection,
+    symbol: str,
+    *,
+    fetch_if_missing: bool = False,
+    refresh_stale: bool = False,
+) -> dict | None:
+    """
+    Return a non-stale Earnings+ cache row. If local Screener quarters advanced past the
+    cached verdict, recompute from local (or scrape when refresh_stale/fetch requested).
+    """
+    sym = _normalize_symbol_token(symbol)
+    if not sym:
+        return None
+    entry = _read_earnings_plus_cache_entry(conn, sym)
+    if entry and not entry.get("is_stale"):
+        return entry
+    return _refresh_earnings_plus_cache_for_symbol(
+        conn,
+        sym,
+        fetch_if_missing=fetch_if_missing or entry is None,
+        refresh_stale=refresh_stale,
+    )
+
+
 def _refresh_earnings_plus_cache_for_symbol(
     conn: sqlite3.Connection,
     symbol: str,
     *,
     fetch_if_missing: bool,
     refresh_stale: bool,
+    force_refresh: bool = False,
 ) -> dict:
+    # Network/scrape outside the write lock; serialize only the DB upsert.
     entry = _build_earnings_plus_cache_entry(
         symbol,
         fetch_if_missing=fetch_if_missing,
         refresh_stale=refresh_stale,
+        force_refresh=force_refresh,
     )
-    _upsert_earnings_plus_cache_entry(conn, entry)
+    with _earnings_plus_db_write_lock:
+        _upsert_earnings_plus_cache_entry(conn, entry)
+    entry["is_stale"] = False
     return entry
+
+
+def _enqueue_earnings_plus_screener_sync(symbols: list[str]) -> None:
+    """Background Screener pull for TV releases not yet synced — never block the API."""
+    global _earnings_plus_bg_sync_running
+    cleaned = [
+        sym for sym in dict.fromkeys(_normalize_symbol_token(s) for s in symbols or [])
+        if sym
+    ]
+    if not cleaned:
+        return
+    with _earnings_plus_bg_sync_lock:
+        _earnings_plus_bg_sync_pending.update(cleaned)
+        if _earnings_plus_bg_sync_running:
+            return
+        _earnings_plus_bg_sync_running = True
+
+    def _drain() -> None:
+        global _earnings_plus_bg_sync_running
+        try:
+            while True:
+                with _earnings_plus_bg_sync_lock:
+                    batch = sorted(_earnings_plus_bg_sync_pending)
+                    _earnings_plus_bg_sync_pending.clear()
+                if not batch:
+                    return
+                # Serial writes — parallel scrapes were locking SQLite under load.
+                for sym in batch:
+                    try:
+                        conn = get_db_connection()
+                        try:
+                            _refresh_earnings_plus_cache_for_symbol(
+                                conn,
+                                sym,
+                                fetch_if_missing=True,
+                                refresh_stale=True,
+                                force_refresh=True,
+                            )
+                            with _earnings_plus_db_write_lock:
+                                conn.commit()
+                        finally:
+                            conn.close()
+                    except Exception as exc:
+                        print(f"[earnings_plus] bg screener sync failed {sym}: {exc}")
+        finally:
+            with _earnings_plus_bg_sync_lock:
+                if _earnings_plus_bg_sync_pending:
+                    threading.Thread(
+                        target=_drain, name="earnings-plus-bg-sync", daemon=True
+                    ).start()
+                else:
+                    _earnings_plus_bg_sync_running = False
+
+    threading.Thread(target=_drain, name="earnings-plus-bg-sync", daemon=True).start()
+
+
+def _upcoming_prescan_symbols(*, lead_days: int | None = None) -> list[dict]:
+    """
+    TV upcoming rows whose release is today or within lead_days (default 1).
+
+    Starts Screener/E+ work one day before the print so data is ready when TV lands.
+    """
+    lead = EARNINGS_PLUS_UPCOMING_PRESCAN_LEAD_DAYS if lead_days is None else max(0, int(lead_days))
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    end = today + timedelta(days=lead)
+    try:
+        payload = fetch_earnings_calendar(
+            mode="upcoming",
+            period="coming_week",
+            limit=2000,
+            use_cache=True,
+        )
+    except Exception as exc:
+        print(f"[earnings_plus] upcoming prescan TV fetch failed: {exc}")
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in payload.get("rows") or []:
+        sym = _normalize_symbol_token(row.get("symbol"))
+        if not sym or sym in seen:
+            continue
+        release = (
+            row.get("earnings_release_next_date")
+            or row.get("earnings_release_date")
+            or row.get("date")
+        )
+        release_day = _parse_ymd_date(release)
+        if release_day is None:
+            continue
+        if today <= release_day <= end:
+            seen.add(sym)
+            out.append({
+                "symbol": sym,
+                "earnings_release_date": release_day.isoformat(),
+            })
+    return out
 
 
 def _build_earnings_plus_helper_from_cache_entry(entry: dict | None) -> dict | None:
@@ -1178,13 +1543,34 @@ def _summarize_earnings_plus_cache(entries: dict[str, dict], symbols: list[str])
     }
 
 
-def _earnings_plus_entry_matches_report_row(entry: dict | None, row: dict) -> bool:
+def _earnings_plus_screener_fetch_day(entry: dict | None):
+    """Calendar day Screener data (or E+ compute) was last pulled for this symbol."""
     if not entry:
+        return None
+    return _parse_ymd_date(entry.get("source_fetched_at")) or _parse_ymd_date(entry.get("computed_at"))
+
+
+def _earnings_plus_screener_synced_to_release(entry: dict | None, release_date: str | None) -> bool:
+    """
+    True when Screener was fetched in time for this TradingView release.
+
+    Expect pull from (release − SYNC_DAYS) onward. A fetch days/weeks *after* the
+    print still counts as synced (post-print data). Only a fetch *before* that
+    window means we have not yet scored this print.
+    """
+    release_day = _parse_ymd_date(release_date)
+    fetch_day = _earnings_plus_screener_fetch_day(entry)
+    if release_day is None or fetch_day is None:
         return False
-    return _release_matches_screener_period(
-        row.get("earnings_release_date"),
-        entry.get("latest_period_date_key"),
-    )
+    earliest = release_day - timedelta(days=EARNINGS_PLUS_SCREENER_SYNC_DAYS)
+    return fetch_day >= earliest
+
+
+def _earnings_plus_entry_matches_report_row(entry: dict | None, row: dict | None) -> bool:
+    """Screener data is in sync with this TV release (heal/refresh planning only)."""
+    if not entry or not row:
+        return False
+    return _earnings_plus_screener_synced_to_release(entry, row.get("earnings_release_date"))
 
 
 def _earnings_plus_cache_needs_refresh(
@@ -1192,13 +1578,21 @@ def _earnings_plus_cache_needs_refresh(
     report_row: dict | None,
     *,
     force: bool = False,
+    local_latest_period_date_key: str | None = None,
 ) -> bool:
-    """True when symbol needs scrape/recompute; skip stable rows for the current release."""
+    """True when symbol needs scrape/recompute for the current TV release."""
     if force:
         return True
     if not entry:
         return True
-    if report_row and not _earnings_plus_entry_matches_report_row(entry, report_row):
+    if local_latest_period_date_key is None and entry.get("is_stale"):
+        return True
+    if _earnings_plus_period_mismatch(entry, local_latest_period_date_key):
+        return True
+    # New TV print and Screener not yet pulled for that event → refresh.
+    if report_row and not _earnings_plus_screener_synced_to_release(
+        entry, report_row.get("earnings_release_date")
+    ):
         return True
     decision = str(entry.get("decision") or "").strip().lower()
     if decision == "insufficient_data":
@@ -1216,9 +1610,10 @@ def _plan_earnings_plus_cache_refresh(
     *,
     force: bool = False,
     only_incomplete: bool = False,
+    local_period_keys: dict[str, str] | None = None,
 ) -> tuple[list[str], int]:
     """
-    Symbols to refresh: missing cache rows first, then stale / release-period mismatch.
+    Symbols to refresh: missing cache rows first, then stale / Screener-not-synced-to-TV.
     Returns (ordered_symbols, skipped_count).
     """
     row_by_sym: dict[str, dict] = {}
@@ -1226,6 +1621,7 @@ def _plan_earnings_plus_cache_refresh(
         sym = _normalize_symbol_token(row.get("symbol"))
         if sym and sym not in row_by_sym:
             row_by_sym[sym] = row
+    local_period_keys = local_period_keys or {}
 
     if force:
         symbols = list(row_by_sym.keys())
@@ -1247,7 +1643,12 @@ def _plan_earnings_plus_cache_refresh(
             if entry and str(entry.get("decision") or "").strip().lower() != "insufficient_data":
                 skipped += 1
                 continue
-        elif not _earnings_plus_cache_needs_refresh(entry, report_row, force=False):
+        elif not _earnings_plus_cache_needs_refresh(
+            entry,
+            report_row,
+            force=False,
+            local_latest_period_date_key=local_period_keys.get(sym),
+        ):
             skipped += 1
             continue
         if entry is None:
@@ -1257,11 +1658,36 @@ def _plan_earnings_plus_cache_refresh(
     return missing + needs_update, skipped
 
 
-def _apply_reported_earnings_plus_filter(
+def _earnings_plus_row_is_qualified(entry: dict | None, row: dict | None = None) -> bool:
+    """
+    Same rule for watchlist/chart badges and Earnings page filters.
+
+    Qualified = cache says qualified and not stale vs local Screener.
+    Badge persists until the next earnings print: Screener advancing to a new quarter
+    (or a new TV release forcing a resync) triggers rescore; if that print fails E+,
+    decision becomes not_qualified and the badge drops.
+    ``row`` is accepted for API compatibility but does not apply a day-span gate.
+    """
+    del row  # persistence is symbol-level until next print, not release↔period_end math
+    if not entry:
+        return False
+    if entry.get("is_stale"):
+        return False
+    return str(entry.get("decision") or "").strip().lower() == "qualified"
+
+
+def _heal_earnings_plus_entries_for_reported_rows(
     rows: list[dict],
-    earnings_plus_filter: str,
-) -> tuple[list[dict], dict]:
-    mode = str(earnings_plus_filter or "all").strip().lower()
+    *,
+    force_screener_on_mismatch: bool = False,
+) -> dict[str, dict]:
+    """
+    Ensure Earnings+ cache is scored for each row's TradingView release.
+
+    Local recompute when missing/stale/Screener not synced to the TV print. When
+    force_screener_on_mismatch=True (E+ only/exclude or admin refresh), scrape Screener
+    for symbols still not synced after local recompute.
+    """
     symbols = list(dict.fromkeys(
         sym for sym in (
             _normalize_symbol_token(row.get("symbol"))
@@ -1269,41 +1695,192 @@ def _apply_reported_earnings_plus_filter(
         )
         if sym
     ))
+    if not symbols:
+        return {}
+
+    row_by_sym: dict[str, dict] = {}
+    for row in rows or []:
+        sym = _normalize_symbol_token(row.get("symbol"))
+        if sym and sym not in row_by_sym:
+            row_by_sym[sym] = row
+
     conn = get_db_connection()
     try:
         entries = _read_earnings_plus_cache_entries(conn, symbols)
+        heal_local: list[str] = []
+        for sym in symbols:
+            entry = entries.get(sym)
+            report_row = row_by_sym.get(sym)
+            if (
+                entry is None
+                or entry.get("is_stale")
+                or (
+                    report_row
+                    and not _earnings_plus_screener_synced_to_release(
+                        entry, report_row.get("earnings_release_date")
+                    )
+                )
+            ):
+                heal_local.append(sym)
+
+        for sym in heal_local:
+            entry = _refresh_earnings_plus_cache_for_symbol(
+                conn,
+                sym,
+                fetch_if_missing=True,
+                refresh_stale=True,
+                force_refresh=False,
+            )
+            entries[sym] = entry
+        with _earnings_plus_db_write_lock:
+            conn.commit()
+
+        if force_screener_on_mismatch:
+            heal_scrape: list[str] = []
+            for sym in heal_local:
+                entry = entries.get(sym)
+                report_row = row_by_sym.get(sym)
+                if report_row and not _earnings_plus_screener_synced_to_release(
+                    entry, report_row.get("earnings_release_date")
+                ):
+                    heal_scrape.append(sym)
+            # Serial Screener scrapes — parallel workers were locking nse_data.db.
+            for sym in heal_scrape:
+                try:
+                    entry = _refresh_earnings_plus_cache_for_symbol(
+                        conn,
+                        sym,
+                        fetch_if_missing=True,
+                        refresh_stale=True,
+                        force_refresh=True,
+                    )
+                    entries[sym] = entry
+                except Exception as exc:
+                    print(f"[earnings_plus] heal scrape failed {sym}: {exc}")
+            with _earnings_plus_db_write_lock:
+                conn.commit()
+
+        local_keys = _read_local_screener_latest_period_keys(conn, list(entries.keys()))
+        for sym, entry in entries.items():
+            entry["is_stale"] = _earnings_plus_cache_is_stale(entry, local_keys.get(sym))
+        return entries
     finally:
         conn.close()
-    summary = _summarize_earnings_plus_cache(entries, symbols)
-    if mode == "all":
-        return list(rows or []), summary
 
-    filtered_rows: list[dict] = []
+
+EARNINGS_PLUS_FILTER_MODES = frozenset({"all", "only", "exclude", "tv_eps_rev_beat"})
+
+
+def _apply_reported_earnings_plus_filter(
+    rows: list[dict],
+    earnings_plus_filter: str,
+) -> tuple[list[dict], dict]:
+    """
+    Stamp each reported row with ``earnings_plus`` and optionally filter.
+
+    Request path is **read-only**: never heal/scrape/write here (that locked SQLite and
+    broke Earnings + alerts). Badge = qualified + not stale from cache. Unsynced /
+    missing / stale symbols are queued for background Screener sync.
+
+    Filter modes:
+      all | only | exclude — Screener Earnings+ quality
+      tv_eps_rev_beat — TradingView reported EPS > est AND reported revenue > est
+    """
+    mode = str(earnings_plus_filter or "all").strip().lower()
+    if mode not in EARNINGS_PLUS_FILTER_MODES:
+        mode = "all"
+    symbols = list(dict.fromkeys(
+        sym for sym in (
+            _normalize_symbol_token(row.get("symbol"))
+            for row in rows or []
+        )
+        if sym
+    ))
+    entries: dict[str, dict] = {}
+    if symbols:
+        conn = get_db_connection()
+        try:
+            entries = _read_earnings_plus_cache_entries(conn, symbols)
+        finally:
+            conn.close()
+
+    needs_bg: list[str] = []
     for row in rows or []:
         sym = _normalize_symbol_token(row.get("symbol"))
+        if not sym:
+            continue
         entry = entries.get(sym)
-        matches_release = _earnings_plus_entry_matches_report_row(entry, row)
-        is_qualified = (
-            bool(entry)
-            and matches_release
+        if (
+            entry is None
+            or entry.get("is_stale")
+            or not _earnings_plus_screener_synced_to_release(
+                entry, row.get("earnings_release_date")
+            )
+        ):
+            needs_bg.append(sym)
+    if needs_bg:
+        _enqueue_earnings_plus_screener_sync(needs_bg)
+
+    summary = _summarize_earnings_plus_cache(entries, symbols)
+
+    stamped_rows: list[dict] = []
+    release_unsynced_qualified = 0
+    badge_qualified = 0
+    for row in rows or []:
+        out = dict(row)
+        sym = _normalize_symbol_token(out.get("symbol"))
+        entry = entries.get(sym)
+        row_qualified = _earnings_plus_row_is_qualified(entry, row=out)
+        out["earnings_plus"] = bool(row_qualified)
+        if row_qualified:
+            badge_qualified += 1
+            helper = _build_earnings_plus_helper_from_cache_entry(entry)
+            if helper and helper.get("note"):
+                out["earnings_plus_note"] = helper["note"]
+            elif entry and entry.get("note"):
+                out["earnings_plus_note"] = entry.get("note")
+        else:
+            out.pop("earnings_plus_note", None)
+        if (
+            entry
+            and str(entry.get("decision") or "").strip().lower() == "qualified"
             and not entry.get("is_stale")
-            and entry.get("decision") == "qualified"
-        )
-        if mode == "only" and is_qualified:
+            and not _earnings_plus_screener_synced_to_release(entry, out.get("earnings_release_date"))
+        ):
+            release_unsynced_qualified += 1
+        stamped_rows.append(out)
+
+    summary["period_matched_qualified"] = badge_qualified
+    summary["badge_qualified"] = badge_qualified
+    summary["release_mismatch_qualified"] = release_unsynced_qualified
+    summary["release_unsynced_qualified"] = release_unsynced_qualified
+    summary["bg_sync_queued"] = len(list(dict.fromkeys(needs_bg)))
+
+    if mode == "all":
+        summary["filtered_symbols"] = len(stamped_rows)
+        return stamped_rows, summary
+
+    filtered_rows: list[dict] = []
+    for row in stamped_rows:
+        row_qualified = bool(row.get("earnings_plus"))
+        if mode == "only" and row_qualified:
             filtered_rows.append(row)
-        elif mode == "exclude" and not is_qualified:
+        elif mode == "exclude" and not row_qualified:
+            filtered_rows.append(row)
+        elif mode == "tv_eps_rev_beat" and is_tv_eps_rev_beat_row(row):
             filtered_rows.append(row)
     summary["filtered_symbols"] = len(filtered_rows)
     return filtered_rows, summary
 
 
 def _release_matches_screener_period(release_date: str | None, period_date_key: str | None) -> bool:
+    """Chart provisional fallback only: TV release vs Screener quarter end."""
     release_day = _parse_ymd_date(release_date)
     period_day = _parse_ymd_date(period_date_key)
     if release_day is None or period_day is None:
         return False
     delta_days = (release_day - period_day).days
-    return 0 <= delta_days <= 95
+    return 0 <= delta_days <= EARNINGS_PLUS_CHART_PERIOD_MAX_DAYS
 
 
 def _same_release_window(date_a: str | None, date_b: str | None, max_days: int = 14) -> bool:
@@ -1533,6 +2110,78 @@ def _refresh_symbol_earnings_chart_events(conn: sqlite3.Connection, symbol: str)
         _upsert_earnings_chart_event(conn, latest)
 
 
+def run_resync_recent_tv_earnings(
+    *,
+    lookback_days: int | None = None,
+    trigger: str = "manual",
+) -> dict:
+    """
+    Re-pull TradingView reported earnings for the last N release days and overwrite
+    stored chart events. One market scan — not a full-universe per-symbol crawl.
+    """
+    days = int(lookback_days) if lookback_days is not None else RECENT_RESYNC_LOOKBACK_DAYS
+    days = max(1, min(14, days))
+    set_job("earnings_tv_resync", f"Re-syncing TradingView earnings (last {days} days)...")
+    try:
+        with _earnings_beats_resp_lock:
+            _earnings_beats_resp_cache.clear()
+        payload = fetch_recent_reported_for_resync(lookback_days=days, limit=2000)
+        rows = list(payload.get("rows") or [])
+        upserted = 0
+        skipped = 0
+        symbols: list[str] = []
+        conn = get_db_connection()
+        try:
+            for row in rows:
+                if _reported_row_has_complete_outcome(row):
+                    event = _event_from_reported_row(row)
+                else:
+                    event = _event_from_incomplete_reported_row(row)
+                if event is None:
+                    skipped += 1
+                    continue
+                _upsert_earnings_chart_event(conn, event)
+                upserted += 1
+                sym = str(event.get("symbol") or "").strip().upper()
+                if sym and sym not in symbols:
+                    symbols.append(sym)
+            conn.commit()
+        finally:
+            conn.close()
+        meta = {
+            "lookback_days": days,
+            "scanner_rows": len(rows),
+            "upserted": upserted,
+            "skipped": skipped,
+            "symbols": len(symbols),
+            "trigger": trigger,
+            "fetched_at": payload.get("fetched_at"),
+        }
+        msg = (
+            f"TV earnings re-sync complete: {upserted} chart event(s) updated "
+            f"from {len(rows)} scanner row(s) (last {days} days)."
+        )
+        finish_job(msg, meta=meta)
+        return meta
+    except Exception as e:
+        fail_job(str(e))
+        raise
+
+
+def _sched_start_earnings_tv_resync() -> bool:
+    def _worker() -> None:
+        run_resync_recent_tv_earnings(trigger="scheduled")
+
+    result = _start_or_queue_job(
+        "earnings_tv_resync",
+        lambda: threading.Thread(target=_worker, daemon=True).start(),
+        label="TV earnings re-sync",
+        source="scheduled",
+        coalesce_key="earningsTvResync",
+    )
+    return result.get("status") in ("started", "queued")
+
+
 def _read_symbol_earnings_chart_events(conn: sqlite3.Connection, symbol: str) -> list[dict]:
     rows = conn.execute(
         """
@@ -1563,16 +2212,90 @@ def _read_symbol_earnings_chart_events(conn: sqlite3.Connection, symbol: str) ->
     return [dict(row) for row in rows]
 
 
+def _collect_tv_overlay_events(symbol: str) -> list[dict]:
+    """Pure TradingView reported + upcoming only (never Screener / chart hybrids)."""
+    sym = _normalize_symbol_token(symbol)
+    if not sym:
+        return []
+    events: list[dict] = []
+
+    # Live reported calendar rows (latest FQ-centric; include whatever TV returns).
+    try:
+        reported_payload = fetch_earnings_calendar(
+            mode="reported",
+            limit=25,
+            use_cache=True,
+            symbols=[sym],
+        )
+        for row in reported_payload.get("rows") or []:
+            if _normalize_symbol_token(row.get("symbol")) != sym:
+                continue
+            normalized = tv_quarterly_overlay.normalize_overlay_event(row)
+            if normalized:
+                events.append(normalized)
+    except Exception as exc:
+        print(f"[tv_quarterly_overlay] reported lookup failed ({sym}): {exc}")
+
+    # Live upcoming estimates (estimates only until TV prints actuals).
+    try:
+        for row in fetch_upcoming_estimates_for_symbols([sym]):
+            if _normalize_symbol_token(row.get("symbol")) != sym:
+                continue
+            normalized = tv_quarterly_overlay.normalize_overlay_event({
+                "earnings_release_next_date": row.get("earnings_release_next_date"),
+                "eps_estimate": row.get("eps_estimate"),
+                "revenue_estimate": row.get("revenue_estimate"),
+                # Explicit: never carry Screener actuals into TV overlay rows.
+                "eps_actual": None,
+                "revenue_actual": None,
+            })
+            if normalized:
+                events.append(normalized)
+    except Exception as exc:
+        print(f"[tv_quarterly_overlay] upcoming lookup failed ({sym}): {exc}")
+
+    return events
+
+
+def _attach_tv_quarterly_overlay(symbol: str, payload: dict | None) -> dict | None:
+    """Add TradingView-only tv_rows aligned to Screener periods (— when TV missing)."""
+    if not isinstance(payload, dict):
+        return payload
+    periods = payload.get("periods") or []
+    if not periods:
+        payload["tv_rows"] = tv_quarterly_overlay.build_tv_overlay_rows([], [])
+        return payload
+    try:
+        events = _collect_tv_overlay_events(symbol)
+        payload["tv_rows"] = tv_quarterly_overlay.build_tv_overlay_rows(periods, events)
+    except Exception as exc:
+        print(f"[tv_quarterly_overlay] build failed ({symbol}): {exc}")
+        payload["tv_rows"] = tv_quarterly_overlay.build_tv_overlay_rows(periods, [])
+    return payload
+
+
 # ──────────────────────────────────────────────
 # SCREENER DATA LOADER — cached at startup
 # ──────────────────────────────────────────────
 
 _stock_df: Optional[pd.DataFrame] = None
+# Enriched Price/1D%/1M% copy — avoid full-universe historical SQL on every list read.
+_stock_df_ohlc: Optional[pd.DataFrame] = None
+_stock_df_ohlc_ts: float = 0.0
+_stock_df_lock = threading.Lock()
+SCREENER_OHLC_REFRESH_TTL_SEC = 45.0
+# 4H integrity must not block chart-data; cooldown + background thread.
+
+
+_4h_integrity_last_ts: dict[str, float] = {}
+_4h_integrity_lock = threading.Lock()
+_4H_INTEGRITY_COOLDOWN_SEC = 900.0
 CHART_CACHE_TTL: int = _app_caches.chart_ttl
 CHART_CACHE_MAX_ENTRIES: int = _app_caches.chart_max_entries
 FILTER_CACHE_TTL: int = _app_caches.filter_ttl
 FILTER_CACHE_MAX_ENTRIES: int = _app_caches.filter_max_entries
 AGGRESSIVE_CACHE_RAM: bool = _app_caches.aggressive
+
 
 
 def _load_layout_file() -> dict:
@@ -1625,9 +2348,41 @@ def invalidate_chart_cache(symbol=None):
 
 
 def invalidate_stock_df():
-    global _stock_df
-    _stock_df = None
+    global _stock_df, _stock_df_ohlc, _stock_df_ohlc_ts
+    with _stock_df_lock:
+        _stock_df = None
+        _stock_df_ohlc = None
+        _stock_df_ohlc_ts = 0.0
     invalidate_filter_cache()
+
+
+def _schedule_4h_integrity_check(symbol: str) -> None:
+    """Queue a non-blocking 4H rescale scan (cooldown). Never call on the request path synchronously."""
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return
+    now = time_module.time()
+    with _4h_integrity_lock:
+        last = float(_4h_integrity_last_ts.get(sym) or 0.0)
+        if now - last < _4H_INTEGRITY_COOLDOWN_SEC:
+            return
+        _4h_integrity_last_ts[sym] = now
+
+    def _worker() -> None:
+        try:
+            conn = get_db_connection()
+            try:
+                from server.bars_4h_integrity import rescan_rescale_symbol_if_needed
+
+                applied = rescan_rescale_symbol_if_needed(conn, sym, lookback_calendar_days=120)
+                if applied:
+                    invalidate_chart_cache(sym)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+    threading.Thread(target=_worker, name=f"4h-integrity-{sym}", daemon=True).start()
 
 
 # screener.price often equals yesterday's close on cold start — treat as stale (use 2-bar hist).
@@ -1676,10 +2431,42 @@ def _should_apply_live_day_change(existing_chg: Optional[float], live_chg: Optio
     return True
 
 
+def _apply_movers_live_prices_only(df: pd.DataFrame) -> None:
+    """Cheap in-memory overlay from movers_live cache (no SQL)."""
+    if df is None or getattr(df, "empty", False):
+        return
+    try:
+        if not movers_data._session_day_intraday_active():
+            return
+    except Exception:
+        return
+    try:
+        live = movers_live.live_cache_snapshot()
+    except Exception:
+        live = {}
+    if not live:
+        return
+    for idx, row in df.iterrows():
+        sym = str(row.get("Symbol", "")).strip().upper()
+        snap = live.get(sym)
+        if not snap or not movers_live.cache_quote_fresh(snap):
+            continue
+        existing_chg = _finite_float(row.get("Change %"))
+        live_chg = _live_snap_day_change(snap)
+        px = _finite_float(snap.get("price"))
+        if px is not None:
+            df.at[idx, "Price"] = round(px, 2)
+        if _should_apply_live_day_change(existing_chg, live_chg):
+            df.at[idx, "Change %"] = live_chg
+    for col in ("Price", "Change %"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").round(2)
+
+
 def _apply_live_screener_ohlc(df: pd.DataFrame, conn) -> None:
     """
-    Refresh Price and 1D/1M % from historical_data on every read.
-    Cached _stock_df must not embed these — they go stale until invalidate ran.
+    Refresh Price and 1D/1M % from historical_data (expensive full-universe SQL).
+    Callers must TTL-cache the result — do not run on every list/search request.
 
     On a session day before 16:00 IST, when the latest DB bar is still yesterday,
     use screener.price vs prior close only when it differs materially from that close;
@@ -1787,23 +2574,7 @@ def _apply_live_screener_ohlc(df: pd.DataFrame, conn) -> None:
             df["Monthly Change %"] = m["month_chg_pct"].combine_first(df["Monthly Change %"])
 
         if session_intraday:
-            try:
-                live = movers_live.live_cache_snapshot()
-            except Exception:
-                live = {}
-            if live:
-                for idx, row in df.iterrows():
-                    sym = str(row.get("Symbol", "")).strip().upper()
-                    snap = live.get(sym)
-                    if not snap or not movers_live.cache_quote_fresh(snap):
-                        continue
-                    existing_chg = _finite_float(row.get("Change %"))
-                    live_chg = _live_snap_day_change(snap)
-                    px = _finite_float(snap.get("price"))
-                    if px is not None:
-                        df.at[idx, "Price"] = round(px, 2)
-                    if _should_apply_live_day_change(existing_chg, live_chg):
-                        df.at[idx, "Change %"] = live_chg
+            _apply_movers_live_prices_only(df)
 
         for col in ("Price", "Change %", "Monthly Change %"):
             if col in df.columns:
@@ -2113,7 +2884,14 @@ def _parse_json_list_param(raw: str) -> list:
 def _parse_snapshot_timeframes_csv(raw: Optional[str]) -> Optional[Tuple[str, ...]]:
     if raw is None:
         return None
-    parts = [str(x).strip().upper() for x in str(raw).split(",") if str(x).strip()]
+    try:
+        from filter_rebuild_registry import normalize_snapshot_timeframe
+    except Exception:
+        def normalize_snapshot_timeframe(x):  # type: ignore
+            s = str(x or "").strip()
+            return "30m" if s.lower() == "30m" else s.upper()
+
+    parts = [normalize_snapshot_timeframe(x) for x in str(raw).split(",") if str(x).strip()]
     if not parts:
         return None
     seen = set()
@@ -2146,6 +2924,10 @@ def _run_filter_symbols(filter_def: dict, market_sectors: list) -> Set[str]:
         result = filter_range_channel(body)
     elif filter_type == "avg_volume":
         result = filter_avg_volume(body)
+    elif filter_type == "annual_vs_ttm":
+        result = filter_annual_vs_ttm(body)
+    elif filter_type == "screener":
+        result = filter_screener(body)
     else:
         result = filter_ema(body)
     return set(result.get("symbols") or [])
@@ -2159,7 +2941,9 @@ def _filter_priority(filter_def: dict) -> tuple:
     condition = str(filter_def.get("condition", "")).strip().lower()
     base_rank = {
         "earnings": 0,
+        "screener": 0,
         "marketcap": 1,
+        "annual_vs_ttm": 1,
         "price": 2,
         "ema": 3,
         "macd": 4,
@@ -2334,7 +3118,7 @@ def _combined_filter_symbols_snapshot_fast(filters: list, market_sectors: list) 
     combined = None
     for idx, filter_def in enumerate(ordered_filters, start=1):
         ftype = str(filter_def.get("filter_type", "ema")).strip().lower()
-        if ftype in ("marketcap", "earnings"):
+        if ftype in ("marketcap", "earnings", "annual_vs_ttm", "avg_volume"):
             return None, False
         tf_unit, tf_num = parse_timeframe(str(filter_def.get("timeframe", "1D")))
         snapshot_key = _snapshot_timeframe_key(tf_unit, tf_num)
@@ -2417,14 +3201,18 @@ _SNAPSHOT_COVERAGE_CACHE_TTL_SEC = 45.0
 
 def _indicator_snapshots_cover_universe(timeframe: str) -> bool:
     """
-    Return True only if indicator_snapshots has enough rows for this timeframe to drive
-    filter/screener logic. A tiny partial rebuild (e.g. a few symbols) must not cap results.
+    Return True only if indicator_snapshots can drive filter/screener logic for this
+    timeframe. Two ways it cannot: a tiny partial rebuild (a few symbols would cap
+    results), or a fully populated snapshot that predates the newest daily bar, which
+    silently answers today's filter with an older session's indicators. Either way the
+    caller falls back to live candles.
     """
     now = time_module.time()
     cached = _app_caches.get_snapshot_coverage(timeframe)
     if cached and (now - cached.get("ts", 0)) <= _SNAPSHOT_COVERAGE_CACHE_TTL_SEC:
         return bool(cached.get("ok"))
     ok = False
+    stale_note = ""
     if DB_PATH.exists():
         conn = get_db_connection()
         try:
@@ -2432,13 +3220,27 @@ def _indicator_snapshots_cover_universe(timeframe: str) -> bool:
             cur.execute("SELECT COUNT(*) FROM screener")
             n_scr = int(cur.fetchone()[0] or 0)
             cur.execute(
-                "SELECT COUNT(DISTINCT symbol) FROM indicator_snapshots WHERE timeframe = ?",
+                "SELECT COUNT(DISTINCT symbol), MAX(updated_at) "
+                "FROM indicator_snapshots WHERE timeframe = ?",
                 (timeframe,),
             )
-            n_snap = int(cur.fetchone()[0] or 0)
+            row = cur.fetchone() or (0, None)
+            n_snap = int(row[0] or 0)
             ok = n_scr > 0 and (n_snap / n_scr) >= SNAPSHOT_FILTER_MIN_COVERAGE
+            if ok and timeframe in SNAPSHOT_FRESHNESS_TIMEFRAMES:
+                cur.execute("SELECT MAX(SUBSTR(Date, 1, 10)) FROM historical_data")
+                last_bar = str((cur.fetchone() or [None])[0] or "")
+                snap_day = str(row[1] or "")[:10]
+                if last_bar and (not snap_day or snap_day < last_bar):
+                    ok = False
+                    stale_note = (
+                        f"{timeframe} snapshot is from {snap_day or 'unknown'} "
+                        f"but bars run to {last_bar}"
+                    )
         finally:
             conn.close()
+    if stale_note:
+        print(f"[filter] {stale_note}; using live candles until snapshots are rebuilt")
     _app_caches.set_snapshot_coverage(timeframe, ok)
     return ok
 
@@ -2448,6 +3250,106 @@ def _load_filter_snapshots(timeframe: str, sector_symbols: Optional[Set[str]] = 
     if not _indicator_snapshots_cover_universe(timeframe):
         return []
     return _load_indicator_snapshots(timeframe, sector_symbols)
+
+
+def _snapshot_ema_column_coverage(snap_rows, ema_period: int) -> float:
+    """Share of snapshot rows with a non-null ema{period} value."""
+    if not snap_rows:
+        return 0.0
+    col = f"ema{ema_period}"
+    populated = 0
+    for row in snap_rows:
+        try:
+            if row[col] is not None:
+                populated += 1
+        except (KeyError, IndexError, TypeError):
+            continue
+    return populated / len(snap_rows)
+
+
+def _snapshots_usable_for_ema_filter(
+    snap_rows,
+    ema_period: int,
+    target: str,
+    target_ema_period: int,
+    min_coverage: float = SNAPSHOT_FILTER_MIN_COVERAGE,
+) -> bool:
+    """Reject snapshot rows when required EMA columns are mostly NULL (e.g. weekly EMA200)."""
+    if not snap_rows:
+        return False
+    periods = {ema_period}
+    if target == "ema":
+        periods.add(target_ema_period)
+    for period in periods:
+        if _snapshot_ema_column_coverage(snap_rows, period) < min_coverage:
+            return False
+    return True
+
+
+def _load_latest_two_daily_ohlc(conn, symbols=None) -> dict:
+    """
+    Latest and previous daily bars from historical_data, keyed by UPPER(symbol).
+
+    Price filters vs open/high/low must use the same session OHLC the chart/list show.
+    indicator_snapshots can lag a full session after daily scrape / live price refresh;
+    overlaying these bars prevents false matches (e.g. yesterday's green bar while
+    today closed below open).
+
+    Seeks once per symbol on the (Symbol, Date) index — a window over the full
+    historical_data table costs ~20s on a 7M-row DB for the same two bars.
+    """
+    cur = conn.cursor()
+    if symbols is None:
+        try:
+            cur.execute("SELECT Symbol FROM screener")
+            symbols = [r[0] for r in cur.fetchall()]
+        except Exception:
+            cur.execute(
+                "SELECT DISTINCT Symbol FROM historical_data "
+                "WHERE Symbol IS NOT NULL AND TRIM(Symbol) != ''"
+            )
+            symbols = [r[0] for r in cur.fetchall()]
+    bars_by_symbol = price_lookback.load_recent_daily_bars(conn, symbols, 2)
+    out: dict = {}
+    for sym, bars in bars_by_symbol.items():
+        if not bars:
+            continue
+        slot = out.setdefault(str(sym), {})
+        last = bars[-1]
+        slot["open_curr"], slot["high_curr"], slot["low_curr"], slot["close_curr"] = last
+        if len(bars) > 1:
+            prev = bars[-2]
+            slot["open_prev"], slot["high_prev"], slot["low_prev"], slot["close_prev"] = prev
+    return out
+
+
+def _snapshot_row_as_dict(row) -> dict:
+    if isinstance(row, dict):
+        return dict(row)
+    try:
+        return {k: row[k] for k in row.keys()}
+    except Exception:
+        return dict(row)
+
+
+def _overlay_daily_ohlc_on_price_snapshot_row(row: dict, ohlc: Optional[dict]) -> dict:
+    """Patch 1D OHLC fields on a snapshot row from latest historical_data bars."""
+    if not ohlc:
+        return row
+    out = dict(row)
+    for key in (
+        "open_curr",
+        "high_curr",
+        "low_curr",
+        "close_curr",
+        "open_prev",
+        "high_prev",
+        "low_prev",
+        "close_prev",
+    ):
+        if key in ohlc and ohlc[key] is not None:
+            out[key] = ohlc[key]
+    return out
 
 
 def _snapshot_timeframe_key(tf_unit: str, tf_num: int) -> Optional[str]:
@@ -2469,76 +3371,95 @@ def _snapshot_timeframe_key(tf_unit: str, tf_num: int) -> Optional[str]:
         return "1M" if tf_num == 1 else None
     if tf_unit == "H" and tf_num == 4:
         return "4H"
+    if tf_unit == "m" and tf_num == 30:
+        return "30m"
     return None
 
 
 def get_stock_df() -> pd.DataFrame:
-    global _stock_df
-    if _stock_df is None:
-        conn_b = get_db_connection()
-        try:
-            df = pd.read_sql_query("SELECT * FROM screener", conn_b)
-        finally:
-            conn_b.close()
+    """Screener frame with Price/1D%/1M% refreshed at most every SCREENER_OHLC_REFRESH_TTL_SEC."""
+    global _stock_df, _stock_df_ohlc, _stock_df_ohlc_ts
+    with _stock_df_lock:
+        if _stock_df is None:
+            conn_b = get_db_connection()
+            try:
+                df = pd.read_sql_query("SELECT * FROM screener", conn_b)
+            finally:
+                conn_b.close()
 
-        n = len(df)
-        _map = market_sectors.load_mapping(DATA_DIR)
-        se_col = df["nse_sector"] if "nse_sector" in df.columns else pd.Series([None] * n)
-        ind_col = df["nse_industry"] if "nse_industry" in df.columns else pd.Series([None] * n)
-        df["Market Sector"] = [
-            market_sectors.resolve_market_sector(
-                str(s).strip().upper(),
-                None if pd.isna(se) else str(se),
-                None if pd.isna(ind) else str(ind),
-                _map,
-                data_dir=DATA_DIR,
-            )
-            for s, se, ind in zip(df["symbol"], se_col, ind_col)
-        ]
+            n = len(df)
+            _map = market_sectors.load_mapping(DATA_DIR)
+            se_col = df["nse_sector"] if "nse_sector" in df.columns else pd.Series([None] * n)
+            ind_col = df["nse_industry"] if "nse_industry" in df.columns else pd.Series([None] * n)
+            df["Market Sector"] = [
+                market_sectors.resolve_market_sector(
+                    str(s).strip().upper(),
+                    None if pd.isna(se) else str(se),
+                    None if pd.isna(ind) else str(ind),
+                    _map,
+                    data_dir=DATA_DIR,
+                )
+                for s, se, ind in zip(df["symbol"], se_col, ind_col)
+            ]
 
-        # Rename screener columns to display names
-        rename_map = {
-            "symbol":                   "Symbol",
-            "market_cap":               "Market Cap",
-            "price":                    "Price",
-            "change_percent":           "Change %",
-            "change_percent_monthly":   "Monthly Change %",
-            "pe":                       "PE",
-            "revenue_growth_ttm":       "Revenue Growth TTM YoY",
-            "revenue_growth_qoq":       "Revenue Growth Quarterly QoQ",
-            "net_income_ttm":           "Net Income TTM YoY",
-            "net_income_qoq":           "Net Income Quarterly QoQ",
-            "ebitda_growth_qoq":        "EBITDA Growth Quarterly QoQ",
-        }
-        if "nse_sector" in df.columns:
-            rename_map["nse_sector"] = "NSE Sector"
-        if "nse_industry" in df.columns:
-            rename_map["nse_industry"] = "NSE Industry"
-        df.rename(columns=rename_map, inplace=True)
+            rename_map = {
+                "symbol":                   "Symbol",
+                "market_cap":               "Market Cap",
+                "price":                    "Price",
+                "change_percent":           "Change %",
+                "change_percent_monthly":   "Monthly Change %",
+                "pe":                       "PE",
+                "revenue_growth_ttm":       "Revenue Growth TTM YoY",
+                "revenue_growth_qoq":       "Revenue Growth Quarterly QoQ",
+                "net_income_ttm":           "Net Income TTM YoY",
+                "net_income_qoq":           "Net Income Quarterly QoQ",
+                "ebitda_growth_qoq":        "EBITDA Growth Quarterly QoQ",
+            }
+            if "nse_sector" in df.columns:
+                rename_map["nse_sector"] = "NSE Sector"
+            if "nse_industry" in df.columns:
+                rename_map["nse_industry"] = "NSE Industry"
+            df.rename(columns=rename_map, inplace=True)
 
-        df["Symbol"] = df["Symbol"].astype(str).str.strip().str.upper()
+            df["Symbol"] = df["Symbol"].astype(str).str.strip().str.upper()
 
-        for col in NUMERIC_DISPLAY_COLUMNS:
-            if col not in df.columns:
-                continue
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-            if col == "Market Cap":
-                df[col] = df[col].round(0)
-            else:
-                df[col] = df[col].round(2)
+            for col in NUMERIC_DISPLAY_COLUMNS:
+                if col not in df.columns:
+                    continue
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+                if col == "Market Cap":
+                    df[col] = df[col].round(0)
+                else:
+                    df[col] = df[col].round(2)
 
-        _stock_df = df
+            _stock_df = df
+            _stock_df_ohlc = None
+            _stock_df_ohlc_ts = 0.0
 
-    out = _stock_df.copy()
-    conn = get_db_connection()
-    try:
-        _apply_live_screener_ohlc(out, conn)
-        try:
-            market_cap_live.apply_live_market_cap(out, conn)
-        except Exception:
-            pass
-    finally:
-        conn.close()
+        now = time_module.time()
+        cache_fresh = (
+            _stock_df_ohlc is not None
+            and (now - float(_stock_df_ohlc_ts or 0.0)) < SCREENER_OHLC_REFRESH_TTL_SEC
+        )
+        if cache_fresh:
+            out = _stock_df_ohlc.copy()
+        else:
+            out = _stock_df.copy()
+            conn = get_db_connection()
+            try:
+                _apply_live_screener_ohlc(out, conn)
+                try:
+                    market_cap_live.apply_live_market_cap(out, conn)
+                except Exception:
+                    pass
+            finally:
+                conn.close()
+            _stock_df_ohlc = out.copy()
+            _stock_df_ohlc_ts = now
+            out = _stock_df_ohlc.copy()
+
+    # Fresh ticks without re-running full-universe SQL.
+    _apply_movers_live_prices_only(out)
     return out
 
 
@@ -2601,26 +3522,87 @@ def assign_period_key(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
 
 
 def aggregate_ohlcv(df: pd.DataFrame, timeframe: str) -> list:
-    df   = assign_period_key(df, timeframe)
+    """Aggregate daily OHLCV into timeframe bars.
+
+    Uses vectorized pandas groupby (not a Python per-bucket loop). A 1D path
+    skips bucketing entirely — the old loop was ~3s on ~7k daily rows.
+    """
+    cfg = TIMEFRAME_CONFIG.get(timeframe)
+    if cfg is None:
+        raise ValueError(f"Unknown timeframe: {timeframe}")
+
+    if df is None or df.empty:
+        return []
+
+    work = df.copy()
+    work["Date"] = pd.to_datetime(work["Date"], utc=True).dt.tz_convert(None)
+    work.sort_values("Date", inplace=True)
+    work.reset_index(drop=True, inplace=True)
+
+    # 1D: each daily row is already one bar — avoid groupby entirely.
+    if cfg.get("anchor") == "day" and int(cfg.get("days") or 1) == 1:
+        bars = []
+        for row in work.itertuples(index=False):
+            vol_raw = getattr(row, "Volume", None)
+            try:
+                vol = float(vol_raw) if vol_raw is not None and not pd.isna(vol_raw) else 0.0
+            except (TypeError, ValueError):
+                vol = 0.0
+            if vol <= 0:
+                vol = 0.0
+            bars.append({
+                "time":   str(row.Date)[:10],
+                "open":   round(float(row.Open), 2),
+                "high":   round(float(row.High), 2),
+                "low":    round(float(row.Low), 2),
+                "close":  round(float(row.Close), 2),
+                "volume": round(vol, 2),
+            })
+        return bars
+
+    work = assign_period_key(work, timeframe)
+    grouped = work.groupby("period_key", sort=True).agg(
+        Date=("Date", "first"),
+        Open=("Open", "first"),
+        High=("High", "max"),
+        Low=("Low", "min"),
+        Close=("Close", "last"),
+        Volume=("Volume", "sum"),
+    )
     bars = []
-
-    for _, group in df.groupby("period_key", sort=True):
-        group    = group.sort_values("Date")
-        date_str = str(group["Date"].iloc[0])[:10]
+    for row in grouped.itertuples(index=False):
+        try:
+            vol = float(row.Volume) if row.Volume is not None and not pd.isna(row.Volume) else 0.0
+        except (TypeError, ValueError):
+            vol = 0.0
+        if vol <= 0:
+            vol = 0.0
         bars.append({
-            "time":   date_str,
-            "open":   round(float(group["Open"].iloc[0]),   2),
-            "high":   round(float(group["High"].max()),     2),
-            "low":    round(float(group["Low"].min()),      2),
-            "close":  round(float(group["Close"].iloc[-1]), 2),
-            "volume": (
-                round(float(group["Volume"].sum()), 2)
-                if group["Volume"].notna().any() and float(group["Volume"].sum()) > 0
-                else 0
-            ),
+            "time":   str(row.Date)[:10],
+            "open":   round(float(row.Open), 2),
+            "high":   round(float(row.High), 2),
+            "low":    round(float(row.Low), 2),
+            "close":  round(float(row.Close), 2),
+            "volume": round(vol, 2),
         })
-
     return bars
+
+
+def _chart_daily_row_budget(timeframe: str, bars_limit: Optional[int], ema_periods: list) -> Optional[int]:
+    """Newest-first daily row cap for historical_data chart loads. None = full history."""
+    cfg = TIMEFRAME_CONFIG.get(timeframe) or {}
+    anchor = cfg.get("anchor")
+    if anchor not in ("day", "week", "month"):
+        return None
+    limit = int(bars_limit) if bars_limit is not None else 2000
+    max_req = max(int(p) for p in ema_periods) if ema_periods else 0
+    warmup = max(120, max_req + 50, 26 + 9 + 15, 90)
+    need_bars = limit + warmup
+    if anchor == "day":
+        return need_bars * int(cfg.get("days") or 1) + 10
+    if anchor == "week":
+        return need_bars * 5 * int(cfg.get("weeks") or 1) + 40
+    return need_bars * 23 * int(cfg.get("months") or 1) + 60
 
 
 # ──────────────────────────────────────────────
@@ -2833,10 +3815,10 @@ def _pct_from_snapshot_closes(close_curr, close_prev) -> Optional[float]:
     return round(pct, 2)
 
 
-def _batch_change_2w_pct(conn, symbols: list[str]) -> dict[str, float]:
+def _batch_change_1m_pct(conn, symbols: list[str]) -> dict[str, float]:
     """
-    2W % for earnings table: prefer indicator_snapshots (fast), else aggregate last
-    daily tail from historical_data for symbols missing a 2W snapshot row.
+    1M % for earnings table: prefer indicator_snapshots (fast), else aggregate last
+    daily tail from historical_data for symbols missing a 1M snapshot row.
     """
     wanted = list(
         dict.fromkeys(
@@ -2861,7 +3843,7 @@ def _batch_change_2w_pct(conn, symbols: list[str]) -> dict[str, float]:
                 f"""
                 SELECT UPPER(TRIM(symbol)) AS sym, close_curr, close_prev
                 FROM indicator_snapshots
-                WHERE timeframe = '2W'
+                WHERE timeframe = '1M'
                   AND UPPER(TRIM(symbol)) IN ({placeholders})
                 """,
                 chunk,
@@ -2889,6 +3871,13 @@ def _batch_change_2w_pct(conn, symbols: list[str]) -> dict[str, float]:
         else:
             missing_for_aggregate.append(sym)
 
+    # Skip heavy historical_data aggregation when many symbols miss 1M snapshots —
+    # TV earnings scan already carries change|1M for most rows. Aggregating hundreds
+    # of daily tails routinely blew past the client 120s timeout.
+    MAX_1M_AGGREGATE = 40
+    if len(missing_for_aggregate) > MAX_1M_AGGREGATE:
+        return remapped
+
     if not missing_for_aggregate:
         return remapped
 
@@ -2896,7 +3885,7 @@ def _batch_change_2w_pct(conn, symbols: list[str]) -> dict[str, float]:
     for sym in missing_for_aggregate:
         agg_query.extend(_earnings_screener_symbol_candidates(sym))
     agg_query = list(dict.fromkeys(agg_query))
-    tail_days = 90
+    tail_days = 120
     agg_by_symbol: dict[str, float] = {}
     agg_chunk = 80
     for i in range(0, len(agg_query), agg_chunk):
@@ -2931,7 +3920,7 @@ def _batch_change_2w_pct(conn, symbols: list[str]) -> dict[str, float]:
             sym_key = str(sym or "").strip().upper()
             if not sym_key:
                 continue
-            pct = _last_bar_change_pct_from_daily_df(group, "2W")
+            pct = _last_bar_change_pct_from_daily_df(group, "1M")
             if pct is not None:
                 agg_by_symbol[sym_key] = pct
 
@@ -2947,7 +3936,9 @@ def _batch_change_2w_pct(conn, symbols: list[str]) -> dict[str, float]:
 
 
 def _enrich_earnings_rows_with_screener_prices(payload: dict) -> dict:
-    """Screener price/change when available; else TradingView; 2W % matches chart 2W bars."""
+    """Screener price/1D when available; P/E from TV; 1M % matches chart 1M bars (else TV).
+    Also attaches resolved Market Sector from screener industry mapping.
+    """
     rows = payload.get("rows") or []
     if not rows:
         return payload
@@ -2962,56 +3953,84 @@ def _enrich_earnings_rows_with_screener_prices(payload: dict) -> dict:
 
     price_by_symbol: dict[str, float | None] = {}
     change_1d_by_symbol: dict[str, float | None] = {}
-    change_2w_by_symbol: dict[str, float] = {}
+    change_1m_by_symbol: dict[str, float] = {}
+    sector_meta_by_symbol: dict[str, tuple[Optional[str], Optional[str]]] = {}
     if DB_PATH.exists():
         lookup_symbols: list[str] = []
         for sym in earn_symbols:
             lookup_symbols.extend(_earnings_screener_symbol_candidates(sym))
         lookup_symbols = list(dict.fromkeys(lookup_symbols))
 
-        conn = get_db_connection()
         try:
-            cur = conn.cursor()
-            chunk_size = 400
-            for i in range(0, len(lookup_symbols), chunk_size):
-                chunk = lookup_symbols[i : i + chunk_size]
-                placeholders = ",".join("?" * len(chunk))
-                cur.execute(
-                    f"""
-                    SELECT UPPER(TRIM(symbol)) AS sym, price, change_percent
-                    FROM screener
-                    WHERE UPPER(TRIM(symbol)) IN ({placeholders})
-                    """,
-                    chunk,
-                )
-                for sym, price, chg_1d in cur.fetchall():
-                    if sym is None:
-                        continue
-                    key = str(sym)
-                    try:
-                        price_by_symbol[key] = (
-                            round(float(price), 2) if price is not None else None
+            conn = get_db_connection()
+            try:
+                cur = conn.cursor()
+                chunk_size = 400
+                for i in range(0, len(lookup_symbols), chunk_size):
+                    chunk = lookup_symbols[i : i + chunk_size]
+                    placeholders = ",".join("?" * len(chunk))
+                    cur.execute(
+                        f"""
+                        SELECT UPPER(TRIM(symbol)) AS sym, price, change_percent,
+                               nse_sector, nse_industry
+                        FROM screener
+                        WHERE UPPER(TRIM(symbol)) IN ({placeholders})
+                        """,
+                        chunk,
+                    )
+                    for sym, price, chg_1d, nse_se, nse_ind in cur.fetchall():
+                        if sym is None:
+                            continue
+                        key = str(sym)
+                        try:
+                            price_by_symbol[key] = (
+                                round(float(price), 2) if price is not None else None
+                            )
+                        except (TypeError, ValueError):
+                            price_by_symbol[key] = None
+                        try:
+                            change_1d_by_symbol[key] = (
+                                round(float(chg_1d), 2)
+                                if chg_1d is not None and math.isfinite(float(chg_1d))
+                                else None
+                            )
+                        except (TypeError, ValueError):
+                            change_1d_by_symbol[key] = None
+                        sector_meta_by_symbol[key] = (
+                            str(nse_se).strip() if nse_se else None,
+                            str(nse_ind).strip() if nse_ind else None,
                         )
-                    except (TypeError, ValueError):
-                        price_by_symbol[key] = None
-                    try:
-                        change_1d_by_symbol[key] = (
-                            round(float(chg_1d), 2)
-                            if chg_1d is not None and math.isfinite(float(chg_1d))
-                            else None
-                        )
-                    except (TypeError, ValueError):
-                        change_1d_by_symbol[key] = None
-            change_2w_by_symbol = _batch_change_2w_pct(conn, earn_symbols)
-        finally:
-            conn.close()
+                change_1m_by_symbol = _batch_change_1m_pct(conn, earn_symbols)
+            finally:
+                conn.close()
+        except sqlite3.OperationalError as e:
+            print(f"[earnings-beats] screener price enrich skipped (db busy): {e}")
+            # Fall through — TradingView prices on the row still render.
+
+    sector_by_symbol: dict[str, list] = {}
+    try:
+        _map = market_sectors.load_mapping(DATA_DIR)
+        for earn_sym in earn_symbols:
+            pick = earn_sym
+            se: Optional[str] = None
+            ind: Optional[str] = None
+            for candidate in _earnings_screener_symbol_candidates(earn_sym):
+                if candidate in sector_meta_by_symbol:
+                    pick = candidate
+                    se, ind = sector_meta_by_symbol[candidate]
+                    break
+            sector_by_symbol[earn_sym] = market_sectors.resolve_market_sectors(
+                pick, se, ind, _map, data_dir=DATA_DIR,
+            )
+    except Exception as exc:
+        print(f"[earnings-beats] sector enrich skipped: {exc}")
 
     still_missing: list[str] = []
     for row in rows:
         sym = str(row.get("symbol") or "").strip().upper()
         screener_price = None
         screener_chg_1d = None
-        screener_chg_2w = None
+        screener_chg_1m = None
         for candidate in _earnings_screener_symbol_candidates(sym):
             px = price_by_symbol.get(candidate)
             if px is not None and px > 0:
@@ -3019,13 +4038,13 @@ def _enrich_earnings_rows_with_screener_prices(payload: dict) -> dict:
             ch1 = change_1d_by_symbol.get(candidate)
             if ch1 is not None:
                 screener_chg_1d = ch1
-            ch2 = change_2w_by_symbol.get(candidate)
-            if ch2 is not None:
-                screener_chg_2w = ch2
+            ch1m = change_1m_by_symbol.get(candidate)
+            if ch1m is not None:
+                screener_chg_1m = ch1m
             if (
                 screener_price is not None
                 and screener_chg_1d is not None
-                and screener_chg_2w is not None
+                and screener_chg_1m is not None
             ):
                 break
         tv_price = _row_tv_close_price(row)
@@ -3045,25 +4064,51 @@ def _enrich_earnings_rows_with_screener_prices(payload: dict) -> dict:
         else:
             row["change_1d_pct"] = None
 
-        row["change_2w_pct"] = screener_chg_2w
+        # Prefer local 1M bars; keep TV change|1M from the earnings scan if present.
+        if screener_chg_1m is not None:
+            row["change_1m_pct"] = screener_chg_1m
+        # else leave whatever the TV earnings scan already put on the row
 
+        # P/E comes from TradingView (already on row when scan included it).
+        pe = row.get("price_earnings_ttm")
+        try:
+            if pe is not None and math.isfinite(float(pe)):
+                row["price_earnings_ttm"] = round(float(pe), 2)
+            else:
+                row["price_earnings_ttm"] = None
+        except (TypeError, ValueError):
+            row["price_earnings_ttm"] = None
+
+        tags = sector_by_symbol.get(sym) or []
+        row["market_sectors"] = list(tags) if tags else None
+        if tags:
+            row["market_sector"] = " · ".join(tags)
+        else:
+            row["market_sector"] = None
+
+    # Second TradingView round-trip ONLY for missing price / 1D — never expand the
+    # list for missing P/E or 1M (those are often null and would re-fetch every row
+    # for 2+ minutes past the client 120s timeout).
     need_tv: list[str] = list(dict.fromkeys(still_missing))
     for row in rows:
         sym = str(row.get("symbol") or "").strip().upper()
-        if not sym:
+        if not sym or sym in need_tv:
             continue
-        if (
-            row.get("price") is None
-            or row.get("change_1d_pct") is None
-            or row.get("change_2w_pct") is None
-        ) and sym not in need_tv:
+        if row.get("price") is None or row.get("change_1d_pct") is None:
             need_tv.append(sym)
+
+    # Hard cap — price fill is best-effort; do not hammer TradingView.
+    MAX_TV_PRICE_FILL = 60
+    if len(need_tv) > MAX_TV_PRICE_FILL:
+        need_tv = need_tv[:MAX_TV_PRICE_FILL]
 
     if need_tv:
         tv_snap_by_symbol = lookup_tv_market_metrics(need_tv)
         for row in rows:
             sym = str(row.get("symbol") or "").strip().upper()
             snap = tv_snap_by_symbol.get(sym) or {}
+            if not snap:
+                continue
             if row.get("price") is None:
                 px = snap.get("price")
                 if px is not None and px > 0:
@@ -3072,12 +4117,48 @@ def _enrich_earnings_rows_with_screener_prices(payload: dict) -> dict:
                 ch = snap.get("change_1d_pct")
                 if ch is not None:
                     row["change_1d_pct"] = ch
-            if row.get("change_2w_pct") is None:
-                ch2 = snap.get("change_2w_pct")
-                if ch2 is not None:
-                    row["change_2w_pct"] = ch2
+            if row.get("change_1m_pct") is None:
+                ch1m = snap.get("change_1m_pct")
+                if ch1m is not None:
+                    row["change_1m_pct"] = ch1m
+            if row.get("price_earnings_ttm") is None:
+                pe = snap.get("price_earnings_ttm")
+                if pe is not None:
+                    row["price_earnings_ttm"] = pe
+
+    # Drop legacy 2W field so clients don't show stale values.
+    for row in rows:
+        row.pop("change_2w_pct", None)
 
     return payload
+
+
+_EARNINGS_BEATS_RESP_TTL_SEC = 120.0
+_earnings_beats_resp_cache: dict[str, tuple[float, dict]] = {}
+_earnings_beats_resp_lock = threading.Lock()
+
+
+def _earnings_beats_resp_cache_get(key: str) -> Optional[dict]:
+    now = time_module.time()
+    with _earnings_beats_resp_lock:
+        hit = _earnings_beats_resp_cache.get(key)
+        if not hit:
+            return None
+        ts, payload = hit
+        if now - ts > _EARNINGS_BEATS_RESP_TTL_SEC:
+            _earnings_beats_resp_cache.pop(key, None)
+            return None
+        return payload
+
+
+def _earnings_beats_resp_cache_set(key: str, payload: dict) -> None:
+    with _earnings_beats_resp_lock:
+        _earnings_beats_resp_cache[key] = (time_module.time(), payload)
+        if len(_earnings_beats_resp_cache) > 64:
+            # Drop oldest entries.
+            oldest = sorted(_earnings_beats_resp_cache.items(), key=lambda kv: kv[1][0])
+            for k, _ in oldest[: max(1, len(oldest) - 48)]:
+                _earnings_beats_resp_cache.pop(k, None)
 
 
 @app.get("/api/earnings-beats")
@@ -3096,7 +4177,7 @@ def get_earnings_beats(
     eps_surprise_max: float | None = Query(None, description="reported: max EPS surprise %"),
     revenue_surprise_min: float | None = Query(None, description="reported: min revenue surprise %"),
     revenue_surprise_max: float | None = Query(None, description="reported: max revenue surprise %"),
-    earnings_plus: str = Query("all", description="reported only: all|only|exclude"),
+    earnings_plus: str = Query("all", description="reported only: all|only|exclude|tv_eps_rev_beat"),
     limit: int = Query(2000, ge=1, le=2000, description="max rows returned after NSE dedupe"),
     symbols: str | None = Query(
         None,
@@ -3114,8 +4195,11 @@ def get_earnings_beats(
     if mode_norm not in ("reported", "upcoming"):
         raise HTTPException(status_code=400, detail="mode must be 'reported' or 'upcoming'")
     earnings_plus_mode = str(earnings_plus or "all").strip().lower()
-    if earnings_plus_mode not in {"all", "only", "exclude"}:
-        raise HTTPException(status_code=400, detail="earnings_plus must be one of: all, only, exclude")
+    if earnings_plus_mode not in EARNINGS_PLUS_FILTER_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail="earnings_plus must be one of: all, only, exclude, tv_eps_rev_beat",
+        )
     symbol_list: list[str] | None = None
     if symbols and str(symbols).strip():
         symbol_list = []
@@ -3125,7 +4209,20 @@ def get_earnings_beats(
                 symbol_list.append(sym)
         if not symbol_list:
             symbol_list = None
+    # Short TTL for full enriched payload — stops live-tick client storms from re-hitting TV.
+    _resp_cache_key = None
+    if not refresh and symbol_list:
+        _resp_cache_key = (
+            f"eb:{mode_norm}:{report_window}:{period}:{earnings_plus_mode}:"
+            f"{mcap_min}:{mcap_max}:{eps_surprise_min}:{eps_surprise_max}:"
+            f"{revenue_surprise_min}:{revenue_surprise_max}:{limit}:"
+            f"{','.join(sorted(symbol_list))}"
+        )
+        hit = _earnings_beats_resp_cache_get(_resp_cache_key)
+        if hit is not None:
+            return hit
     try:
+        _t_tv = time_module.time()
         payload = fetch_earnings_calendar(
             mode=mode_norm,  # type: ignore[arg-type]
             year=year,
@@ -3142,28 +4239,32 @@ def get_earnings_beats(
             use_cache=not refresh,
             symbols=symbol_list,
         )
+        tv_ms = int((time_module.time() - _t_tv) * 1000)
         if mode_norm == "reported":
             filtered_rows, earnings_plus_cache = _apply_reported_earnings_plus_filter(
                 payload.get("rows") or [],
                 earnings_plus_mode,
             )
             payload["earnings_plus_cache"] = earnings_plus_cache
-        else:
-            filtered_rows = payload.get("rows") or []
-        if mode_norm == "reported" and earnings_plus_mode != "all":
+            # Always write stamped rows back (earnings_plus flag per release).
             payload["rows"] = filtered_rows
             payload["count"] = len(filtered_rows)
-            payload["total_matches"] = len(filtered_rows)
-            if payload.get("matched_symbols") is not None:
-                payload["matched_symbols"] = len(filtered_rows)
-            payload["truncated"] = False
+            if earnings_plus_mode != "all":
+                payload["total_matches"] = len(filtered_rows)
+                if payload.get("matched_symbols") is not None:
+                    payload["matched_symbols"] = len(filtered_rows)
+                payload["truncated"] = False
             filters = payload.get("filters")
             if isinstance(filters, dict):
                 filters["earnings_plus"] = earnings_plus_mode
+        _t_en = time_module.time()
         out = _enrich_earnings_rows_with_screener_prices(payload)
+        enrich_ms = int((time_module.time() - _t_en) * 1000)
         filters = out.get("filters")
         if isinstance(filters, dict):
             filters["earnings_plus"] = earnings_plus_mode if mode_norm == "reported" else "all"
+        if _resp_cache_key:
+            _earnings_beats_resp_cache_set(_resp_cache_key, out)
         elapsed_ms = int((time_module.time() - _t0) * 1000)
         if elapsed_ms >= 3000:
             n_rows = len(out.get("rows") or [])
@@ -3173,8 +4274,40 @@ def get_earnings_beats(
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
+    except sqlite3.OperationalError as e:
+        # Prefer returning TV rows without screener enrich over failing the page.
+        print(f"[earnings-beats] sqlite busy, returning unenriched payload: {e}")
+        try:
+            if "payload" in locals() and isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database busy while loading earnings (retry shortly): {e}",
+        ) from e
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"TradingView screener failed: {e}") from e
+
+
+@app.get("/api/earnings-plus-flags")
+def get_earnings_plus_flags(
+    symbols: str = Query(..., description="comma-separated NSE symbols"),
+):
+    """Bulk Earnings+ qualified flags from earnings_plus_cache (same source as chart/market map)."""
+    symbol_list = list(dict.fromkeys(
+        s.strip().upper() for s in str(symbols or "").split(",") if s.strip()
+    ))
+    if not symbol_list:
+        return {"qualified": [], "count": 0}
+    from earnings_plus_lookup import read_qualified_symbols
+
+    conn = get_db_connection()
+    try:
+        qualified = read_qualified_symbols(conn, symbol_list)
+    finally:
+        conn.close()
+    return {"qualified": sorted(qualified), "count": len(qualified)}
 
 
 @app.get("/api/earnings-chart-events/{symbol}")
@@ -3187,20 +4320,38 @@ def get_earnings_chart_events(
         raise HTTPException(status_code=400, detail="symbol is required")
     conn = get_db_connection()
     try:
-        ensure_earnings_chart_events_table(conn)
+        try:
+            ensure_earnings_chart_events_table(conn)
+        except sqlite3.OperationalError as e:
+            print(f"[earnings_chart_events] ensure table busy ({sym}): {e}")
         if refresh_latest:
             try:
                 _refresh_symbol_earnings_chart_events(conn, sym)
-                conn.commit()
+                with _earnings_plus_db_write_lock:
+                    conn.commit()
             except Exception as e:
                 print(f"[earnings_chart_events] refresh warning ({sym}): {e}")
-        rows = _read_symbol_earnings_chart_events(conn, sym)
-        earnings_plus_entry = _read_earnings_plus_cache_entry(conn, sym)
+        try:
+            rows = _read_symbol_earnings_chart_events(conn, sym)
+        except sqlite3.OperationalError as e:
+            print(f"[earnings_chart_events] read busy ({sym}): {e}")
+            rows = []
+        try:
+            earnings_plus_entry = _read_earnings_plus_cache_entry(conn, sym)
+        except sqlite3.OperationalError:
+            earnings_plus_entry = None
         return {
             "symbol": sym,
             "count": len(rows),
             "rows": rows,
             "earnings_plus_helper": _build_earnings_plus_helper_from_cache_entry(earnings_plus_entry),
+            "earnings_plus_status": {
+                "decision": (earnings_plus_entry or {}).get("decision"),
+                "basis_used": (earnings_plus_entry or {}).get("basis_used"),
+                "latest_period": (earnings_plus_entry or {}).get("latest_period"),
+                "note": (earnings_plus_entry or {}).get("note"),
+                "is_stale": bool((earnings_plus_entry or {}).get("is_stale")),
+            },
             "refresh_latest": refresh_latest,
             "historical_backfill": "forward_only_latest_quarter_snapshot",
         }
@@ -3225,16 +4376,20 @@ def get_stocks(
         raise HTTPException(status_code=500, detail=str(e))
 
     active_filters = _parse_json_list_param(filters)
-    market_sectors = [str(x).strip() for x in _parse_json_list_param(marketSectors) if str(x).strip()]
+    selected_sectors = [str(x).strip() for x in _parse_json_list_param(marketSectors) if str(x).strip()]
 
     if search.strip():
         mask = df["Symbol"].str.contains(search.strip().upper(), na=False)
         df   = df[mask]
 
-    if market_sectors:
-        df = df[df["Market Sector"].isin(market_sectors)]
+    if selected_sectors:
+        allowed_sector_syms = market_sectors.symbol_set_for_market_sectors(
+            DATA_DIR, DB_PATH, selected_sectors,
+        )
+        if allowed_sector_syms is not None:
+            df = df[df["Symbol"].isin(allowed_sector_syms)]
 
-    filter_symbols = _combined_filter_symbols(active_filters, market_sectors)
+    filter_symbols = _combined_filter_symbols(active_filters, selected_sectors)
     if filter_symbols is not None:
         df = df[df["Symbol"].isin(filter_symbols)]
 
@@ -3266,7 +4421,7 @@ def get_stocks(
     if elapsed_ms >= 250:
         print(
             f"[perf] /api/stocks -> {elapsed_ms}ms "
-            f"(filters={len(active_filters)}, sectors={len(market_sectors)}, total={total})"
+            f"(filters={len(active_filters)}, sectors={len(selected_sectors)}, total={total})"
         )
     return result
 
@@ -3371,20 +4526,15 @@ def get_chart_data(
     _ema_periods = [p for p in [ema1, ema2, ema3, ema4] if p is not None]
     symbol = symbol.strip().upper()
 
-    if timeframe == "4H" and not live_today:
-        try:
-            conn_pre = get_db_connection()
-            from server.bars_4h_integrity import rescan_rescale_symbol_if_needed
-
-            if rescan_rescale_symbol_if_needed(conn_pre, symbol, lookback_calendar_days=120):
-                invalidate_chart_cache(symbol)
-            conn_pre.close()
-        except Exception:
-            pass
-
     _cached      = get_chart_cache(symbol, timeframe, _ema_periods) if not live_today else None
     if _cached is not None:
+        # Integrity is background-only — never block a cache hit (TF switches).
+        if timeframe == "4H" and not live_today:
+            _schedule_4h_integrity_check(symbol)
         return _cached
+
+    if timeframe == "4H" and not live_today:
+        _schedule_4h_integrity_check(symbol)
 
     if timeframe not in TIMEFRAME_CONFIG:
         raise HTTPException(
@@ -3430,22 +4580,77 @@ def get_chart_data(
             set_chart_cache(symbol, timeframe, _ema_periods, result)
         return result
 
+    if timeframe == "30m":
+        try:
+            conn = get_db_connection()
+            from server.bars_30m import (
+                format_30m_missing_detail,
+                get_bars_30m_source,
+                load_bars_30m_for_chart,
+            )
+
+            bars = load_bars_30m_for_chart(conn, symbol, limit=bars_limit or 2000)
+            day_raw = _equity_day_change_pct_single(symbol, conn)
+            intraday_source = get_bars_30m_source(conn, symbol)
+            missing_detail = (
+                format_30m_missing_detail(symbol, conn, is_index=False) if not bars else None
+            )
+            conn.close()
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"DB query failed: {str(e)}")
+        if not bars:
+            raise HTTPException(status_code=404, detail=missing_detail)
+        day_change_pct = round(float(day_raw), 2) if day_raw is not None and math.isfinite(day_raw) else None
+        result = _assemble_chart_result(
+            symbol,
+            timeframe,
+            bars,
+            day_change_pct,
+            _ema_periods,
+            bars_limit,
+            live_today=False,
+        )
+        if intraday_source:
+            result["intraday_source"] = intraday_source
+        if not live_today:
+            set_chart_cache(symbol, timeframe, _ema_periods, result)
+        return result
+
     try:
         conn = get_db_connection()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
     try:
-        raw_df = pd.read_sql_query(
-            """
-            SELECT SUBSTR(Date,1,10) as Date, Open, High, Low, Close, Volume
-            FROM historical_data
-            WHERE Symbol = ?
-            ORDER BY Date ASC
-            """,
-            conn,
-            params=(symbol,),
-        )
+        row_budget = _chart_daily_row_budget(timeframe, bars_limit, _ema_periods)
+        if row_budget is not None:
+            raw_df = pd.read_sql_query(
+                """
+                SELECT Date, Open, High, Low, Close, Volume FROM (
+                    SELECT SUBSTR(Date,1,10) as Date, Open, High, Low, Close, Volume
+                    FROM historical_data
+                    WHERE Symbol = ?
+                    ORDER BY Date DESC
+                    LIMIT ?
+                ) newest
+                ORDER BY Date ASC
+                """,
+                conn,
+                params=(symbol, int(row_budget)),
+            )
+        else:
+            raw_df = pd.read_sql_query(
+                """
+                SELECT SUBSTR(Date,1,10) as Date, Open, High, Low, Close, Volume
+                FROM historical_data
+                WHERE Symbol = ?
+                ORDER BY Date ASC
+                """,
+                conn,
+                params=(symbol,),
+            )
         day_raw = _equity_day_change_pct_single(symbol, conn)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"DB query failed: {str(e)}")
@@ -3480,24 +4685,28 @@ def get_chart_data(
 
     live_day_chg = None
     if live_today:
-        from server.product_config import is_web_host_mode
-
-        # Web showcase: live candles are client-only (Refresh prices patch). Never merge on server.
-        skip_server_live = is_web_host_mode(BASE_DIR)
-        if not skip_server_live:
+        # Merge session O/H/L into today's bar. Showcase used to skip this and rely on
+        # client overlay only — incomplete DB highs (e.g. FEDFINA 160.8 vs HOD 174.4)
+        # never showed a wick when the overlay lag/failed.
+        try:
+            bars, live_day_chg = movers_live.merge_live_into_chart_bars(
+                symbol, bars, timeframe, allow_fetch=True
+            )
+        except TypeError:
+            # Older movers_live without allow_fetch kwarg (encrypted/runtime skew).
             try:
-                bars, live_day_chg = movers_live.merge_live_into_chart_bars(symbol, bars, timeframe)
+                bars, live_day_chg = movers_live.merge_live_into_chart_bars(
+                    symbol, bars, timeframe
+                )
             except Exception:
                 pass
+        except Exception:
+            pass
 
     full_closes = [float(b["close"]) for b in bars]
     trim_start = _chart_payload_trim_start(len(bars), bars_limit, _ema_periods)
 
-    day_change_pct = None
-    if live_day_chg is not None and math.isfinite(live_day_chg):
-        day_change_pct = round(float(live_day_chg), 2)
-    elif day_raw is not None and math.isfinite(day_raw):
-        day_change_pct = round(float(day_raw), 2)
+    day_change_pct = movers_data.resolve_chart_day_change_pct(day_raw, live_day_chg)
 
     trimmed_bars = bars[trim_start:]
     times = [b["time"] for b in trimmed_bars]
@@ -3561,6 +4770,21 @@ def get_chart_data(
     except Exception:
         pass
 
+    except Exception:
+        pass
+
+    corp_markers: list = []
+    try:
+        from server.chart_corp_markers import load_corp_markers_for_chart
+
+        conn_mk = get_db_connection()
+        try:
+            corp_markers = load_corp_markers_for_chart(conn_mk, symbol)
+        finally:
+            conn_mk.close()
+    except Exception:
+        corp_markers = []
+
     result = {
         "symbol":    symbol,
         "timeframe": timeframe,
@@ -3571,6 +4795,7 @@ def get_chart_data(
         "day_change_pct": day_change_pct,
         "live_today_bar": bool(live_today and live_day_chg is not None),
         "lineage_note": lineage_note,
+        "corp_markers": corp_markers,
     }
     if not live_today:
         set_chart_cache(symbol, timeframe, _ema_periods, result)
@@ -3602,10 +4827,7 @@ DEFAULT_LAYOUT = {
 # Routes moved to server/routers/settings.py
 
 
-_INSTRUMENT_NOTE_TYPES = frozenset({"stock", "index"})
-
-
-def _resolve_instrument_notes_session(request: Request | None = None):
+def _resolve_user_notes_session(request: Request | None = None):
     from server import license_client as _lc
     from server.product_config import is_web_host_mode
     from server.web_auth import get_request_session, load_browser_session
@@ -3620,50 +4842,463 @@ def _resolve_instrument_notes_session(request: Request | None = None):
     return _lc.load_session(BASE_DIR)
 
 
-@app.get("/api/instrument-notes/{symbol:path}")
-def get_instrument_note(
-    symbol: str,
-    request: Request,
-    type: str = Query("stock"),
-    exists_only: bool = Query(False),
-):
-    """Load per-instrument note; scoped to signed-in user + machine, or _local + machine."""
-    from server import instrument_notes_store as _notes
+try:
+    from server import mf_routes as _mf_routes
 
-    it = (type or "stock").strip().lower()
-    if it not in _INSTRUMENT_NOTE_TYPES:
-        raise HTTPException(status_code=400, detail="type must be stock or index")
-    session = _resolve_instrument_notes_session(request)
+    _mf_routes.configure(
+        base_dir=BASE_DIR,
+        db_path=DB_PATH,
+        resolve_session=_resolve_user_notes_session,
+    )
+    app.include_router(_mf_routes.router)
+except Exception as _mf_err:
+    print(f"[mf] routes not loaded: {_mf_err}")
+
+
+@app.get("/api/user-notes")
+def get_user_notes(request: Request):
+    """Universal notes doc (tabbed notepad); scoped to signed-in user + machine, or _local + machine."""
+    from server import user_notes_store as _un
+
+    session = _resolve_user_notes_session(request)
+    return _un.load_doc(BASE_DIR, session=session)
+
+
+@app.put("/api/user-notes")
+def put_user_notes(request: Request, payload: dict = Body(...)):
+    from server import user_notes_store as _un
+
+    session = _resolve_user_notes_session(request)
     try:
-        note = _notes.load_note(BASE_DIR, symbol, it, session=session)
-        has_note = bool(note.strip())
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if exists_only:
-        return {"symbol": symbol, "instrument_type": it, "has_note": has_note}
-    return {"symbol": symbol, "instrument_type": it, "note": note, "has_note": has_note}
-
-
-@app.put("/api/instrument-notes/{symbol:path}")
-def put_instrument_note(symbol: str, request: Request, payload: dict = Body(...)):
-    from server import instrument_notes_store as _notes
-
-    it = str(payload.get("instrument_type") or "stock").strip().lower()
-    if it not in _INSTRUMENT_NOTE_TYPES:
-        raise HTTPException(status_code=400, detail="instrument_type must be stock or index")
-    note = payload.get("note")
-    if note is None:
-        note = ""
-    if not isinstance(note, str):
-        raise HTTPException(status_code=400, detail="note must be a string")
-    session = _resolve_instrument_notes_session(request)
-    try:
-        _notes.save_note(BASE_DIR, symbol, it, note, session=session)
+        saved = _un.save_doc(BASE_DIR, payload, session=session)
     except ValueError as exc:
         detail = str(exc)
         status = 413 if "too large" in detail else 400
         raise HTTPException(status_code=status, detail=detail) from exc
-    return {"status": "saved", "symbol": symbol, "instrument_type": it}
+    return {"status": "saved", "tabs": len(saved.get("tabs", []))}
+
+
+@app.get("/api/user-basket")
+def get_user_basket(request: Request):
+    """Per-user interest basket; scoped like notes (email + machine)."""
+    from server import user_basket_store as _ub
+
+    session = _resolve_user_notes_session(request)
+    doc = _ub.load_doc(BASE_DIR, session=session)
+    return _enrich_user_basket_doc(doc)
+
+
+def _enrich_user_basket_doc(doc: dict) -> dict:
+    """Attach MCap / price / 1D% / 1M% / latest earnings badge / E+ for basket rows."""
+    rows = list((doc or {}).get("symbols") or [])
+    if not rows:
+        return {"symbols": []}
+
+    stock_syms = [
+        str(r.get("symbol") or "").strip().upper()
+        for r in rows
+        if str(r.get("kind") or "stock").lower() != "index"
+    ]
+    index_syms = [
+        str(r.get("symbol") or "").strip().upper()
+        for r in rows
+        if str(r.get("kind") or "stock").lower() == "index"
+    ]
+    stock_syms = [s for s in dict.fromkeys(stock_syms) if s]
+    index_syms = [s for s in dict.fromkeys(index_syms) if s]
+
+    stock_map: dict[str, dict] = {}
+    index_map: dict[str, dict] = {}
+    earnings_map: dict[str, dict] = {}
+    plus_set: set[str] = set()
+    try:
+        conn = get_db_connection()
+        try:
+            if stock_syms:
+                placeholders = ",".join("?" for _ in stock_syms)
+                cur = conn.execute(
+                    f"""
+                    SELECT symbol, market_cap, price, change_percent, change_percent_monthly
+                    FROM screener
+                    WHERE UPPER(TRIM(symbol)) IN ({placeholders})
+                    """,
+                    stock_syms,
+                )
+                for row in cur.fetchall():
+                    d = dict(row)
+                    sym = str(d.get("symbol") or "").strip().upper()
+                    if sym:
+                        stock_map[sym] = d
+                try:
+                    ensure_earnings_chart_events_table(conn)
+                    cur = conn.execute(
+                        f"""
+                        SELECT
+                            e.symbol,
+                            e.earnings_release_date,
+                            e.outcome_kind,
+                            e.comparison_status,
+                            e.comparison_note
+                        FROM earnings_chart_events e
+                        INNER JOIN (
+                            SELECT symbol, MAX(earnings_release_date) AS max_date
+                            FROM earnings_chart_events
+                            WHERE UPPER(TRIM(symbol)) IN ({placeholders})
+                            GROUP BY symbol
+                        ) latest
+                          ON e.symbol = latest.symbol
+                         AND e.earnings_release_date = latest.max_date
+                        """,
+                        stock_syms,
+                    )
+                    for row in cur.fetchall():
+                        d = dict(row)
+                        sym = str(d.get("symbol") or "").strip().upper()
+                        if not sym:
+                            continue
+                        outcome = str(d.get("outcome_kind") or "").strip().lower()
+                        earnings_map[sym] = {
+                            "earnings_release_date": str(d.get("earnings_release_date") or "").strip()[:10],
+                            "outcome_kind": "beat" if outcome == "beat" else "miss",
+                            "comparison_status": d.get("comparison_status"),
+                            "comparison_note": d.get("comparison_note") or "",
+                        }
+                except Exception as exc:
+                    print(f"[user-basket] earnings enrich failed: {exc}")
+                try:
+                    from earnings_plus_lookup import read_qualified_symbols
+
+                    plus_set = read_qualified_symbols(conn, stock_syms)
+                except Exception as exc:
+                    print(f"[user-basket] earnings+ enrich failed: {exc}")
+            if index_syms:
+                placeholders = ",".join("?" for _ in index_syms)
+                cur = conn.execute(
+                    f"""
+                    SELECT symbol, last_price, change_pct, change_30d
+                    FROM indices
+                    WHERE UPPER(TRIM(symbol)) IN ({placeholders})
+                    """,
+                    index_syms,
+                )
+                for row in cur.fetchall():
+                    d = dict(row)
+                    sym = str(d.get("symbol") or "").strip().upper()
+                    if sym:
+                        index_map[sym] = d
+        finally:
+            conn.close()
+    except Exception as exc:
+        print(f"[user-basket] enrich failed: {exc}")
+
+    enriched = []
+    for raw in rows:
+        entry = dict(raw) if isinstance(raw, dict) else {"symbol": str(raw), "kind": "stock"}
+        sym = str(entry.get("symbol") or "").strip().upper()
+        kind = str(entry.get("kind") or "stock").strip().lower()
+        entry["symbol"] = sym
+        entry["kind"] = "index" if kind == "index" else "stock"
+        if entry["kind"] == "index":
+            q = index_map.get(sym) or {}
+            entry["market_cap"] = None
+            entry["price"] = q.get("last_price")
+            entry["change_1d_pct"] = q.get("change_pct")
+            entry["change_1m_pct"] = q.get("change_30d")
+            entry["earnings_latest"] = None
+            entry["earnings_plus"] = False
+        else:
+            q = stock_map.get(sym) or {}
+            entry["market_cap"] = q.get("market_cap")
+            entry["price"] = q.get("price")
+            entry["change_1d_pct"] = q.get("change_percent")
+            entry["change_1m_pct"] = q.get("change_percent_monthly")
+            latest = earnings_map.get(sym)
+            entry["earnings_latest"] = latest if latest and latest.get("earnings_release_date") else None
+            entry["earnings_plus"] = sym in plus_set
+        enriched.append(entry)
+    return {"symbols": enriched}
+
+
+@app.put("/api/user-basket")
+def put_user_basket(request: Request, payload: dict = Body(...)):
+    from server import user_basket_store as _ub
+
+    session = _resolve_user_notes_session(request)
+    try:
+        saved = _ub.save_doc(BASE_DIR, payload, session=session)
+    except ValueError as exc:
+        detail = str(exc)
+        status = 413 if "too large" in detail else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+    return {"status": "saved", "count": len(saved.get("symbols") or [])}
+
+
+@app.post("/api/user-basket/symbols")
+def post_user_basket_symbol(request: Request, payload: dict = Body(...)):
+    from server import user_basket_store as _ub
+
+    session = _resolve_user_notes_session(request)
+    try:
+        saved = _ub.add_symbol(
+            BASE_DIR,
+            str(payload.get("symbol") or ""),
+            kind=str(payload.get("kind") or "stock"),
+            session=session,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status = 413 if "too many" in detail else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+    return _enrich_user_basket_doc(saved)
+
+
+@app.delete("/api/user-basket/symbols/{symbol}")
+def delete_user_basket_symbol(
+    symbol: str,
+    request: Request,
+    kind: str | None = Query(None),
+):
+    from server import user_basket_store as _ub
+
+    session = _resolve_user_notes_session(request)
+    try:
+        saved = _ub.remove_symbol(BASE_DIR, symbol, kind=kind, session=session)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _enrich_user_basket_doc(saved)
+
+@app.get("/api/user-alerts")
+def get_user_alerts(request: Request):
+    from server import user_alerts_store as _ua
+
+    session = _resolve_user_notes_session(request)
+    doc = _ua.load_alerts(BASE_DIR, session=session)
+    pending = _ua.browser_pending_alerts(doc)
+    return {
+        "alerts": doc.get("alerts") or [],
+        "unread": _ua.unread_count(doc),
+        "browser_pending": pending,
+    }
+
+
+@app.put("/api/user-alerts")
+def put_user_alerts(request: Request, payload: dict = Body(...)):
+    from server import user_alerts_store as _ua
+
+    session = _resolve_user_notes_session(request)
+    ids = payload.get("ids")
+    delete_ids = payload.get("delete_ids")
+    if ids is not None and not isinstance(ids, list):
+        raise HTTPException(status_code=400, detail="ids must be a list")
+    if delete_ids is not None and not isinstance(delete_ids, list):
+        raise HTTPException(status_code=400, detail="delete_ids must be a list")
+
+    if bool(payload.get("clear_all")) or delete_ids:
+        doc = _ua.delete_alerts(
+            BASE_DIR,
+            ids=[str(x) for x in (delete_ids or [])],
+            clear_all=bool(payload.get("clear_all")),
+            session=session,
+        )
+    else:
+        doc = _ua.mark_alerts(
+            BASE_DIR,
+            ids=[str(x) for x in (ids or [])],
+            mark_all_read=bool(payload.get("mark_all_read")),
+            clear_browser_pending=bool(payload.get("clear_browser_pending")),
+            session=session,
+        )
+    return {
+        "status": "ok",
+        "alerts": doc.get("alerts") or [],
+        "unread": _ua.unread_count(doc),
+    }
+
+
+@app.get("/api/alert-settings")
+def get_alert_settings(request: Request):
+    from server import telegram_notify
+    from server import user_alerts_store as _ua
+
+    session = _resolve_user_notes_session(request)
+    settings = _ua.load_settings(BASE_DIR, session=session)
+    user_tg = _ua.refresh_telegram_bot_profile(BASE_DIR, session=session)
+    return {
+        **settings,
+        "telegram": telegram_notify.telegram_status(user_status=user_tg),
+    }
+
+
+@app.put("/api/alert-settings")
+def put_alert_settings(request: Request, payload: dict = Body(...)):
+    from server import telegram_notify
+    from server import user_alerts_store as _ua
+
+    session = _resolve_user_notes_session(request)
+    current = _ua.load_settings(BASE_DIR, session=session)
+    # Never accept plaintext Telegram secrets via the generic settings PUT.
+    clean = dict(payload) if isinstance(payload, dict) else {}
+    for banned in (
+        "bot_token", "telegram_bot_token", "chat_id", "telegram_chat_id",
+        "bot_token_enc", "chat_id_enc", "telegram",
+    ):
+        clean.pop(banned, None)
+    merged = {**current, **clean}
+    saved = _ua.save_settings(BASE_DIR, merged, session=session)
+    user_tg = _ua.telegram_credentials_status(BASE_DIR, session=session)
+    return {**saved, "telegram": telegram_notify.telegram_status(user_status=user_tg)}
+
+
+@app.put("/api/alert-settings/upcoming-watch")
+def put_upcoming_earnings_watch(request: Request, payload: dict = Body(...)):
+    """Arm/disarm a per-symbol upcoming-earnings bell (Earnings page)."""
+    from fastapi import HTTPException
+    from server import telegram_notify
+    from server import user_alerts_store as _ua
+
+    session = _resolve_user_notes_session(request)
+    body = payload if isinstance(payload, dict) else {}
+    symbol = str(body.get("symbol") or "").strip().upper()
+    release = str(
+        body.get("release_date") or body.get("earnings_release_next_date") or ""
+    ).strip()[:10]
+    enabled = bool(body.get("enabled"))
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    if enabled and not release:
+        raise HTTPException(status_code=400, detail="release_date is required when enabling")
+    try:
+        saved = _ua.set_upcoming_earnings_watch(
+            BASE_DIR,
+            symbol=symbol,
+            release_date=release or "1970-01-01",
+            enabled=enabled,
+            session=session,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    user_tg = _ua.telegram_credentials_status(BASE_DIR, session=session)
+    return {**saved, "telegram": telegram_notify.telegram_status(user_status=user_tg)}
+
+
+@app.get("/api/price-targets")
+def get_price_targets(request: Request):
+    from server import user_alerts_store as _ua
+
+    session = _resolve_user_notes_session(request)
+    settings = _ua.load_settings(BASE_DIR, session=session)
+    return {"price_targets": settings.get("price_targets") or []}
+
+
+@app.post("/api/price-targets")
+def post_price_target(request: Request, payload: dict = Body(...)):
+    from server import user_alerts_store as _ua
+
+    session = _resolve_user_notes_session(request)
+    body = payload if isinstance(payload, dict) else {}
+    try:
+        saved = _ua.upsert_price_target(
+            BASE_DIR,
+            symbol=str(body.get("symbol") or ""),
+            direction=str(body.get("direction") or ""),
+            level=float(body.get("level")),
+            target_id=str(body.get("id") or "").strip() or None,
+            session=session,
+        )
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"status": "ok", "price_targets": saved.get("price_targets") or []}
+
+
+@app.put("/api/price-targets/{target_id}/armed")
+def put_price_target_armed(request: Request, target_id: str, payload: dict = Body(...)):
+    from server import user_alerts_store as _ua
+
+    session = _resolve_user_notes_session(request)
+    body = payload if isinstance(payload, dict) else {}
+    try:
+        saved = _ua.set_price_target_armed(
+            BASE_DIR,
+            target_id=target_id,
+            armed=bool(body.get("armed")),
+            session=session,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return {"status": "ok", "price_targets": saved.get("price_targets") or []}
+
+
+@app.delete("/api/price-targets/{target_id}")
+def delete_price_target_route(request: Request, target_id: str):
+    from server import user_alerts_store as _ua
+
+    session = _resolve_user_notes_session(request)
+    try:
+        saved = _ua.delete_price_target(BASE_DIR, target_id=target_id, session=session)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return {"status": "ok", "price_targets": saved.get("price_targets") or []}
+
+
+@app.put("/api/alert-settings/telegram")
+def put_alert_telegram_credentials(request: Request, payload: dict = Body(...)):
+    """Save per-user bot token + chat id (encrypted at rest). Never echoes secrets."""
+    from fastapi import HTTPException
+    from server import telegram_notify
+    from server import user_alerts_store as _ua
+
+    session = _resolve_user_notes_session(request)
+    body = payload if isinstance(payload, dict) else {}
+    token = str(body.get("bot_token") or body.get("telegram_bot_token") or "").strip()
+    chat = str(body.get("chat_id") or body.get("telegram_chat_id") or "").strip()
+    try:
+        status = _ua.save_telegram_credentials(
+            BASE_DIR, bot_token=token, chat_id=chat, session=session
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"could not store credentials: {e}") from e
+    return {"status": "ok", "telegram": telegram_notify.telegram_status(user_status=status)}
+
+
+@app.delete("/api/alert-settings/telegram")
+def delete_alert_telegram_credentials(request: Request):
+    from server import telegram_notify
+    from server import user_alerts_store as _ua
+
+    session = _resolve_user_notes_session(request)
+    status = _ua.clear_telegram_credentials(BASE_DIR, session=session)
+    return {"status": "ok", "telegram": telegram_notify.telegram_status(user_status=status)}
+
+
+@app.post("/api/alert-settings/telegram-test")
+def post_telegram_test(request: Request):
+    from server import telegram_notify
+    from server import user_alerts_store as _ua
+
+    session = _resolve_user_notes_session(request)
+    result = telegram_notify.send_for_user(
+        BASE_DIR,
+        session,
+        "CiM test alert — Telegram is connected.",
+        allow_host_fallback=True,
+    )
+    if result.get("ok"):
+        _ua.append_alert(
+            BASE_DIR,
+            {
+                "source": "system",
+                "kind": "telegram_test",
+                "symbol": "SYSTEM",
+                "title": "Telegram test sent",
+                "body": "Check your Telegram for the test message.",
+                "dedup_key": f"SYSTEM|telegram_test|{_ua.ist_today_key()}|{int(time_module.time())}",
+                "delivered_browser_pending": False,
+            },
+            session=session,
+        )
+    return result
 
 
 # ──────────────────────────────────────────────
@@ -3685,6 +5320,7 @@ _split_scan_running = False
 
 def set_job(name, message, *, quiet: bool = False):
     from server.admin_job_control import clear_cancel
+    from server import admin_job_queue as ajq
 
     clear_cancel()
     job_state["running"]  = True
@@ -3694,6 +5330,17 @@ def set_job(name, message, *, quiet: bool = False):
     job_state["message"]  = message
     job_state["error"]    = None
     job_state["meta"]     = {"quiet": quiet}
+    ajq.note_job_started()
+
+
+def _pump_job_queue() -> None:
+    try:
+        from server import admin_job_queue as ajq
+
+        ajq.on_job_idle()
+    except Exception:
+        pass
+
 
 def finish_job(message="Done", meta=None):
     job_state["running"]  = False
@@ -3703,6 +5350,8 @@ def finish_job(message="Done", meta=None):
     if meta:
         merged.update(meta)
     job_state["meta"] = merged
+    _pump_job_queue()
+
 
 def fail_job(error):
     from server.admin_job_control import clear_cancel
@@ -3714,6 +5363,7 @@ def fail_job(error):
     job_state["message"] = f"Failed: {err}"
     prev = dict(job_state.get("meta") or {})
     job_state["meta"] = {**prev, "error": err}
+    _pump_job_queue()
 
 
 def cancel_job(message: str = "Update cancelled.") -> None:
@@ -3725,6 +5375,27 @@ def cancel_job(message: str = "Update cancelled.") -> None:
     job_state["message"] = message
     prev = dict(job_state.get("meta") or {})
     job_state["meta"] = {**prev, "cancelled": True}
+    _pump_job_queue()
+
+
+def _start_or_queue_job(
+    key: str,
+    starter,
+    *,
+    label: str = "",
+    source: str = "manual",
+    coalesce_key: str | None = None,
+) -> dict:
+    """Start a heavy admin job now, or enqueue if the slot is busy."""
+    from server import admin_job_queue as ajq
+
+    return ajq.submit(
+        key,
+        starter,
+        label=label or key,
+        source=source,  # type: ignore[arg-type]
+        coalesce_key=coalesce_key,
+    )
 
 
 def _bump_market_data_version(*, bars: int = 0) -> None:
@@ -3737,26 +5408,21 @@ def _bump_market_data_version(*, bars: int = 0) -> None:
         pass
 
 
-def _sched_guard_start() -> bool:
-    return not bool(job_state.get("running"))
-
-
 def _sched_start_ohlcv() -> bool:
-    if not _sched_guard_start():
-        return False
-    threading.Thread(target=run_fetch_ohlcv, daemon=True).start()
-    return True
+    result = _start_or_queue_job(
+        "ohlcv",
+        lambda: threading.Thread(target=run_fetch_ohlcv, daemon=True).start(),
+        label="Fetch chart data (OHLCV)",
+        source="scheduled",
+    )
+    return result.get("status") in ("started", "queued")
 
 
-def _sched_start_filter_rebuild(task_key: str) -> bool:
-    if not _sched_guard_start():
-        return False
-    import admin_job_scheduler as ajs
-    from server import snapshot_rebuild_guard as srg
-
-    preset = ajs.filter_rebuild_preset_for_task(task_key)
+def _sched_start_filter_rebuild_instance(preset: dict) -> bool:
     if not preset:
         return False
+    from server import snapshot_rebuild_guard as srg
+
     keys = [str(k).strip().lower() for k in (preset.get("keys") or []) if str(k).strip()]
     mode = str(preset.get("mode") or "incremental").strip().lower()
     timeframes = _parse_snapshot_timeframes_csv(
@@ -3767,8 +5433,12 @@ def _sched_start_filter_rebuild(task_key: str) -> bool:
     except (TypeError, ValueError):
         days_back = 1
     needs_hold = mode == "full" and any(k in {"price_ohlc", "ema", "macd", "stochrsi"} for k in keys)
+    entry_id = str(preset.get("schedule_id") or preset.get("id") or "").strip()
+    coalesce = f"filterRebuild:{entry_id}" if entry_id else "filter_rebuild"
 
     def _worker() -> None:
+        if needs_hold:
+            srg.acquire_full_rebuild_hold(reason="scheduled_filter_schedule")
         try:
             run_filter_rebuild_job(
                 keys=keys,
@@ -3780,21 +5450,17 @@ def _sched_start_filter_rebuild(task_key: str) -> bool:
             if needs_hold:
                 srg.release_full_rebuild_hold()
 
-    if needs_hold:
-        srg.acquire_full_rebuild_hold(reason=f"scheduled_{task_key}")
-    try:
-        threading.Thread(target=_worker, daemon=True).start()
-    except Exception:
-        if needs_hold:
-            srg.release_full_rebuild_hold()
-        raise
-    return True
+    result = _start_or_queue_job(
+        "filter_rebuild",
+        lambda: threading.Thread(target=_worker, daemon=True).start(),
+        label="Filter rebuild",
+        source="scheduled",
+        coalesce_key=coalesce,
+    )
+    return result.get("status") in ("started", "queued")
 
 
 def _sched_start_eod_reconcile() -> bool:
-    if not _sched_guard_start():
-        return False
-
     def _worker() -> None:
         try:
             import eod_reconcile as _eod_reconcile
@@ -3806,20 +5472,22 @@ def _sched_start_eod_reconcile() -> bool:
             )
             if n:
                 invalidate_chart_cache()
-                global _stock_df
-                _stock_df = None
+                invalidate_stock_df()
             finish_job(f"EOD reconcile complete: {n} screener symbol(s) updated.")
         except Exception as e:
             fail_job(str(e))
 
-    threading.Thread(target=_worker, daemon=True).start()
-    return True
+    result = _start_or_queue_job(
+        "eod_reconcile",
+        lambda: threading.Thread(target=_worker, daemon=True).start(),
+        label="EOD bhavcopy reconcile",
+        source="scheduled",
+        coalesce_key="eodReconcile",
+    )
+    return result.get("status") in ("started", "queued")
 
 
 def _sched_start_live_quotes_warm() -> bool:
-    if not _sched_guard_start():
-        return False
-
     def _worker() -> None:
         try:
             set_job("live_quotes_warm", "Refreshing live NSE quotes...", quiet=True)
@@ -3828,13 +5496,17 @@ def _sched_start_live_quotes_warm() -> bool:
         except Exception as e:
             fail_job(str(e))
 
-    threading.Thread(target=_worker, daemon=True).start()
-    return True
+    result = _start_or_queue_job(
+        "live_quotes_warm",
+        lambda: threading.Thread(target=_worker, daemon=True).start(),
+        label="Live quotes warm",
+        source="scheduled",
+        coalesce_key="liveQuotesWarm",
+    )
+    return result.get("status") in ("started", "queued")
 
 
 def _sched_start_split_watch() -> bool:
-    if not _sched_guard_start():
-        return False
     import split_utils as _split_utils_mod
 
     def _worker() -> None:
@@ -3844,14 +5516,17 @@ def _sched_start_split_watch() -> bool:
             trigger="scheduled",
         )
 
-    threading.Thread(target=_worker, daemon=True).start()
-    return True
+    result = _start_or_queue_job(
+        "split_adjustments",
+        lambda: threading.Thread(target=_worker, daemon=True).start(),
+        label="Split watch",
+        source="scheduled",
+        coalesce_key="splitWatch",
+    )
+    return result.get("status") in ("started", "queued")
 
 
 def _sched_start_earnings_plus_warm() -> bool:
-    if not _sched_guard_start():
-        return False
-
     def _worker() -> None:
         now = datetime.now(ZoneInfo("Asia/Kolkata"))
         run_refresh_earnings_plus_cache(
@@ -3863,48 +5538,199 @@ def _sched_start_earnings_plus_warm() -> bool:
             trigger="scheduled",
         )
 
-    threading.Thread(target=_worker, daemon=True).start()
-    return True
+    result = _start_or_queue_job(
+        "earnings_plus_cache",
+        lambda: threading.Thread(target=_worker, daemon=True).start(),
+        label="Earnings+ warm",
+        source="scheduled",
+        coalesce_key="earningsPlusWarm",
+    )
+    return result.get("status") in ("started", "queued")
 
 
 def _sched_start_fetch_financials() -> bool:
-    if not _sched_guard_start():
-        return False
-    threading.Thread(target=run_fetch_financials, daemon=True).start()
-    return True
+    result = _start_or_queue_job(
+        "financials",
+        lambda: threading.Thread(target=run_fetch_financials, daemon=True).start(),
+        label="Fetch financials",
+        source="scheduled",
+        coalesce_key="fetchFinancials",
+    )
+    return result.get("status") in ("started", "queued")
 
 
 def _sched_start_screener_sectors() -> bool:
-    if not _sched_guard_start():
-        return False
-    threading.Thread(target=run_screener_sector_fallback, daemon=True).start()
-    return True
+    result = _start_or_queue_job(
+        "screener_sectors",
+        lambda: threading.Thread(target=run_screener_sector_fallback, daemon=True).start(),
+        label="Screener sectors",
+        source="scheduled",
+        coalesce_key="fetchScreenerSectors",
+    )
+    return result.get("status") in ("started", "queued")
 
 
 def _sched_start_expand_universe() -> bool:
-    if not _sched_guard_start():
+    result = _start_or_queue_job(
+        "expand_universe",
+        lambda: threading.Thread(target=run_expand_screener_universe, daemon=True).start(),
+        label="Expand universe",
+        source="scheduled",
+        coalesce_key="expandUniverse",
+    )
+    return result.get("status") in ("started", "queued")
+
+
+def run_fetch_mf_nav():
+    """Download AMFI open-ended NAVs into mf_schemes / mf_nav_history.
+
+    Never part of live/session OHLCV Update. Allowed only after 15:30 IST on weekdays.
+    """
+    try:
+        from server import mf_nav as _mf_nav
+
+        ok, reason = _mf_nav.mf_nav_refresh_allowed()
+        if not ok:
+            set_job("mf_nav", reason)
+            fail_job(reason)
+            return
+
+        set_job("mf_nav", "Refreshing AMFI mutual fund NAVs...")
+
+        def _log(msg: str) -> None:
+            job_state.update({"message": str(msg)})
+
+        stats = _mf_nav.run(DB_PATH, log_fn=_log)
+        finish_job(
+            f"MF NAV refresh complete: {stats.get('schemes', 0)} schemes "
+            f"({stats.get('direct_growth', 0)} Direct–Growth).",
+            meta=stats,
+        )
+    except Exception as e:
+        fail_job(str(e))
+
+
+def _sched_start_mf_nav() -> bool:
+    from server import mf_nav as _mf_nav
+
+    ok, reason = _mf_nav.mf_nav_refresh_allowed()
+    if not ok:
+        print(f"[mfNav] skip scheduled run: {reason}")
         return False
-    threading.Thread(target=run_expand_screener_universe, daemon=True).start()
-    return True
+    result = _start_or_queue_job(
+        "mf_nav",
+        lambda: threading.Thread(target=run_fetch_mf_nav, daemon=True).start(),
+        label="AMFI mutual fund NAVs",
+        source="scheduled",
+        coalesce_key="mfNav",
+    )
+    return result.get("status") in ("started", "queued")
+
+
+def run_refresh_sector_index_cores():
+    """Scheduled/manual: refresh Nifty index cores for Market Sector tags."""
+    try:
+        set_job("sector_index_cores", "Refreshing Market Sector index cores...")
+        result = market_sectors.refresh_index_sector_cores(DATA_DIR, DB_PATH)
+        counts = result.get("counts") or {}
+        nonempty = sum(1 for n in counts.values() if int(n or 0) > 0)
+        total_links = sum(int(n or 0) for n in counts.values())
+        err_n = len(result.get("errors") or {})
+        invalidate_stock_df()
+        finish_job(
+            f"Sector index cores refreshed: {nonempty} tags, {total_links} symbol links"
+            + (f" ({err_n} tag errors)" if err_n else "")
+            + ".",
+            meta=result,
+        )
+    except Exception as e:
+        fail_job(str(e))
+
+
+def run_sync_exchange_classification_job():
+    """Scheduled/manual: sync exchange industry labels onto screener."""
+    try:
+        set_job("exchange_classification", "Syncing exchange industry classification...")
+        cfg = exchange_classification_sync.load_sync_config(DATA_DIR)
+        urls = cfg.get("nse_csv_urls") or list(
+            exchange_classification_sync.DEFAULT_NSE_INDUSTRY_CSV_URLS
+        )
+        ua = str(cfg.get("user_agent") or exchange_classification_sync.DEFAULT_USER_AGENT)
+        bse_key = cfg.get("bse_local_path")
+        bse_path = Path(bse_key) if bse_key else None
+        if bse_path is not None and not bse_path.is_file():
+            bse_path = DATA_DIR / bse_path if not bse_path.is_absolute() else bse_path
+        skip_el = bool(cfg.get("skip_equity_l"))
+        ne_url = cfg.get("nse_equity_l_url")
+
+        def _log(msg: str) -> None:
+            job_state.update({"message": str(msg)})
+
+        _log("Downloading / merging exchange industry maps...")
+        result = exchange_classification_sync.run_sync(
+            DATA_DIR,
+            DB_PATH,
+            nse_urls=urls if isinstance(urls, list) else list(urls),
+            bse_local_path=bse_path if bse_path and bse_path.is_file() else None,
+            user_agent=ua,
+            refresh_canonical=True,
+            skip_equity_l=skip_el,
+            nse_equity_l_url=str(ne_url).strip() if ne_url else None,
+        )
+        invalidate_stock_df()
+        updated = result.get("rows_updated") or result.get("updated") or 0
+        finish_job(
+            f"Exchange classification sync complete (rows updated: {updated}).",
+            meta=result if isinstance(result, dict) else {"result": result},
+        )
+    except Exception as e:
+        fail_job(str(e))
+
+
+def _sched_start_sector_index_cores() -> bool:
+    result = _start_or_queue_job(
+        "sector_index_cores",
+        lambda: threading.Thread(target=run_refresh_sector_index_cores, daemon=True).start(),
+        label="Sector index cores",
+        source="scheduled",
+        coalesce_key="sectorIndexCores",
+    )
+    return result.get("status") in ("started", "queued")
+
+
+def _sched_start_exchange_classification() -> bool:
+    result = _start_or_queue_job(
+        "exchange_classification",
+        lambda: threading.Thread(target=run_sync_exchange_classification_job, daemon=True).start(),
+        label="Exchange classification",
+        source="scheduled",
+        coalesce_key="exchangeClassification",
+    )
+    return result.get("status") in ("started", "queued")
 
 
 def _configure_admin_job_scheduler() -> None:
     import admin_job_scheduler as ajs
+    from server import admin_job_queue as ajq
     from server import snapshot_rebuild_guard as srg
 
+    ajq.configure(is_running_fn=lambda: bool(job_state.get("running")))
     ajs.configure(
         start_fns={
             "ohlcv": _sched_start_ohlcv,
-            "filterRebuildDaily": lambda: _sched_start_filter_rebuild("filterRebuildDaily"),
-            "filterRebuildWeekly": lambda: _sched_start_filter_rebuild("filterRebuildWeekly"),
             "eodReconcile": _sched_start_eod_reconcile,
             "liveQuotesWarm": _sched_start_live_quotes_warm,
             "splitWatch": _sched_start_split_watch,
             "earningsPlusWarm": _sched_start_earnings_plus_warm,
+            "earningsTvResync": _sched_start_earnings_tv_resync,
             "fetchFinancials": _sched_start_fetch_financials,
             "fetchScreenerSectors": _sched_start_screener_sectors,
             "expandUniverse": _sched_start_expand_universe,
+            "mfNav": _sched_start_mf_nav,
+            "sectorIndexCores": _sched_start_sector_index_cores,
+            "exchangeClassification": _sched_start_exchange_classification,
         },
+        filter_instance_start_fn=_sched_start_filter_rebuild_instance,
         job_running_fn=lambda: bool(job_state.get("running")),
         scheduler_blocked_fn=srg.scheduler_is_frozen,
         install_root=BASE_DIR,
@@ -3955,6 +5781,7 @@ def run_fetch_prices():
     from server.product_config import yahoo_primary_pipeline
     from server.universe_price_refresh import (
         recalculate_screener_change_from_bars,
+        refresh_screener_from_upstox_quotes,
         refresh_universe_nse_prices,
         should_skip_live_nse_quote_refresh,
     )
@@ -3972,8 +5799,31 @@ def run_fetch_prices():
             job_state["total"] = total
 
         if yahoo_primary:
-            on_message("Yahoo-primary mode — syncing screener from latest bars (no NSE universe scrape).")
-            stats = {"skipped": True, "reason": "yahoo_primary", "source": "yfinance"}
+            on_message(
+                "Market-data primary mode — syncing screener from latest bars "
+                "(Upstox when configured; no NSE universe scrape)."
+            )
+            try:
+                stats = refresh_screener_from_upstox_quotes(
+                    DB_PATH,
+                    message_callback=on_message,
+                )
+                if stats.get("skipped"):
+                    stats = {
+                        "skipped": True,
+                        "reason": "yahoo_primary",
+                        "source": "bars",
+                        "upstox_quote": stats,
+                    }
+                else:
+                    stats = {
+                        **stats,
+                        "reason": "yahoo_primary",
+                        "skipped": False,
+                    }
+            except Exception as ue:
+                on_message(f"Upstox screener quote warning: {ue}")
+                stats = {"skipped": True, "reason": "yahoo_primary", "source": "upstox_or_yfinance"}
             raise_if_cancelled()
         else:
             skip_live_nse, skip_live_msg = should_skip_live_nse_quote_refresh()
@@ -3989,8 +5839,7 @@ def run_fetch_prices():
                 )
             raise_if_cancelled()
 
-        global _stock_df
-        _stock_df = None
+        invalidate_stock_df()
         invalidate_chart_cache()
 
         job_state["message"] = "Recalculating change % from historical data..."
@@ -4086,7 +5935,7 @@ def run_fetch_prices():
         total = int(stats.get("total") or 0)
         if stats.get("reason") == "yahoo_primary":
             finish_job(
-                "Prices synced from Yahoo OHLCV bars (Yahoo-primary testbed mode).",
+                "Prices synced from OHLCV bars (Upstox only).",
                 meta={"price_refresh": stats},
             )
         elif stats.get("skipped"):
@@ -4136,8 +5985,7 @@ def run_fetch_financials():
         )
 
         # Invalidate stock cache
-        global _stock_df
-        _stock_df = None
+        invalidate_stock_df()
 
         finish_job(f"Financials updated: {updated} stocks.")
     except Exception as e:
@@ -4161,6 +6009,7 @@ def admin_status():
     except Exception:
         pass
     from server.admin_job_control import is_cancel_requested
+    from server import admin_job_queue as ajq
 
     return {
         "running":  job_state["running"],
@@ -4173,6 +6022,7 @@ def admin_status():
         "cancel_requested": is_cancel_requested(),
         "percent":  round(job_state["progress"] / job_state["total"] * 100, 1)
                     if job_state["total"] > 0 else 0,
+        "queued": ajq.snapshot(),
         **sched,
     }
 
@@ -4198,6 +6048,24 @@ def admin_cancel_job():
         "job": job_state.get("job"),
         "message": job_state["message"],
     }
+
+
+@app.post("/api/admin/job-queue/cancel")
+def admin_job_queue_cancel(body: dict = Body(default_factory=dict)):
+    """Drop one queued job by id, or clear the whole backlog. Does not stop the running job."""
+    from server import admin_job_queue as ajq
+
+    body = body or {}
+    if body.get("clear"):
+        n = ajq.clear_queue()
+        return {"status": "cleared", "removed": n, "queued": ajq.snapshot()}
+    entry_id = str(body.get("id") or "").strip()
+    if not entry_id:
+        raise HTTPException(status_code=400, detail="Provide id or clear=true.")
+    ok = ajq.cancel_queued(entry_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Queued job not found.")
+    return {"status": "removed", "id": entry_id, "queued": ajq.snapshot()}
 
 
 def _require_showcase_host_install():
@@ -4230,10 +6098,12 @@ def get_live_watchdog_status():
     _require_showcase_host_install()
     status_path = BASE_DIR / "runtime" / "logs" / "live-watchdog-status.json"
     if not status_path.is_file():
+        # No active watchdog on this install — not an error (live Funnel may run on another root).
         return {
             "available": False,
             "overallOk": None,
-            "message": "Live watchdog status file not found. Run Start-Live-WebAndMobile.bat on the host PC.",
+            "stale": True,
+            "message": None,
         }
     try:
         raw = json.loads(status_path.read_text(encoding="utf-8-sig"))
@@ -4243,11 +6113,38 @@ def get_live_watchdog_status():
         return {
             "available": False,
             "overallOk": None,
+            "stale": True,
             "message": f"Could not read watchdog status: {exc}",
         }
+
+    interval_min = raw.get("intervalMinutes")
+    try:
+        interval_min = int(interval_min) if interval_min is not None else 5
+    except (TypeError, ValueError):
+        interval_min = 5
+    # Treat status as stale when the loop has not checked for ~3 intervals (min 20m).
+    stale_after = timedelta(minutes=max(20, interval_min * 3))
+    last_check_raw = raw.get("lastCheckAt")
+    stale = False
+    if last_check_raw:
+        try:
+            last_check = datetime.fromisoformat(str(last_check_raw).replace("Z", "+00:00"))
+            now = datetime.now(last_check.tzinfo) if last_check.tzinfo else datetime.now()
+            stale = (now - last_check) > stale_after
+        except (TypeError, ValueError):
+            stale = True
+    else:
+        stale = True
+
+    overall_ok = raw.get("overallOk")
+    if stale:
+        # Frozen failure from a dead/stopped loop must not red-banner the scheduler.
+        overall_ok = None
+
     return {
         "available": True,
-        "overallOk": raw.get("overallOk"),
+        "overallOk": overall_ok,
+        "stale": stale,
         "lastCheckAt": raw.get("lastCheckAt"),
         "webLocalOk": raw.get("webLocalOk"),
         "webPublicOk": raw.get("webPublicOk"),
@@ -4297,8 +6194,10 @@ def put_showcase_admin_schedules(payload: dict = Body(...)):
 
     # Accept legacy indicatorIncremental key from older UI payloads
     body = dict(payload or {})
-    if "indicatorIncremental" in body and "filterRebuildDaily" not in body:
-        body["filterRebuildDaily"] = body["indicatorIncremental"]
+    if "indicatorIncremental" in body and "filterSchedules" not in body:
+        body.setdefault("filterSchedules", [])
+        if not any(isinstance(s, dict) and s.get("id") == "indicatorIncremental" for s in body["filterSchedules"]):
+            body["filterSchedules"].append(body.pop("indicatorIncremental"))
     ajs.save_config(body)
     return _admin_schedules_status()
 
@@ -4472,6 +6371,10 @@ def run_fetch_ohlcv():
     price_stats: dict = {}
     index_ohlcv_error = None
     total_idx = None
+    bars_4h_stats: dict = {}
+    bars_4h_deferred = False
+    bars_30m_stats: dict = {}
+    bars_30m_deferred = False
 
     try:
         set_job("ohlcv", "Loading daily OHLCV updater...")
@@ -4497,8 +6400,35 @@ def run_fetch_ohlcv():
             job_state["progress"] = done
             job_state["total"]    = total
 
+        def _set_sources(phase: str, patch: dict) -> None:
+            meta = dict(job_state.get("meta") or {})
+            sources = dict(meta.get("sources") or {})
+            cur = dict(sources.get(phase) or {})
+            for k, v in (patch or {}).items():
+                cur[k] = v
+            sources[phase] = cur
+            meta["sources"] = sources
+            job_state["meta"] = meta
+
         def on_message(msg):
             job_state["message"] = msg
+            text = str(msg or "")
+            # Prefer Upstox-only totals; keep legacy Yahoo= parser for old log lines.
+            m = re.search(
+                r"totals Upstox=(\d+)(?:\s+none=(\d+))?(?:\s+Yahoo=(\d+))?(?:\s+NSE=(\d+))?\s+failed=(\d+)",
+                text,
+            )
+            if m:
+                phase = "bars_4h" if ("4H bars:" in text or "Source batch:" in text) else "daily"
+                patch = {
+                    "upstox": int(m.group(1)),
+                    "none": int(m.group(2) or 0),
+                    "failed": int(m.group(5)),
+                }
+                sc = re.search(r"skipped_current=(\d+)", text)
+                if sc:
+                    patch["skipped_current"] = int(sc.group(1))
+                _set_sources(phase, patch)
 
         run_result = _call_scrape_daily_run(
             module,
@@ -4510,6 +6440,15 @@ def run_fetch_ohlcv():
         updated = int(run_result.get("updated") or 0)
         stocks_updated = updated
         bhav_screener_written = int(run_result.get("bhav_screener_written") or 0)
+        daily_fetch = run_result.get("fetch_stats") or {}
+        _set_sources(
+            "daily",
+            {
+                "upstox": int(daily_fetch.get("upstox") or 0),
+                "failed": int(daily_fetch.get("failed") or 0),
+                "skipped_current": int(run_result.get("skipped_current") or 0),
+            },
+        )
         raise_if_cancelled()
 
         # ── Update index OHLCV candles ────────────────────────────────────────
@@ -4543,86 +6482,246 @@ def run_fetch_ohlcv():
             time_module.sleep(1)
 
         # ── Build 4H session bars (stocks + indices) ───────────────────────────
-        bars_4h_stats = {}
-        job_state["message"] = "Building 4H session bars..."
+        # During live session: skip full-universe 4H DB rebuild (live 4H uses quote overlay).
+        # After 15:30 IST on a session day (or non-session): build as usual. Upstox is primary 5m source.
         try:
-            import importlib.util as ilu4
+            from server.bars_4h import should_defer_bars_4h_build
 
-            spec4 = ilu4.spec_from_file_location("scrape_4h", SCRAPE_4H_PATH)
-            mod4 = ilu4.module_from_spec(spec4)
-            spec4.loader.exec_module(mod4)
+            defer_4h, defer_reason = should_defer_bars_4h_build(BASE_DIR)
+        except Exception:
+            defer_4h, defer_reason = False, "4H defer check failed — building"
 
-            def on_4h_progress(done, total):
-                job_state["progress"] = done
-                job_state["total"] = total
-
-            stock_4h = mod4.run(
-                progress_callback=on_4h_progress,
-                message_callback=on_message,
-                cancel_check=is_cancel_requested,
-            )
-            raise_if_cancelled()
-
-            index_syms = []
+        if defer_4h:
+            bars_4h_deferred = True
+            bars_30m_deferred = True
+            bars_4h_stats = {"deferred": True, "reason": defer_reason}
+            bars_30m_stats = {"deferred": True, "reason": defer_reason}
+            on_message(defer_reason)
+            on_message("30m DB rebuild skipped (live session) — full build after 15:30 IST")
+            job_state["message"] = "4H/30m DB rebuild skipped (live session)"
+            # Limited catch-up so symbols with no/shallow 4H get a base for live overlay.
             try:
-                spec_idx = ilu4.spec_from_file_location("scrape_indices", SCRAPE_INDICES_PATH)
-                mod_idx = ilu4.module_from_spec(spec_idx)
-                spec_idx.loader.exec_module(mod_idx)
-                index_syms = [s for s, _, _ in mod_idx.INDICES]
-            except Exception:
-                index_syms = []
+                import importlib.util as ilu4
 
-            index_4h = {"updated": 0, "failed": 0, "skipped": 0}
-            if index_syms:
-                job_state["message"] = "Building 4H session bars for indices..."
-                index_4h = mod4.run(
-                    symbols=index_syms,
+                from server.bars_4h import pick_live_session_4h_catchup
+
+                spec4 = ilu4.spec_from_file_location("scrape_4h", SCRAPE_4H_PATH)
+                mod4 = ilu4.module_from_spec(spec4)
+                spec4.loader.exec_module(mod4)
+                conn_cu = get_db_connection()
+                try:
+                    universe = mod4.get_all_screener_symbols(conn_cu)
+                    catchup = pick_live_session_4h_catchup(conn_cu, universe)
+                finally:
+                    conn_cu.close()
+                if catchup:
+                    job_state["message"] = (
+                        f"4H limited catch-up ({len(catchup)} symbols missing history)..."
+                    )
+                    on_message(
+                        f"live session — limited 4H catch-up for {len(catchup)} symbols "
+                        f"(full rebuild after 15:30 IST)"
+                    )
+
+                    def on_4h_cu_progress(done, total):
+                        job_state["progress"] = done
+                        job_state["total"] = total
+
+                    cu_stats = mod4.run(
+                        symbols=catchup,
+                        backfill=True,
+                        progress_callback=on_4h_cu_progress,
+                        message_callback=on_message,
+                        cancel_check=is_cancel_requested,
+                        also_30m=False,
+                    )
+                    bars_4h_stats["live_catchup"] = {
+                        "symbols": len(catchup),
+                        **(cu_stats or {}),
+                    }
+                    try:
+                        src = (cu_stats or {}).get("sources") or {}
+                        _set_sources(
+                            "bars_4h",
+                            {
+                                "upstox": int(src.get("upstox") or 0),
+                                "yahoo": int(src.get("yahoo") or 0),
+                                "nse": int(src.get("nse") or 0),
+                                "failed": int(src.get("failed") or 0),
+                                "skipped_current": 0,
+                            },
+                        )
+                    except Exception:
+                        pass
+                    on_message(
+                        f"4H catch-up: updated={cu_stats.get('updated', 0)}, "
+                        f"skipped={cu_stats.get('skipped', 0)}"
+                    )
+                else:
+                    on_message("live session — no 4H history catch-up needed")
+                    bars_4h_stats["live_catchup"] = {"symbols": 0, "skipped": True}
+            except Exception as e_cu:
+                on_message(f"4H live catch-up warning: {e_cu}")
+                bars_4h_stats["live_catchup_error"] = str(e_cu)
+        else:
+            job_state["message"] = "Building 4H (+30m) session bars (Upstox only)..."
+            on_message(defer_reason)
+            try:
+                import importlib.util as ilu4
+
+                spec4 = ilu4.spec_from_file_location("scrape_4h", SCRAPE_4H_PATH)
+                mod4 = ilu4.module_from_spec(spec4)
+                spec4.loader.exec_module(mod4)
+
+                def on_4h_progress(done, total):
+                    job_state["progress"] = done
+                    job_state["total"] = total
+
+                stock_4h = mod4.run(
+                    backfill=False,
                     progress_callback=on_4h_progress,
                     message_callback=on_message,
                     cancel_check=is_cancel_requested,
+                    also_30m=True,
                 )
-            bars_4h_stats = {
-                "stocks": stock_4h,
-                "indices": index_4h,
-            }
-            on_message(
-                f"4H bars: stocks updated={stock_4h.get('updated', 0)}, "
-                f"indices updated={index_4h.get('updated', 0)}"
-            )
-            raise_if_cancelled()
-            job_state["message"] = "Scanning 4H bar integrity…"
-            try:
-                from server.bars_4h_integrity import audit_and_repair_after_4h_build
+                raise_if_cancelled()
 
-                conn_4h_int = get_db_connection()
+                index_syms = []
                 try:
-                    integrity = audit_and_repair_after_4h_build(
-                        conn_4h_int,
-                        BASE_DIR,
-                        auto_repair=True,
-                        log_fn=on_message,
+                    spec_idx = ilu4.spec_from_file_location("scrape_indices", SCRAPE_INDICES_PATH)
+                    mod_idx = ilu4.module_from_spec(spec_idx)
+                    spec_idx.loader.exec_module(mod_idx)
+                    index_syms = [s for s, _, _ in mod_idx.INDICES]
+                except Exception:
+                    index_syms = []
+
+                index_4h = {"updated": 0, "failed": 0, "skipped": 0}
+                if index_syms:
+                    job_state["message"] = "Building 4H (+30m) session bars for indices..."
+                    index_4h = mod4.run(
+                        symbols=index_syms,
+                        backfill=False,
+                        progress_callback=on_4h_progress,
+                        message_callback=on_message,
+                        cancel_check=is_cancel_requested,
+                        also_30m=True,
+                    )
+                bars_4h_stats = {
+                    "stocks": stock_4h,
+                    "indices": index_4h,
+                    "deferred": False,
+                }
+                try:
+                    src_merge = {"upstox": 0, "none": 0, "failed": 0}
+                    for part in (stock_4h, index_4h):
+                        for k, v in ((part or {}).get("sources") or {}).items():
+                            if k in src_merge:
+                                src_merge[k] = int(src_merge.get(k) or 0) + int(v or 0)
+                    skipped_4h = int((stock_4h or {}).get("skipped_current") or 0) + int(
+                        (index_4h or {}).get("skipped_current") or 0
+                    )
+                    _set_sources(
+                        "bars_4h",
+                        {
+                            "upstox": src_merge.get("upstox", 0),
+                            "none": src_merge.get("none", 0),
+                            "failed": src_merge.get("failed", 0),
+                            "skipped_current": skipped_4h,
+                        },
+                    )
+                except Exception:
+                    pass
+                on_message(
+                    f"4H bars: stocks updated={stock_4h.get('updated', 0)}, "
+                    f"indices updated={index_4h.get('updated', 0)}"
+                    + (
+                        f", skipped_current={int((stock_4h or {}).get('skipped_current') or 0)}"
+                        if (stock_4h or {}).get("skipped_current")
+                        else ""
+                    )
+                    + " (30m co-written from same 5m fetch when 4H refreshed)"
+                )
+                raise_if_cancelled()
+                job_state["message"] = "Scanning 4H bar integrity…"
+                try:
+                    from server.bars_4h_integrity import audit_and_repair_after_4h_build
+
+                    conn_4h_int = get_db_connection()
+                    try:
+                        integrity = audit_and_repair_after_4h_build(
+                            conn_4h_int,
+                            BASE_DIR,
+                            auto_repair=True,
+                            log_fn=on_message,
+                            cancel_check=is_cancel_requested,
+                        )
+                        bars_4h_stats["integrity"] = integrity
+                        qn = int(integrity.get("pending_repair_count") or integrity.get("quarantined_count") or 0)
+                        if qn:
+                            on_message(
+                                f"4H integrity: {integrity.get('symbol_count', 0)} flagged, "
+                                f"{qn} on host repair queue (charts still served)"
+                            )
+                    finally:
+                        conn_4h_int.close()
+                except Exception as ie4h:
+                    on_message(f"4H integrity warning: {ie4h}")
+
+                # Gap-fill 30m for symbols where 4H was already current (no co-write).
+                raise_if_cancelled()
+                job_state["message"] = "Refreshing 30m filter bars (gap fill)..."
+                try:
+                    spec30 = ilu4.spec_from_file_location("scrape_30m", SCRAPE_30M_PATH)
+                    mod30 = ilu4.module_from_spec(spec30)
+                    spec30.loader.exec_module(mod30)
+
+                    def on_30m_progress(done, total):
+                        job_state["progress"] = done
+                        job_state["total"] = total
+
+                    stock_30m = mod30.run(
+                        backfill=False,
+                        progress_callback=on_30m_progress,
+                        message_callback=on_message,
                         cancel_check=is_cancel_requested,
                     )
-                    bars_4h_stats["integrity"] = integrity
-                    qn = int(integrity.get("pending_repair_count") or integrity.get("quarantined_count") or 0)
-                    if qn:
-                        on_message(
-                            f"4H integrity: {integrity.get('symbol_count', 0)} flagged, "
-                            f"{qn} on host repair queue (charts still served)"
+                    index_30m = {"updated": 0, "failed": 0, "skipped": 0}
+                    if index_syms:
+                        index_30m = mod30.run(
+                            symbols=index_syms,
+                            backfill=False,
+                            progress_callback=on_30m_progress,
+                            message_callback=on_message,
+                            cancel_check=is_cancel_requested,
                         )
-                finally:
-                    conn_4h_int.close()
-            except Exception as ie4h:
-                on_message(f"4H integrity warning: {ie4h}")
-        except Exception as e4:
-            on_message(f"4H session bars warning: {e4}")
-            time_module.sleep(1)
+                    bars_30m_stats = {
+                        "stocks": stock_30m,
+                        "indices": index_30m,
+                        "deferred": False,
+                        "co_written_with_4h": True,
+                    }
+                    on_message(
+                        f"30m bars: stocks updated={stock_30m.get('updated', 0)}, "
+                        f"indices updated={index_30m.get('updated', 0)}"
+                        + (
+                            f", skipped_current={int((stock_30m or {}).get('skipped_current') or 0)}"
+                            if (stock_30m or {}).get("skipped_current")
+                            else ""
+                        )
+                    )
+                except Exception as e30:
+                    on_message(f"30m session bars warning: {e30}")
+                    bars_30m_stats = {"error": str(e30)}
+            except Exception as e4:
+                on_message(f"4H session bars warning: {e4}")
+                time_module.sleep(1)
 
         # Invalidate chart cache so new candles are served
         invalidate_chart_cache()
 
         from server.universe_price_refresh import (
             recalculate_screener_change_from_bars,
+            refresh_screener_from_upstox_quotes,
             refresh_universe_nse_prices,
             should_skip_live_nse_quote_refresh,
         )
@@ -4630,14 +6729,26 @@ def run_fetch_ohlcv():
         price_stats = {}
         if yahoo_primary:
             on_message(
-                "Yahoo-primary mode — charts and screener from Yahoo bars; "
-                "live movers use Yahoo polling (no NSE universe scrape)."
+                "Market-data primary mode — charts and screener from OHLCV bars "
+                "(Upstox only); live movers use Upstox polling."
             )
+            try:
+                ux_stats = refresh_screener_from_upstox_quotes(
+                    DB_PATH,
+                    message_callback=on_message,
+                )
+            except Exception as ue:
+                ux_stats = {"skipped": True, "error": str(ue)}
+                on_message(f"Upstox screener quote warning: {ue}")
             price_stats = {
-                "skipped": True,
+                "skipped": bool(ux_stats.get("skipped")),
                 "reason": "yahoo_primary",
-                "source": "yfinance",
+                "source": ux_stats.get("source") or "upstox_or_yfinance",
                 "bhav_screener_written": bhav_screener_written,
+                "upstox_quote": ux_stats,
+                "quote_updated": int(ux_stats.get("quote_updated") or 0),
+                "total": int(ux_stats.get("total") or 0),
+                "failed": int(ux_stats.get("failed") or 0),
             }
         else:
             skip_live_nse, skip_live_msg = should_skip_live_nse_quote_refresh(
@@ -4682,7 +6793,7 @@ def run_fetch_ohlcv():
 
         try:
             if yahoo_primary:
-                on_message("Warming movers live cache from Yahoo...")
+                on_message("Warming movers live cache (Upstox only)...")
                 movers_live.refresh_after_data_update_sync(include_quotes=True)
             elif price_stats.get("skipped"):
                 on_message("Post-close — skipped movers NSE cache warm.")
@@ -4739,8 +6850,7 @@ def run_fetch_ohlcv():
             pass
 
         # Invalidate stock df cache so dashboard reloads fresh data
-        global _stock_df
-        _stock_df = None
+        invalidate_stock_df()
 
         # Also run price fetch to update non-chartable indices and live prices
         job_state["message"] = "Updating live prices and non-chartable indices..."
@@ -4776,7 +6886,7 @@ def run_fetch_ohlcv():
         quote_total = int(price_stats.get("total") or 0)
         quote_failed = int(price_stats.get("failed") or 0)
         if price_stats.get("reason") == "yahoo_primary":
-            price_part = "Yahoo bars synced to screener; live movers via Yahoo polling"
+            price_part = "OHLCV bars synced to screener; live movers via Upstox"
         elif price_stats.get("skipped"):
             price_part = "NSE live quotes skipped (post-close; bhavcopy/EOD bars used)"
         elif quote_total:
@@ -4790,11 +6900,89 @@ def run_fetch_ohlcv():
             f"Chart data updated. {stocks_n} stock symbols, {idx_part}. "
             f"{price_part}. Change % recalculated."
         )
+        try:
+            src = ((job_state.get("meta") or {}).get("sources") or {})
+            daily_src = src.get("daily") or {}
+            if daily_src:
+                summary += (
+                    f" Daily: Upstox={int(daily_src.get('upstox') or 0)} "
+                    f"failed={int(daily_src.get('failed') or 0)}"
+                    f" (skipped_current={int(daily_src.get('skipped_current') or 0)})."
+                )
+            b4 = src.get("bars_4h") or {}
+            if b4 and not bars_4h_deferred:
+                summary += (
+                    f" 4H: Upstox={int(b4.get('upstox') or 0)} "
+                    f"miss={int(b4.get('none') or 0)} failed={int(b4.get('failed') or 0)}"
+                    f" (skipped_current={int(b4.get('skipped_current') or 0)})."
+                )
+        except Exception:
+            pass
+        if bars_4h_deferred:
+            cu = (bars_4h_stats or {}).get("live_catchup") or {}
+            cu_n = int(cu.get("symbols") or 0)
+            if cu_n:
+                summary += (
+                    f" 4H DB rebuild skipped (live session); catch-up for {cu_n} symbols. "
+                    "Live 4H from quotes; full 4H/30m build after 15:30 IST on Update."
+                )
+            else:
+                summary += (
+                    " 4H/30m DB rebuild skipped (live session) — live 4H from quotes; "
+                    "full 4H/30m build after 15:30 IST on Update."
+                )
+        elif bars_4h_stats and not bars_4h_stats.get("deferred"):
+            st = (bars_4h_stats.get("stocks") or {})
+            if st.get("skipped_current") and int(st.get("updated") or 0) == 0 and int(st.get("processed") or 0) == 0:
+                summary += " 4H already current — skipped."
+            else:
+                summary += (
+                    f" 4H bars: stocks updated={int(st.get('updated') or 0)}."
+                )
+            st30 = ((bars_30m_stats or {}).get("stocks") or {})
+            if st30:
+                if st30.get("skipped_current") and int(st30.get("updated") or 0) == 0 and int(st30.get("processed") or 0) == 0:
+                    summary += " 30m already current — skipped."
+                else:
+                    summary += f" 30m bars: stocks updated={int(st30.get('updated') or 0)}."
         if total_idx == 0 and not index_ohlcv_error:
             summary += (
                 " No new index bars were written — Indices charts may still "
                 "show the last stored session."
             )
+
+        # Split/dividend maintenance — part of every chart data update (no separate step).
+        split_maint: dict = {}
+        try:
+            job_state["message"] = "Checking stock splits (90 days) and applying adjustments…"
+            on_message("Split maintenance: scanning history + universe…")
+            split_maint = run_split_maintenance_for_update(
+                quiet=False,
+                cancel_check=is_cancel_requested,
+                on_message=on_message,
+            )
+            pn = int(split_maint.get("pending_count") or 0)
+            fn = int(split_maint.get("failed_count") or 0)
+            if pn or fn:
+                on_message(f"Split maintenance: {pn} pending, {fn} failed (will retry next update).")
+            else:
+                on_message("Split maintenance complete.")
+        except Exception as se:
+            on_message(f"Split maintenance warning: {se}")
+
+        try:
+            sm = split_maint if isinstance(split_maint, dict) else {}
+            ap = int(sm.get("applied_count") or 0)
+            pend = int(sm.get("pending_count") or 0)
+            if ap or pend or int(sm.get("db_discontinuity_hits") or 0):
+                summary += f" Splits: {ap} applied in ledger"
+                if int(sm.get("db_discontinuity_hits") or 0):
+                    summary += f", {int(sm['db_discontinuity_hits'])} gap(s) detected"
+                if pend:
+                    summary += f", {pend} still pending"
+                summary += "."
+        except Exception:
+            pass
 
         # Final cache clear after live-price / index sync so chart API serves post-job data.
         invalidate_chart_cache()
@@ -4807,6 +6995,11 @@ def run_fetch_ohlcv():
                 "index_candles_added": total_idx,
                 "index_ohlcv_error": index_ohlcv_error,
                 "price_refresh": price_stats or None,
+                "bars_4h": bars_4h_stats or None,
+                "bars_4h_deferred": bars_4h_deferred,
+                "bars_30m": bars_30m_stats or None,
+                "bars_30m_deferred": bars_30m_deferred,
+                "split_maintenance": split_maint or None,
             },
         )
     except JobCancelled:
@@ -4833,11 +7026,293 @@ def run_fetch_ohlcv():
 
 @app.post("/api/admin/fetch-ohlcv")
 def admin_fetch_ohlcv():
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
-    t = threading.Thread(target=run_fetch_ohlcv, daemon=True)
-    t.start()
-    return {"status": "started", "job": "ohlcv"}
+    result = _start_or_queue_job(
+        "ohlcv",
+        lambda: threading.Thread(target=run_fetch_ohlcv, daemon=True).start(),
+        label="Update price and volume data",
+        source="manual",
+    )
+    try:
+        import admin_job_scheduler as ajs
+
+        ajs.record_external_manual_run("ohlcv")
+    except Exception:
+        pass
+    return result
+
+
+@app.post("/api/admin/fetch-mf-nav")
+def admin_fetch_mf_nav():
+    from server import mf_nav as _mf_nav
+
+    ok, reason = _mf_nav.mf_nav_refresh_allowed()
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason)
+
+    result = _start_or_queue_job(
+        "mf_nav",
+        lambda: threading.Thread(target=run_fetch_mf_nav, daemon=True).start(),
+        label="AMFI mutual fund NAVs",
+        source="manual",
+        coalesce_key="mfNav",
+    )
+    try:
+        import admin_job_scheduler as ajs
+
+        ajs.record_external_manual_run("mfNav")
+    except Exception:
+        pass
+    return result
+
+
+def run_build_bars_4h():
+    """Explicit full-universe 4H session bar build (ignores live-session deferral)."""
+    from server.admin_job_control import JobCancelled, is_cancel_requested, raise_if_cancelled
+
+    try:
+        set_job("bars_4h_build", "Building 4H (+30m) session bars (Upstox only)...")
+
+        def on_message(msg: str) -> None:
+            job_state["message"] = msg
+
+        def on_4h_progress(done, total):
+            job_state["progress"] = done
+            job_state["total"] = total
+
+        import importlib.util as ilu4
+
+        spec4 = ilu4.spec_from_file_location("scrape_4h", SCRAPE_4H_PATH)
+        mod4 = ilu4.module_from_spec(spec4)
+        spec4.loader.exec_module(mod4)
+
+        on_message("4H full-universe build — Upstox only (30m co-written)")
+        stock_4h = mod4.run(
+            backfill=True,
+            progress_callback=on_4h_progress,
+            message_callback=on_message,
+            cancel_check=is_cancel_requested,
+            also_30m=True,
+        )
+        raise_if_cancelled()
+
+        index_syms = []
+        try:
+            spec_idx = ilu4.spec_from_file_location("scrape_indices", SCRAPE_INDICES_PATH)
+            mod_idx = ilu4.module_from_spec(spec_idx)
+            spec_idx.loader.exec_module(mod_idx)
+            index_syms = [s for s, _, _ in mod_idx.INDICES]
+        except Exception:
+            index_syms = []
+
+        index_4h = {"updated": 0, "failed": 0, "skipped": 0}
+        if index_syms:
+            job_state["message"] = "Building 4H (+30m) session bars for indices..."
+            index_4h = mod4.run(
+                symbols=index_syms,
+                backfill=True,
+                progress_callback=on_4h_progress,
+                message_callback=on_message,
+                cancel_check=is_cancel_requested,
+                also_30m=True,
+            )
+        raise_if_cancelled()
+
+        integrity = None
+        job_state["message"] = "Scanning 4H bar integrity…"
+        try:
+            from server.bars_4h_integrity import audit_and_repair_after_4h_build
+
+            conn_4h_int = get_db_connection()
+            try:
+                integrity = audit_and_repair_after_4h_build(
+                    conn_4h_int,
+                    BASE_DIR,
+                    auto_repair=True,
+                    log_fn=on_message,
+                    cancel_check=is_cancel_requested,
+                )
+            finally:
+                conn_4h_int.close()
+        except Exception as ie4h:
+            on_message(f"4H integrity warning: {ie4h}")
+
+        invalidate_chart_cache()
+        finish_job(
+            f"4H bars built. Stocks updated={stock_4h.get('updated', 0)}, "
+            f"indices updated={index_4h.get('updated', 0)} (30m co-written).",
+            meta={
+                "stocks": stock_4h,
+                "indices": index_4h,
+                "integrity": integrity,
+            },
+        )
+    except JobCancelled:
+        cancel_job("4H build cancelled.")
+    except Exception as e:
+        fail_job(str(e))
+
+
+@app.post("/api/admin/build-bars-4h")
+def admin_build_bars_4h():
+    """Host-only: full-universe 4H rebuild (runs during live session too)."""
+    return _start_or_queue_job(
+        "bars_4h_build",
+        lambda: threading.Thread(target=run_build_bars_4h, daemon=True).start(),
+        label="Build 4H session bars",
+        source="manual",
+    )
+
+
+def run_build_bars_30m():
+    """Explicit full-universe 30m session bar build (ignores live-session deferral)."""
+    from server.admin_job_control import JobCancelled, is_cancel_requested, raise_if_cancelled
+
+    try:
+        set_job("bars_30m_build", "Building 30m session bars (Upstox only)...")
+
+        def on_message(msg: str) -> None:
+            job_state["message"] = msg
+
+        def on_30m_progress(done, total):
+            job_state["progress"] = done
+            job_state["total"] = total
+
+        import importlib.util as ilu30
+
+        spec30 = ilu30.spec_from_file_location("scrape_30m", SCRAPE_30M_PATH)
+        mod30 = ilu30.module_from_spec(spec30)
+        spec30.loader.exec_module(mod30)
+
+        on_message("30m full-universe build — Upstox only")
+        stock_30m = mod30.run(
+            backfill=True,
+            progress_callback=on_30m_progress,
+            message_callback=on_message,
+            cancel_check=is_cancel_requested,
+        )
+        raise_if_cancelled()
+
+        index_syms = []
+        try:
+            spec_idx = ilu30.spec_from_file_location("scrape_indices", SCRAPE_INDICES_PATH)
+            mod_idx = ilu30.module_from_spec(spec_idx)
+            spec_idx.loader.exec_module(mod_idx)
+            index_syms = [s for s, _, _ in mod_idx.INDICES]
+        except Exception:
+            index_syms = []
+
+        index_30m = {"updated": 0, "failed": 0, "skipped": 0}
+        if index_syms:
+            job_state["message"] = "Building 30m session bars for indices..."
+            index_30m = mod30.run(
+                symbols=index_syms,
+                backfill=True,
+                progress_callback=on_30m_progress,
+                message_callback=on_message,
+                cancel_check=is_cancel_requested,
+            )
+
+        invalidate_chart_cache()
+        finish_job(
+            f"30m bars built. Stocks updated={stock_30m.get('updated', 0)}, "
+            f"indices updated={index_30m.get('updated', 0)}.",
+            meta={
+                "stocks": stock_30m,
+                "indices": index_30m,
+            },
+        )
+    except JobCancelled:
+        cancel_job("30m build cancelled.")
+    except Exception as e:
+        fail_job(str(e))
+
+
+@app.post("/api/admin/build-bars-30m")
+def admin_build_bars_30m():
+    """Host-only: full-universe 30m rebuild (runs during live session too)."""
+    return _start_or_queue_job(
+        "bars_30m_build",
+        lambda: threading.Thread(target=run_build_bars_30m, daemon=True).start(),
+        label="Build 30m session bars",
+        source="manual",
+    )
+
+
+def run_repair_index_chart_gaps():
+    """On-demand backfill for calendar gaps in index_history (all chartable indices)."""
+    from server.admin_job_control import JobCancelled, raise_if_cancelled
+    from server.index_history_integrity import (
+        format_integrity_report,
+        repair_index_gaps,
+        scan_index_history,
+    )
+
+    conn = None
+    try:
+        set_job(
+            "indexChartGapRepair",
+            f"Scanning index chart history for gaps ({DB_PATH})...",
+        )
+        conn = get_db_connection()
+
+        def on_progress(done: int, total: int, msg: str) -> None:
+            job_state["progress"] = done
+            job_state["total"] = max(total, 1)
+            job_state["message"] = msg
+
+        raise_if_cancelled()
+        scan = scan_index_history(conn)
+        symbols_with_gaps = [s for s in scan.get("symbols", []) if s.get("gap_count")]
+        if not symbols_with_gaps:
+            invalidate_chart_cache()
+            _bump_market_data_version()
+            finish_job(
+                "No index chart gaps detected in database. Chart cache cleared — "
+                "hard refresh the chart (Ctrl+Shift+R) if it still looks wrong."
+            )
+            return
+
+        on_progress(0, len(scan.get("symbols") or []), format_integrity_report(scan))
+        result = repair_index_gaps(
+            conn,
+            log_fn=lambda m: on_progress(
+                job_state.get("progress") or 0,
+                job_state.get("total") or 1,
+                m,
+            ),
+            progress_cb=on_progress,
+            cancel_check=raise_if_cancelled,
+        )
+        raise_if_cancelled()
+        invalidate_chart_cache()
+        for sym in result.get("repaired_symbols") or []:
+            invalidate_chart_cache(sym)
+        _bump_market_data_version(bars=int(result.get("rows_inserted") or 0))
+        summary = format_integrity_report(result)
+        finish_job(
+            f"{summary}\nHard refresh open index charts (Ctrl+Shift+R) to load repaired bars.",
+            meta={"index_gap_repair": result},
+        )
+    except JobCancelled:
+        cancel_job("Index chart gap repair cancelled.")
+    except Exception as e:
+        fail_job(str(e))
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@app.post("/api/admin/repair-index-chart-gaps")
+def admin_repair_index_chart_gaps():
+    return _start_or_queue_job(
+        "indexChartGapRepair",
+        lambda: threading.Thread(target=run_repair_index_chart_gaps, daemon=True).start(),
+        label="Repair Index Chart Gaps",
+        source="manual",
+    )
 
 
 @app.post("/api/admin/backfill-symbol-lineage/{symbol}")
@@ -4990,8 +7465,6 @@ def run_rebuild_indicator_snapshots(
 def _full_snapshot_rebuild_preflight(*, allow_scheduler_overlap: bool = False) -> None:
     from server import snapshot_rebuild_guard as srg
 
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
     if allow_scheduler_overlap:
         return
     conflicts = srg.collect_scheduler_conflicts(
@@ -5020,19 +7493,28 @@ def _start_full_snapshot_rebuild_thread(
 
     _full_snapshot_rebuild_preflight(allow_scheduler_overlap=allow_scheduler_overlap)
     requested_timeframes = tuple(timeframes or SNAPSHOT_TIMEFRAMES)
-    srg.acquire_full_rebuild_hold()
-    try:
-        t = threading.Thread(
-            target=run_rebuild_indicator_snapshots,
-            kwargs={"timeframes": requested_timeframes},
-            daemon=True,
-        )
-        t.start()
-    except Exception:
-        srg.release_full_rebuild_hold()
-        raise
+
+    def _starter() -> None:
+        srg.acquire_full_rebuild_hold()
+        try:
+            threading.Thread(
+                target=run_rebuild_indicator_snapshots,
+                kwargs={"timeframes": requested_timeframes},
+                daemon=True,
+            ).start()
+        except Exception:
+            srg.release_full_rebuild_hold()
+            raise
+
+    result = _start_or_queue_job(
+        "indicator_snapshots",
+        _starter,
+        label="Full indicator snapshot rebuild",
+        source="manual",
+        coalesce_key="indicator_snapshots_full",
+    )
     return {
-        "status": "started",
+        **result,
         "job": "indicator_snapshots",
         "mode": "full",
         "scope": "full",
@@ -5113,12 +7595,113 @@ def run_rebuild_indicator_snapshots_incremental(
         fail_job(str(e))
 
 
+def run_split_maintenance_for_update(
+    *,
+    quiet: bool = False,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> dict:
+    """
+    Part of every OHLCV update: detect splits (DB gaps + Yahoo 90d), apply all pending.
+    No separate manual catch-up or apply-pending step.
+    """
+    import split_utils as su
+    from server.chart_corp_markers import detect_unapplied_splits_from_history
+
+    lookback = su.SPLIT_CATCHUP_DAYS
+    applied_total = 0
+    db_hits = 0
+
+    def _msg(text: str) -> None:
+        if on_message:
+            on_message(text)
+        if not quiet:
+            job_state["message"] = text
+
+    conn = get_db_connection()
+    try:
+        su.ensure_stock_split_events_table(conn)
+        _msg(f"Checking chart history for unadjusted splits ({lookback} days)…")
+        for hit in detect_unapplied_splits_from_history(conn, lookback_days=lookback):
+            if cancel_check and cancel_check():
+                break
+            if su.mark_pending(
+                conn,
+                symbol=hit["symbol"],
+                split_date=hit["split_date"],
+                ratio=hit["ratio"],
+                source=hit.get("source") or "db_discontinuity",
+            ):
+                db_hits += 1
+    finally:
+        conn.close()
+
+    max_rounds = 40
+    last_summary: dict = {}
+    for round_i in range(max_rounds):
+        if cancel_check and cancel_check():
+            break
+        pending_n = 0
+        conn = get_db_connection()
+        try:
+            counts = su.count_by_status(conn)
+            pending_n = int(counts.get(su.STATUS_PENDING, 0)) + int(counts.get(su.STATUS_FAILED, 0))
+        finally:
+            conn.close()
+        if pending_n <= 0 and round_i > 0:
+            break
+        if pending_n > 0:
+            _msg(f"Applying {pending_n} split adjustment(s) (batch {round_i + 1})…")
+            run_apply_pending_stock_splits(
+                trigger="post_ohlcv",
+                quiet=True,
+                auto=True,
+                max_batch=su.SPLIT_AUTO_APPLY_BATCH_CAP,
+            )
+            applied_total += min(pending_n, su.SPLIT_AUTO_APPLY_BATCH_CAP)
+        if round_i == 0:
+            _msg(f"Scanning universe for splits ({lookback} days, Yahoo)…")
+            last_summary = run_scan_stock_splits(
+                lookback,
+                trigger="post_ohlcv",
+                quiet=True,
+                backfill_applied=False,
+                sleep_sec=0,
+                cancel_check=cancel_check,
+            )
+        elif pending_n <= 0:
+            break
+
+    conn = get_db_connection()
+    try:
+        counts = su.count_by_status(conn)
+    finally:
+        conn.close()
+
+    out = {
+        "lookback_days": lookback,
+        "db_discontinuity_hits": db_hits,
+        "applied_total": applied_total,
+        "pending_count": int(counts.get(su.STATUS_PENDING, 0)),
+        "failed_count": int(counts.get(su.STATUS_FAILED, 0)),
+        "applied_count": int(counts.get(su.STATUS_APPLIED, 0)),
+        "yahoo_scan": last_summary,
+    }
+    if not quiet:
+        meta = dict(job_state.get("meta") or {})
+        meta["split_maintenance"] = out
+        job_state["meta"] = meta
+    return out
+
+
 def run_scan_stock_splits(
     days_back: int = 20,
     *,
     trigger: str = "manual",
     quiet: bool = False,
     backfill_applied: bool = False,
+    sleep_sec: Optional[float] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """
     Light scan: detect splits in lookback window, upsert pending ledger rows.
@@ -5146,9 +7729,12 @@ def run_scan_stock_splits(
         pending_new = 0
         backfilled = 0
         detected_symbols = []
+        scan_sleep = su.SPLIT_SCAN_SLEEP_SEC if sleep_sec is None else max(0.0, float(sleep_sec))
 
         for idx, sym in enumerate(symbols, start=1):
-            if not quiet and job_state.get("job") == "split_adjustments":
+            if cancel_check and cancel_check():
+                break
+            if not quiet and job_state.get("job") in ("split_adjustments", "ohlcv"):
                 job_state["progress"] = idx
                 job_state["total"] = total
                 job_state["message"] = f"Split scan {idx}/{total}: {sym}"
@@ -5156,7 +7742,8 @@ def run_scan_stock_splits(
                 meta["split_scan_line"] = f"Split scan {idx}/{total}: {sym}"
                 job_state["meta"] = meta
 
-            time_module.sleep(su.SPLIT_SCAN_SLEEP_SEC)
+            if scan_sleep > 0:
+                time_module.sleep(scan_sleep)
             try:
                 hit = su.detect_recent_split(sym, cutoff)
                 if not hit:
@@ -5168,15 +7755,18 @@ def run_scan_stock_splits(
                 if sym not in detected_symbols:
                     detected_symbols.append(sym)
                 if backfill_applied and su.symbol_has_historical_bars(conn, sym):
-                    su.mark_applied(
-                        conn,
-                        symbol=hit["symbol"],
-                        split_date=hit["split_date"],
-                        ratio=hit["ratio"],
-                        source=hit.get("source") or "backfill",
-                    )
-                    backfilled += 1
-                    continue
+                    if not su.history_has_split_discontinuity(
+                        conn, hit["symbol"], hit["split_date"], hit["ratio"]
+                    ):
+                        su.mark_applied(
+                            conn,
+                            symbol=hit["symbol"],
+                            split_date=hit["split_date"],
+                            ratio=hit["ratio"],
+                            source=hit.get("source") or "backfill",
+                        )
+                        backfilled += 1
+                        continue
                 if su.mark_pending(
                     conn,
                     symbol=hit["symbol"],
@@ -5271,7 +7861,12 @@ def run_apply_pending_stock_splits(
             try:
                 if su.is_split_applied(conn, sym, split_date, ratio):
                     continue
-                ok, err = su.apply_symbol_history_refresh(conn, sym)
+                ok, err = su.apply_symbol_history_refresh(
+                    conn,
+                    sym,
+                    split_date=split_date,
+                    split_ratio=ratio,
+                )
                 if not ok:
                     failed_refresh.append(f"{sym}: {err}")
                     su.mark_failed(
@@ -5346,8 +7941,7 @@ def run_apply_pending_stock_splits(
 
         invalidate_chart_cache()
         invalidate_filter_cache()
-        global _stock_df
-        _stock_df = None
+        invalidate_stock_df()
         sample = ", ".join(affected[:10])
         suffix = "..." if len(affected) > 10 else ""
         if not quiet:
@@ -5485,6 +8079,7 @@ def run_filter_rebuild_job(
     days_back: int = 1,
 ):
     from filter_rebuild_runner import run_filter_rebuild
+    from server.admin_job_control import JobCancelled
 
     try:
         set_job("filter_rebuild", "Starting selective filter rebuild…")
@@ -5509,14 +8104,14 @@ def run_filter_rebuild_job(
             invalidate_filter_cache=invalidate_filter_cache,
             job_state=job_state,
         )
+    except JobCancelled:
+        cancel_job("Filter rebuild cancelled.")
     except Exception as e:
         fail_job(str(e))
 
 
 @app.post("/api/admin/filter-rebuild")
 def admin_filter_rebuild(body: dict):
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
     keys = body.get("keys") or []
     if not isinstance(keys, list) or not keys:
         raise HTTPException(status_code=400, detail="Provide keys: non-empty list of registry ids.")
@@ -5557,6 +8152,10 @@ def admin_filter_rebuild(body: dict):
                 )
 
     def _worker() -> None:
+        if needs_full_hold:
+            from server import snapshot_rebuild_guard as srg
+
+            srg.acquire_full_rebuild_hold(reason="manual_filter_rebuild_full")
         try:
             run_filter_rebuild_job(
                 keys=normalized_keys,
@@ -5570,24 +8169,14 @@ def admin_filter_rebuild(body: dict):
 
                 srg.release_full_rebuild_hold()
 
-    if needs_full_hold:
-        from server import snapshot_rebuild_guard as srg
-
-        srg.acquire_full_rebuild_hold(reason="manual_filter_rebuild_full")
-    t = threading.Thread(
-        target=_worker,
-        daemon=True,
+    result = _start_or_queue_job(
+        "filter_rebuild",
+        lambda: threading.Thread(target=_worker, daemon=True).start(),
+        label="Filter rebuild",
+        source="manual",
     )
-    try:
-        t.start()
-    except Exception:
-        if needs_full_hold:
-            from server import snapshot_rebuild_guard as srg
-
-            srg.release_full_rebuild_hold()
-        raise
     return {
-        "status": "started",
+        **result,
         "job": "filter_rebuild",
         "mode": mode,
         "keys": normalized_keys,
@@ -5643,23 +8232,26 @@ def admin_rebuild_indicator_snapshots_incremental(
     scope_norm = str(scope or "incremental").strip().lower()
     if scope_norm != "incremental":
         raise HTTPException(status_code=400, detail="scope=full is not allowed on incremental endpoint")
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
     requested_timeframes = _parse_snapshot_timeframes_csv(timeframes)
     if requested_timeframes is None:
         requested_timeframes = SNAPSHOT_LIGHT_TIMEFRAMES if defer_heavy else SNAPSHOT_TIMEFRAMES
-    t = threading.Thread(
-        target=run_rebuild_indicator_snapshots_incremental,
-        args=(days_back,),
-        kwargs={
-            "timeframes": requested_timeframes,
-            "force": bool(force),
-        },
-        daemon=True,
+    result = _start_or_queue_job(
+        "indicator_snapshots",
+        lambda: threading.Thread(
+            target=run_rebuild_indicator_snapshots_incremental,
+            args=(days_back,),
+            kwargs={
+                "timeframes": requested_timeframes,
+                "force": bool(force),
+            },
+            daemon=True,
+        ).start(),
+        label="Indicator snapshots (incremental)",
+        source="manual",
+        coalesce_key="indicator_snapshots_incremental",
     )
-    t.start()
     return {
-        "status": "started",
+        **result,
         "job": "indicator_snapshots",
         "mode": "incremental",
         "scope": "incremental",
@@ -5695,20 +8287,23 @@ def admin_rebuild_indicator_snapshots_full(
 def admin_rebuild_indicator_snapshots_heavy_now(
     days_back: int = Query(1, ge=0, le=30),
 ):
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
-    t = threading.Thread(
-        target=run_rebuild_indicator_snapshots_incremental,
-        args=(days_back,),
-        kwargs={
-            "timeframes": ("4W", "1M"),
-            "force": True,
-        },
-        daemon=True,
+    result = _start_or_queue_job(
+        "indicator_snapshots",
+        lambda: threading.Thread(
+            target=run_rebuild_indicator_snapshots_incremental,
+            args=(days_back,),
+            kwargs={
+                "timeframes": ("4W", "1M"),
+                "force": True,
+            },
+            daemon=True,
+        ).start(),
+        label="Indicator snapshots (heavy)",
+        source="manual",
+        coalesce_key="indicator_snapshots_heavy",
     )
-    t.start()
     return {
-        "status": "started",
+        **result,
         "job": "indicator_snapshots",
         "mode": "incremental",
         "scope": "incremental",
@@ -5768,10 +8363,14 @@ def admin_scan_stock_splits(
                 backfill_applied=backfill,
             )
 
-    t = threading.Thread(target=_go, name="scan-stock-splits", daemon=True)
-    t.start()
+    result = _start_or_queue_job(
+        "split_scan",
+        lambda: threading.Thread(target=_go, name="scan-stock-splits", daemon=True).start(),
+        label="Stock split scan",
+        source="manual",
+    )
     return {
-        "status": "started",
+        **result,
         "job": "split_scan",
         "days_back": days_back,
         "auto_apply": bool(auto_apply),
@@ -5787,26 +8386,28 @@ def admin_apply_split_adjustments(
     scan_first: bool = Query(False),
     symbols: str = Query(""),
 ):
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
     sym_list = None
     raw = str(symbols or "").strip()
     if raw:
         sym_list = [s.strip().upper() for s in raw.split(",") if s.strip()]
-    t = threading.Thread(
-        target=run_apply_split_adjustments,
-        kwargs={
-            "days_back": int(days_back),
-            "apply_only": bool(apply_only),
-            "scan_only": bool(scan_only),
-            "scan_first": bool(scan_first),
-            "symbols": sym_list,
-        },
-        daemon=True,
+    result = _start_or_queue_job(
+        "split_adjustments",
+        lambda: threading.Thread(
+            target=run_apply_split_adjustments,
+            kwargs={
+                "days_back": int(days_back),
+                "apply_only": bool(apply_only),
+                "scan_only": bool(scan_only),
+                "scan_first": bool(scan_first),
+                "symbols": sym_list,
+            },
+            daemon=True,
+        ).start(),
+        label="Split adjustments",
+        source="manual",
     )
-    t.start()
     return {
-        "status": "started",
+        **result,
         "job": "split_adjustments",
         "days_back": days_back,
         "apply_only": bool(apply_only),
@@ -5884,18 +8485,17 @@ def admin_snapshot_consistency(
 
 @app.post("/api/admin/fetch-prices")
 def admin_fetch_prices():
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
-    t = threading.Thread(target=run_fetch_prices, daemon=True)
-    t.start()
-    return {"status": "started", "job": "prices"}
+    return _start_or_queue_job(
+        "prices",
+        lambda: threading.Thread(target=run_fetch_prices, daemon=True).start(),
+        label="Fetch prices",
+        source="manual",
+    )
 
 
 @app.post("/api/admin/fetch-issued-shares")
 def admin_fetch_issued_shares():
     """Refresh issued share counts (Yahoo → Screener.in; NSE on desktop only)."""
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
 
     def _run():
         from server.admin_job_control import JobCancelled, is_cancel_requested
@@ -5916,9 +8516,12 @@ def admin_fetch_issued_shares():
         except Exception as e:
             fail_job(str(e))
 
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-    return {"status": "started", "job": "issued_shares"}
+    return _start_or_queue_job(
+        "issued_shares",
+        lambda: threading.Thread(target=_run, daemon=True).start(),
+        label="Refresh share counts",
+        source="manual",
+    )
 
 
 @app.get("/api/admin/market-cap-status")
@@ -5999,7 +8602,7 @@ def _record_earnings_plus_warm_run(
         pass
 
 
-def _refresh_earnings_plus_symbol_worker(sym: str, *, refresh_stale: bool) -> dict:
+def _refresh_earnings_plus_symbol_worker(sym: str, *, refresh_stale: bool, force_refresh: bool = False) -> dict:
     conn = get_db_connection()
     try:
         entry = _refresh_earnings_plus_cache_for_symbol(
@@ -6007,11 +8610,115 @@ def _refresh_earnings_plus_symbol_worker(sym: str, *, refresh_stale: bool) -> di
             sym,
             fetch_if_missing=True,
             refresh_stale=refresh_stale,
+            force_refresh=force_refresh,
         )
-        conn.commit()
+        with _earnings_plus_db_write_lock:
+            conn.commit()
         return entry
     finally:
         conn.close()
+
+
+def run_sync_earnings_plus_cache_from_local(
+    *,
+    symbols: list[str] | None = None,
+    quiet: bool = False,
+    trigger: str = "local_sync",
+) -> dict:
+    """
+    Recompute Earnings+ for every symbol that has local Screener quarterly data.
+    Does not scrape Screener — uses DB cache only so badges match the quarters already stored.
+    """
+    started_at = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_db_connection()
+    try:
+        ensure_earnings_plus_cache_table(conn)
+        if symbols:
+            target = [
+                sym for sym in dict.fromkeys(_normalize_symbol_token(s) for s in symbols) if sym
+            ]
+        else:
+            try:
+                rows = conn.execute(
+                    "SELECT DISTINCT symbol FROM screener_quarterly ORDER BY symbol"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            target = [
+                _normalize_symbol_token(r[0] if not isinstance(r, sqlite3.Row) else r["symbol"])
+                for r in rows
+            ]
+            target = [s for s in dict.fromkeys(target) if s]
+    finally:
+        conn.close()
+
+    if not target:
+        return {
+            "ok": True,
+            "trigger": trigger,
+            "started_at": started_at,
+            "total": 0,
+            "qualified": 0,
+            "not_qualified": 0,
+            "insufficient_data": 0,
+        }
+
+    set_job(
+        "earnings_plus_cache",
+        f"Recomputing Earnings+ from local Screener quarters ({len(target)} symbols)...",
+        quiet=quiet,
+    )
+    qualified = 0
+    not_qualified = 0
+    insufficient = 0
+    errors = 0
+    for i, sym in enumerate(target, start=1):
+        try:
+            conn = get_db_connection()
+            try:
+                entry = _refresh_earnings_plus_cache_for_symbol(
+                    conn,
+                    sym,
+                    fetch_if_missing=False,
+                    refresh_stale=False,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            decision = str(entry.get("decision") or "").strip().lower()
+            if decision == "qualified":
+                qualified += 1
+            elif decision == "not_qualified":
+                not_qualified += 1
+            else:
+                insufficient += 1
+        except Exception:
+            errors += 1
+        if i % 100 == 0 or i == len(target):
+            set_job(
+                "earnings_plus_cache",
+                f"Local Earnings+ sync {i}/{len(target)} "
+                f"(qualified={qualified}, not={not_qualified}, insufficient={insufficient})...",
+                quiet=quiet,
+            )
+
+    summary = {
+        "ok": errors == 0,
+        "trigger": trigger,
+        "started_at": started_at,
+        "finished_at": datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S"),
+        "total": len(target),
+        "qualified": qualified,
+        "not_qualified": not_qualified,
+        "insufficient_data": insufficient,
+        "errors": errors,
+    }
+    finish_job(
+        f"Earnings+ local sync: {qualified} qualified / {not_qualified} not / "
+        f"{insufficient} insufficient of {len(target)}.",
+        meta=summary,
+    )
+    return summary
 
 
 def run_refresh_earnings_plus_cache(
@@ -6047,7 +8754,20 @@ def run_refresh_earnings_plus_cache(
             limit=2000,
             use_cache=True,
         )
-        rows = payload.get("rows") or []
+        rows = list(payload.get("rows") or [])
+        # One day before TV upcoming prints, start Screener/E+ so data is ready.
+        upcoming_rows = _upcoming_prescan_symbols()
+        if upcoming_rows:
+            existing = {
+                _normalize_symbol_token(r.get("symbol"))
+                for r in rows
+                if _normalize_symbol_token(r.get("symbol"))
+            }
+            for urow in upcoming_rows:
+                sym = _normalize_symbol_token(urow.get("symbol"))
+                if sym and sym not in existing:
+                    rows.append(urow)
+                    existing.add(sym)
         symbols = list(dict.fromkeys(
             sym for sym in (
                 _normalize_symbol_token(row.get("symbol"))
@@ -6082,11 +8802,13 @@ def run_refresh_earnings_plus_cache(
         try:
             ensure_earnings_plus_cache_table(conn)
             entries = _read_earnings_plus_cache_entries(conn, symbols)
+            local_period_keys = _read_local_screener_latest_period_keys(conn, symbols)
             to_refresh, skipped = _plan_earnings_plus_cache_refresh(
                 entries,
                 rows,
                 force=force,
                 only_incomplete=only_incomplete,
+                local_period_keys=local_period_keys,
             )
         finally:
             conn.close()
@@ -6126,7 +8848,12 @@ def run_refresh_earnings_plus_cache(
         pool = ThreadPoolExecutor(max_workers=EARNINGS_PLUS_REFRESH_WORKERS)
         try:
             futures = {
-                pool.submit(_refresh_earnings_plus_symbol_worker, sym, refresh_stale=refresh_stale): sym
+                pool.submit(
+                    _refresh_earnings_plus_symbol_worker,
+                    sym,
+                    refresh_stale=refresh_stale,
+                    force_refresh=bool(force),
+                ): sym
                 for sym in to_refresh
             }
             pending = set(futures.keys())
@@ -6230,17 +8957,19 @@ def admin_refresh_earnings_plus_cache(
     now = datetime.now()
     year = year or now.year
     month = month if month is not None else now.month
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
-    t = threading.Thread(
-        target=run_refresh_earnings_plus_cache,
-        args=(year, month),
-        kwargs={"force": force, "only_incomplete": only_incomplete, "quiet": False, "trigger": "manual"},
-        daemon=True,
+    result = _start_or_queue_job(
+        "earnings_plus_cache",
+        lambda: threading.Thread(
+            target=run_refresh_earnings_plus_cache,
+            args=(year, month),
+            kwargs={"force": force, "only_incomplete": only_incomplete, "quiet": False, "trigger": "manual"},
+            daemon=True,
+        ).start(),
+        label="Earnings+ cache refresh",
+        source="manual",
     )
-    t.start()
     return {
-        "status": "started",
+        **result,
         "job": "earnings_plus_cache",
         "year": year,
         "month": month,
@@ -6249,13 +8978,30 @@ def admin_refresh_earnings_plus_cache(
     }
 
 
+@app.post("/api/admin/sync-earnings-plus-from-local")
+def admin_sync_earnings_plus_from_local():
+    """Recompute Earnings+ badges from local Screener quarterly cache (no scrape)."""
+    result = _start_or_queue_job(
+        "earnings_plus_cache",
+        lambda: threading.Thread(
+            target=run_sync_earnings_plus_cache_from_local,
+            kwargs={"quiet": False, "trigger": "manual_local_sync"},
+            daemon=True,
+        ).start(),
+        label="Earnings+ local sync",
+        source="manual",
+    )
+    return {**result, "job": "earnings_plus_cache", "mode": "local_sync"}
+
+
 @app.post("/api/admin/fetch-financials")
 def admin_fetch_financials():
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
-    t = threading.Thread(target=run_fetch_financials, daemon=True)
-    t.start()
-    return {"status": "started", "job": "financials"}
+    return _start_or_queue_job(
+        "financials",
+        lambda: threading.Thread(target=run_fetch_financials, daemon=True).start(),
+        label="Fetch financials",
+        source="manual",
+    )
 
 
 def run_screener_sector_fallback():
@@ -6297,11 +9043,12 @@ def run_screener_sector_fallback():
 
 @app.post("/api/admin/fetch-screener-sectors")
 def admin_fetch_screener_sectors():
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
-    t = threading.Thread(target=run_screener_sector_fallback, daemon=True)
-    t.start()
-    return {"status": "started", "job": "screener_sectors"}
+    return _start_or_queue_job(
+        "screener_sectors",
+        lambda: threading.Thread(target=run_screener_sector_fallback, daemon=True).start(),
+        label="Screener sectors",
+        source="manual",
+    )
 
 
 def run_refresh_screener_market_sets():
@@ -6341,13 +9088,14 @@ def run_refresh_screener_market_sets():
         fail_job(str(e))
 
 
-@app.post("/api/admin/refresh-screener-market-sets")
+@app.post("/api/admin/refresh-screener_market-sets")
 def admin_refresh_screener_market_sets():
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
-    t = threading.Thread(target=run_refresh_screener_market_sets, daemon=True)
-    t.start()
-    return {"status": "started", "job": "screener_market_sets"}
+    return _start_or_queue_job(
+        "screener_market_sets",
+        lambda: threading.Thread(target=run_refresh_screener_market_sets, daemon=True).start(),
+        label="Screener market sets",
+        source="manual",
+    )
 
 
 def run_expand_screener_universe():
@@ -6374,11 +9122,12 @@ def run_expand_screener_universe():
 
 @app.post("/api/admin/expand-screener-universe")
 def admin_expand_screener_universe():
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
-    t = threading.Thread(target=run_expand_screener_universe, daemon=True)
-    t.start()
-    return {"status": "started", "job": "expand_universe"}
+    return _start_or_queue_job(
+        "expand_universe",
+        lambda: threading.Thread(target=run_expand_screener_universe, daemon=True).start(),
+        label="Expand universe",
+        source="manual",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -6487,6 +9236,42 @@ def get_index_chart(
         set_chart_cache(symbol, timeframe, _ema_periods, result)
         return result
 
+    if timeframe == "30m":
+        try:
+            conn = get_db_connection()
+            from server.bars_30m import (
+                format_30m_missing_detail,
+                get_bars_30m_source,
+                load_bars_30m_for_chart,
+            )
+
+            bars = load_bars_30m_for_chart(conn, symbol, limit=2000)
+            day_raw = _index_day_change_pct_single(symbol, conn)
+            intraday_source = get_bars_30m_source(conn, symbol)
+            missing_detail = (
+                format_30m_missing_detail(symbol, conn, is_index=True) if not bars else None
+            )
+            conn.close()
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        if not bars:
+            raise HTTPException(status_code=404, detail=missing_detail)
+        day_change_pct = round(float(day_raw), 2) if day_raw is not None and math.isfinite(day_raw) else None
+        result = _assemble_chart_result(
+            symbol,
+            timeframe,
+            bars,
+            day_change_pct,
+            _ema_periods,
+            None,
+        )
+        if intraday_source:
+            result["intraday_source"] = intraday_source
+        set_chart_cache(symbol, timeframe, _ema_periods, result)
+        return result
+
     try:
         conn   = get_db_connection()
         raw_df = pd.read_sql_query(
@@ -6500,6 +9285,22 @@ def get_index_chart(
 
     if raw_df.empty:
         raise HTTPException(status_code=404, detail=f"No data for index '{symbol}'")
+
+    # Drop non-session daily rows (weekend clones) before weekly/other aggregation.
+    try:
+        from movers_data import _is_nse_session_day as _session_ok
+    except Exception:
+        try:
+            from server.movers_data import _is_nse_session_day as _session_ok
+        except Exception:
+            _session_ok = lambda d: d.weekday() < 5  # noqa: E731
+    try:
+        _days = pd.to_datetime(raw_df["Date"], errors="coerce").dt.date
+        raw_df = raw_df[_days.map(lambda d: bool(d and _session_ok(d)))].copy()
+    except Exception:
+        pass
+    if raw_df.empty:
+        raise HTTPException(status_code=404, detail=f"No session-day data for index '{symbol}'")
 
     for col in ["Open", "High", "Low", "Close", "Volume"]:
         raw_df[col] = pd.to_numeric(raw_df[col], errors="coerce").round(2)
@@ -6550,10 +9351,15 @@ def get_index_chart(
 @app.get("/api/index-constituents/{symbol:path}")
 def get_index_constituents(symbol: str):
     import sqlite3 as sq
+    from urllib.parse import unquote
 
-    from nse_constituents import NSE_INDEX_MAP, fetch_constituents_for_symbol
+    try:
+        from server.nse_constituents import NSE_INDEX_MAP, fetch_constituents_for_symbol
+    except Exception:
+        from nse_constituents import NSE_INDEX_MAP, fetch_constituents_for_symbol
 
-    nse_name = NSE_INDEX_MAP.get(symbol)
+    sym = unquote(str(symbol or "")).strip()
+    nse_name = NSE_INDEX_MAP.get(sym)
     if not nse_name:
         return {"data": [], "message": "Constituents not available for this index"}
 
@@ -6565,18 +9371,18 @@ def get_index_constituents(symbol: str):
         )
         screener_map = {str(r[0] or "").upper().strip(): r for r in cur.fetchall()}
 
-        rows, _source, err = fetch_constituents_for_symbol(symbol, conn)
+        rows, _source, err = fetch_constituents_for_symbol(sym, conn)
         if err and not rows:
             raise HTTPException(status_code=502, detail=err)
 
         stocks = []
         for row in rows:
-            sym = row["symbol"]
-            sc = screener_map.get(str(sym).upper().strip())
+            row_sym = row["symbol"]
+            sc = screener_map.get(str(row_sym).upper().strip())
             ch30 = round(float(sc[3]), 2) if sc and sc[3] is not None else None
             stocks.append({
-                "symbol": sym,
-                "company_name": row.get("company_name", sym),
+                "symbol": row_sym,
+                "company_name": row.get("company_name", row_sym),
                 "market_cap": row.get("market_cap") if row.get("market_cap") is not None else (sc[1] if sc else None),
                 "last_price": row.get("last_price"),
                 "change_pct": row.get("change_pct"),
@@ -6599,8 +9405,6 @@ def get_index_constituents(symbol: str):
 @app.post("/api/admin/refresh-indices")
 def admin_refresh_indices():
     """Refresh live index prices in background."""
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
 
     def run():
         import subprocess as sp
@@ -6611,16 +9415,17 @@ def admin_refresh_indices():
                 [sys.executable, str(SCRAPE_INDICES_PATH)],
                 timeout=120
             )
-            global _stock_df
-            _stock_df = None
+            invalidate_stock_df()
             finish_job("Index prices refreshed.")
         except Exception as e:
             fail_job(str(e))
 
-    import threading
-    t = threading.Thread(target=run, daemon=True)
-    t.start()
-    return {"status": "started", "job": "indices"}
+    return _start_or_queue_job(
+        "indices",
+        lambda: threading.Thread(target=run, daemon=True).start(),
+        label="Refresh indices",
+        source="manual",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -6665,6 +9470,7 @@ def get_screener_quarters_api(
             conn.commit()
         finally:
             conn.close()
+        payload = _attach_tv_quarterly_overlay(symbol, payload)
         return {
             "status": status,
             "data": payload,
@@ -6705,6 +9511,7 @@ def refresh_screener_quarters_api(
             conn.commit()
         finally:
             conn.close()
+        payload = _attach_tv_quarterly_overlay(symbol, payload)
         return {
             "status": status,
             "data": payload,
@@ -6878,7 +9685,9 @@ def filter_ema(body: dict):
         rows = []
         if snapshot_key and ema_period in [9, 21, 50, 100, 200] and (target != "ema" or target_ema_period in [9, 21, 50, 100, 200]):
             snap_rows = _load_filter_snapshots(snapshot_key, sect)
-            if not snap_rows:
+            if not snap_rows or not _snapshots_usable_for_ema_filter(
+                snap_rows, ema_period, target, target_ema_period
+            ):
                 snapshot_key = None
             else:
                 rows = []
@@ -6915,6 +9724,10 @@ def filter_ema(body: dict):
                     ))
         if not snapshot_key:
             # On-demand calculation for non-standard periods or weekly/monthly
+            min_period = ema_period
+            if target == "ema":
+                min_period = max(ema_period, target_ema_period)
+            min_bars = min_period + 2
             cursor.execute(f"SELECT Symbol FROM screener ORDER BY {_MCAP_SQL} DESC NULLS LAST")
             symbols = [r[0] for r in cursor.fetchall()]
             rows    = []
@@ -6929,13 +9742,13 @@ def filter_ema(body: dict):
                     ORDER BY Date ASC
                 """, (sym,))
                 candles = cursor.fetchall()
-                if len(candles) < ema_period + 2:
+                if len(candles) < min_bars:
                     continue
 
                 candles = apply_filter_timeframe_agg(candles, tf_unit, tf_num)
                 candles = [c for c in candles if all(v is not None for v in c)]
 
-                if len(candles) < ema_period + 2:
+                if len(candles) < min_bars:
                     continue
 
                 closes = [c[4] for c in candles]
@@ -7159,11 +9972,15 @@ def aggregate_to_monthly(candles):
 def parse_timeframe(timeframe: str) -> tuple:
     """
     Parse timeframe string into (unit, num).
-    unit: 'D' | 'W' | 'M'. Legacy minute/hour suffixes (e.g. 15m, 1h) map to daily.
+    unit: 'D' | 'W' | 'M' | 'H' | 'm' (minutes). Legacy other minute/hour
+    suffixes (e.g. 15m, 1h) map to daily. Canonical 30m is session bars.
     """
     tf = (timeframe or "1D").strip()
     if len(tf) < 2:
         return "D", 1
+    # Explicit EOD 30m token — must not be treated as months or legacy daily.
+    if tf.lower() == "30m":
+        return "m", 30
     suf_raw = tf[-1]
     pre = tf[:-1]
     if not pre.isdigit():
@@ -7186,7 +10003,7 @@ def parse_timeframe(timeframe: str) -> tuple:
 
 def apply_filter_timeframe_agg(candles, tf_unit: str, tf_num: int):
     """Apply the same timeframe aggregation as chart endpoints for filter candle lists."""
-    if tf_unit == "H":
+    if tf_unit in ("H", "m"):
         return candles
     if tf_unit == "W":
         c = aggregate_to_weekly(candles)
@@ -7228,6 +10045,11 @@ def _load_filter_candles(cursor, symbols, tf_unit: str, tf_num: int, chunk_size:
 
         conn = cursor.connection
         return load_bars_4h_candles_batch(conn, symbols)
+    if tf_unit == "m" and tf_num == 30:
+        from server.bars_30m import load_bars_30m_candles_batch
+
+        conn = cursor.connection
+        return load_bars_30m_candles_batch(conn, symbols)
     candles = _load_candles_for_symbols(cursor, symbols, chunk_size=chunk_size)
     out = {}
     for sym, rows in candles.items():
@@ -7791,6 +10613,24 @@ def filter_price(body: dict):
         cursor = conn.cursor()
         results = []
 
+        # Multi-day price vs open/high/low is a lookback, not a calendar bucket.
+        rolling_sessions = (
+            price_lookback.rolling_lookback_sessions(tf_unit, tf_num)
+            if target in price_lookback.ROLLING_TARGETS
+            else None
+        )
+        if rolling_sessions:
+            snapshot_key = None
+            cursor.execute(f"SELECT Symbol FROM screener ORDER BY {_MCAP_SQL} DESC NULLS LAST")
+            rolling_symbols = [r[0] for r in cursor.fetchall()]
+            if sect is not None:
+                rolling_symbols = [
+                    s for s in rolling_symbols if str(s).strip().upper() in sect
+                ]
+            results = price_lookback.filter_symbols(
+                conn, rolling_symbols, rolling_sessions, target, condition, pct_value
+            )
+
         # Fast path for daily / weekly / monthly filters using precomputed snapshots.
         if snapshot_key and (
             target in {"open", "high", "low"} or
@@ -7800,45 +10640,40 @@ def filter_price(body: dict):
             if not rows:
                 snapshot_key = None
             else:
+                # 1D price vs open/high/low: always evaluate on latest historical bars.
+                # Snapshots often lag a session; list/chart already show fresh OHLC.
+                daily_ohlc = None
+                if snapshot_key == "1D" and target in {"open", "high", "low"}:
+                    daily_ohlc = _load_latest_two_daily_ohlc(conn)
                 for row in rows:
-                    sym = row["symbol"]
-                    price_curr = row["close_curr"]
-                    price_prev = row["close_prev"]
+                    row = _snapshot_row_as_dict(row)
+                    sym = str(row.get("symbol") or "").strip().upper()
+                    if daily_ohlc is not None:
+                        row = _overlay_daily_ohlc_on_price_snapshot_row(
+                            row, daily_ohlc.get(sym)
+                        )
+                    price_curr = row.get("close_curr")
+                    price_prev = row.get("close_prev")
                     if price_curr is None or price_prev is None:
                         continue
 
                     if target == "open":
-                        tgt_curr, tgt_prev = row["open_curr"], row["open_prev"]
+                        tgt_curr, tgt_prev = row.get("open_curr"), row.get("open_prev")
                     elif target == "high":
-                        tgt_curr, tgt_prev = row["high_curr"], row["high_prev"]
+                        tgt_curr, tgt_prev = row.get("high_curr"), row.get("high_prev")
                     elif target == "low":
-                        tgt_curr, tgt_prev = row["low_curr"], row["low_prev"]
+                        tgt_curr, tgt_prev = row.get("low_curr"), row.get("low_prev")
                     else:  # ema
-                        tgt_curr, tgt_prev = row[f"ema{ema_period}"], row[f"ema{ema_period}_prev"]
+                        tgt_curr, tgt_prev = row.get(f"ema{ema_period}"), row.get(f"ema{ema_period}_prev")
 
                     if tgt_curr is None or tgt_prev is None:
                         continue
 
-                    matched = False
-                    if condition == "above":
-                        matched = price_curr > tgt_curr
-                    elif condition == "above_eq":
-                        matched = price_curr >= tgt_curr
-                    elif condition == "below":
-                        matched = price_curr < tgt_curr
-                    elif condition == "below_eq":
-                        matched = price_curr <= tgt_curr
-                    elif condition == "crosses_up":
-                        matched = price_prev <= tgt_prev and price_curr > tgt_curr
-                    elif condition == "crosses_down":
-                        matched = price_prev >= tgt_prev and price_curr < tgt_curr
-                    elif condition == "above_pct":
-                        matched = tgt_curr != 0 and price_curr > tgt_curr * (1 + pct_value / 100)
-                    elif condition == "below_pct":
-                        matched = tgt_curr != 0 and price_curr < tgt_curr * (1 - pct_value / 100)
-                    if matched:
+                    if price_lookback.condition_matches(
+                        condition, price_curr, price_prev, tgt_curr, tgt_prev, pct_value
+                    ):
                         results.append(sym)
-        if not snapshot_key:
+        if not snapshot_key and not rolling_sessions:
             min_bars = ema_period + 2 if target == "ema" else 3
             cursor.execute(f"SELECT Symbol FROM screener ORDER BY {_MCAP_SQL} DESC NULLS LAST")
             symbols = [r[0] for r in cursor.fetchall()]
@@ -7876,24 +10711,9 @@ def filter_price(body: dict):
                     if price_curr is None or tgt_curr is None:
                         continue
 
-                    matched = False
-                    if condition == "above":
-                        matched = price_curr > tgt_curr
-                    elif condition == "above_eq":
-                        matched = price_curr >= tgt_curr
-                    elif condition == "below":
-                        matched = price_curr < tgt_curr
-                    elif condition == "below_eq":
-                        matched = price_curr <= tgt_curr
-                    elif condition == "crosses_up":
-                        matched = price_prev <= tgt_prev and price_curr > tgt_curr
-                    elif condition == "crosses_down":
-                        matched = price_prev >= tgt_prev and price_curr < tgt_curr
-                    elif condition == "above_pct":
-                        matched = tgt_curr != 0 and price_curr > tgt_curr * (1 + pct_value / 100)
-                    elif condition == "below_pct":
-                        matched = tgt_curr != 0 and price_curr < tgt_curr * (1 - pct_value / 100)
-                    if matched:
+                    if price_lookback.condition_matches(
+                        condition, price_curr, price_prev, tgt_curr, tgt_prev, pct_value
+                    ):
                         results.append(sym)
                 except Exception:
                     continue
@@ -7969,13 +10789,20 @@ def filter_marketcap(body: dict):
 @app.post("/api/filter/earnings")
 def filter_earnings(body: dict):
     """
-    Dashboard filter: reported earnings in an IST window with optional surprise % bounds.
+    Dashboard filter: earnings activity in an IST window.
     body = {
-        report_window: 'this_week' | 'prev_week' | 'month_range',
+        report_window: 'current_trading_day' | 'previous_day' | 'previous_5_days'
+                       | 'this_week' | 'prev_week' | 'next_week' | 'next_day' | 'next_5_days'
+                       | 'month_range' | legacy today/yesterday,
         from_year, from_month, to_year, to_month  # required for month_range
-        eps_surprise_min/max, revenue_surprise_min/max  # optional
+        earnings_scope: 'reported' | 'upcoming' | 'both',  # default 'reported'
+        eps_surprise_min/max, revenue_surprise_min/max  # reported leg only
         market_sectors: list  # optional
     }
+    Current trading day spans last NSE session→today on weekends/holidays so Sat/Sun
+    TV prints are included. Previous/next 5 days are calendar days from that anchor.
+    Reported matches the last release date, upcoming matches the next one, and both
+    unions the two so a window that straddles today catches either side.
     """
     _cached = get_filter_cache("/api/filter/earnings", body)
     if _cached is not None:
@@ -7983,6 +10810,9 @@ def filter_earnings(body: dict):
     try:
         sect = _sector_allowed_symbols(body)
         report_window = str(body.get("report_window") or "month_range").strip().lower()
+        scope = str(body.get("earnings_scope") or "reported").strip().lower()
+        if scope not in ("reported", "upcoming", "both"):
+            scope = "reported"
 
         def _opt_float(key: str):
             v = body.get(key)
@@ -7990,38 +10820,135 @@ def filter_earnings(body: dict):
                 return None
             return float(v)
 
-        kwargs = {
-            "mode": "reported",
+        window_kwargs = {
             "report_window": report_window,
-            "eps_surprise_min": _opt_float("eps_surprise_min"),
-            "eps_surprise_max": _opt_float("eps_surprise_max"),
-            "revenue_surprise_min": _opt_float("revenue_surprise_min"),
-            "revenue_surprise_max": _opt_float("revenue_surprise_max"),
             "limit": 2000,
             "use_cache": True,
         }
         if report_window == "month_range":
-            kwargs["range_from_year"] = int(body.get("from_year"))
-            kwargs["range_from_month"] = int(body.get("from_month"))
-            kwargs["range_to_year"] = int(body.get("to_year"))
-            kwargs["range_to_month"] = int(body.get("to_month"))
+            window_kwargs["range_from_year"] = int(body.get("from_year"))
+            window_kwargs["range_from_month"] = int(body.get("from_month"))
+            window_kwargs["range_to_year"] = int(body.get("to_year"))
+            window_kwargs["range_to_month"] = int(body.get("to_month"))
         else:
-            kwargs["year"] = current_year_ist()
-            kwargs["month"] = current_month_ist()
+            window_kwargs["year"] = current_year_ist()
+            window_kwargs["month"] = current_month_ist()
 
-        payload = fetch_earnings_calendar(**kwargs)
-        results = [
-            str(r.get("symbol") or "").strip().upper()
-            for r in (payload.get("rows") or [])
-            if r.get("symbol")
-        ]
-        if sect is not None:
-            results = [s for s in results if s in sect]
+        results = []
+        seen = set()
+        for mode in (("reported", "upcoming") if scope == "both" else (scope,)):
+            kwargs = {**window_kwargs, "mode": mode}
+            if mode == "reported":
+                # Surprise % only exists once a quarter is out, so upcoming ignores it.
+                kwargs["eps_surprise_min"] = _opt_float("eps_surprise_min")
+                kwargs["eps_surprise_max"] = _opt_float("eps_surprise_max")
+                kwargs["revenue_surprise_min"] = _opt_float("revenue_surprise_min")
+                kwargs["revenue_surprise_max"] = _opt_float("revenue_surprise_max")
+            payload = fetch_earnings_calendar(**kwargs)
+            for row in payload.get("rows") or []:
+                sym = str(row.get("symbol") or "").strip().upper()
+                if not sym or sym in seen:
+                    continue
+                if sect is not None and sym not in sect:
+                    continue
+                seen.add(sym)
+                results.append(sym)
         result = {"symbols": results, "count": len(results)}
         set_filter_cache("/api/filter/earnings", body, result)
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/filter/annual-vs-ttm")
+def filter_annual_vs_ttm(body: dict):
+    """
+    Dashboard filter: TTM vs last completed FY annual for revenue and/or net income.
+    body = {
+        metrics: ['total_revenue' | 'net_income', ...],  # one or both; AND when both
+        condition: 'ttm_gt_annual' | 'ttm_lt_annual',
+        basis: 'consolidated' | 'standalone',  # preferred; falls back to other if missing
+        market_sectors: list  # optional
+    }
+    Uses cached Screener quarterly rows only (no live scrape).
+    """
+    _cached = get_filter_cache("/api/filter/annual-vs-ttm", body)
+    if _cached is not None:
+        return _cached
+    try:
+        normalize_annual_vs_ttm_params(body)
+        sect = _sector_allowed_symbols(body)
+        conn = get_db_connection()
+        try:
+            results = query_annual_vs_ttm_symbols(conn, body, sect)
+        finally:
+            conn.close()
+        result = {"symbols": results, "count": len(results)}
+        set_filter_cache("/api/filter/annual-vs-ttm", body, result)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/filter/screener")
+def filter_screener(body: dict):
+    """
+    Dashboard filter: symbol universe from a saved Screener.in screen URL.
+    body = {
+        screen_url: str,
+        screen_name: str | null,   # optional chip label
+        force_refresh: bool,      # bypass SQLite cache
+        market_sectors: list,      # optional
+    }
+    """
+    _cached = get_filter_cache("/api/filter/screener", body)
+    if _cached is not None:
+        return _cached
+    try:
+        screen_url = str(body.get("screen_url") or "").strip()
+        if not screen_url:
+            raise HTTPException(status_code=400, detail="screen_url is required")
+        screen_name = str(body.get("screen_name") or "").strip() or None
+        force_refresh = bool(body.get("force_refresh"))
+        sect = _sector_allowed_symbols(body)
+        conn = get_db_connection()
+        try:
+            payload = query_screener_screen_symbols(
+                conn,
+                screen_url,
+                screen_name=screen_name,
+                data_dir=DATA_DIR,
+                force_refresh=force_refresh,
+                sector_symbols=sect,
+            )
+        finally:
+            conn.close()
+        result = {
+            "symbols": payload.get("symbols") or [],
+            "count": int(payload.get("count") or 0),
+            "screen_url": payload.get("screen_url"),
+            "screen_name": screen_name,
+            "fetched_at": payload.get("fetched_at"),
+            "source": payload.get("source"),
+        }
+        set_filter_cache("/api/filter/screener", body, result)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
     except HTTPException:
         raise
     except Exception as e:
@@ -8181,6 +11108,28 @@ def _movers_sector_symbols(market_sectors: str = Query("")) -> Optional[Set[str]
     return _sector_allowed_symbols({"market_sectors": sectors})
 
 
+def _movers_allowed_symbols(
+    market_sectors: str = "",
+    *,
+    earnings_today: bool = False,
+) -> Optional[Set[str]]:
+    """
+    Optional allow-list for movers ranking.
+    None = no symbol filter. Empty set = explicitly no matches.
+    """
+    sect = _movers_sector_symbols(market_sectors)
+    if not earnings_today:
+        return sect
+    try:
+        today_syms = symbols_with_earnings_today()
+    except Exception as e:
+        print(f"[movers] earnings_today lookup failed: {e}")
+        today_syms = set()
+    if sect is None:
+        return set(today_syms)
+    return set(sect) & set(today_syms)
+
+
 @app.get("/api/market-map/catalog")
 def api_market_map_catalog():
     return market_map.catalog_payload()
@@ -8258,24 +11207,26 @@ def api_movers_day_change(
     min_market_cap: Optional[float] = Query(None),
     max_market_cap: Optional[float] = Query(None),
     market_sectors: str = Query(""),
+    earnings_today: bool = Query(False),
 ):
     side_n = str(side or "gainers").strip().lower()
     if side_n not in ("gainers", "losers"):
         side_n = "gainers"
     lim = _normalize_movers_limit(limit)
-    sect = _movers_sector_symbols(market_sectors)
+    allowed = _movers_allowed_symbols(market_sectors, earnings_today=bool(earnings_today))
     try:
         conn = get_db_connection()
         try:
-            return movers_data.query_day_change(
+            result = movers_data.query_day_change(
                 conn,
                 mcap_sql=_MCAP_SQL,
                 side=side_n,
                 limit=lim,
                 min_mcap=min_market_cap,
                 max_mcap=max_market_cap,
-                allowed_symbols=sect,
+                allowed_symbols=allowed,
             )
+            return result
         finally:
             conn.close()
     except Exception as e:
@@ -8291,24 +11242,26 @@ def api_movers_volume(
     min_market_cap: Optional[float] = Query(None),
     max_market_cap: Optional[float] = Query(None),
     market_sectors: str = Query(""),
+    earnings_today: bool = Query(False),
 ):
     mode = str(volume_mode or "absolute").strip().lower()
     if mode not in ("absolute", "surge", "rvol"):
         mode = "absolute"
     lim = _normalize_movers_limit(limit)
-    sect = _movers_sector_symbols(market_sectors)
+    allowed = _movers_allowed_symbols(market_sectors, earnings_today=bool(earnings_today))
     try:
         conn = get_db_connection()
         try:
-            return movers_data.query_volume(
+            result = movers_data.query_volume(
                 conn,
                 mcap_sql=_MCAP_SQL,
                 volume_mode=mode,
                 limit=lim,
                 min_mcap=min_market_cap,
                 max_mcap=max_market_cap,
-                allowed_symbols=sect,
+                allowed_symbols=allowed,
             )
+            return result
         finally:
             conn.close()
     except Exception as e:
@@ -8354,27 +11307,31 @@ def api_movers_live_day_change(
     max_market_cap: Optional[float] = Query(None),
     market_sectors: str = Query(""),
     light: bool = Query(False),
+    earnings_today: bool = Query(False),
 ):
     side_n = str(side or "gainers").strip().lower()
     if side_n not in ("gainers", "losers"):
         side_n = "gainers"
     lim = _normalize_movers_limit(limit)
-    sect = _movers_sector_symbols(market_sectors)
+    allowed = _movers_allowed_symbols(market_sectors, earnings_today=bool(earnings_today))
     try:
         conn = get_db_connection()
         try:
-            return movers_live.query_day_change_live(
+            result = movers_live.query_day_change_live(
                 conn,
                 mcap_sql=_MCAP_SQL,
                 side=side_n,
                 limit=lim,
                 min_mcap=min_market_cap,
                 max_mcap=max_market_cap,
-                allowed_symbols=sect,
+                allowed_symbols=allowed,
                 refresh_quotes=not light,
             )
+            return result
         finally:
             conn.close()
+    except TimeoutError as e:
+        raise HTTPException(status_code=503, detail="Movers list busy — retry shortly")
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -8389,12 +11346,13 @@ def api_movers_live_volume(
     max_market_cap: Optional[float] = Query(None),
     market_sectors: str = Query(""),
     light: bool = Query(False),
+    earnings_today: bool = Query(False),
 ):
     mode = str(volume_mode or "absolute").strip().lower()
     if mode not in ("absolute", "surge", "rvol"):
         mode = "absolute"
     lim = _normalize_movers_limit(limit)
-    sect = _movers_sector_symbols(market_sectors)
+    allowed = _movers_allowed_symbols(market_sectors, earnings_today=bool(earnings_today))
     try:
         conn = get_db_connection()
         try:
@@ -8405,7 +11363,7 @@ def api_movers_live_volume(
                 limit=lim,
                 min_mcap=min_market_cap,
                 max_mcap=max_market_cap,
-                allowed_symbols=sect,
+                allowed_symbols=allowed,
                 refresh_quotes=not light,
             )
         finally:
@@ -8666,7 +11624,11 @@ def _load_watchlists():
                         dedup = {}
                         for it in normalized_items:
                             dedup[(it["symbol"], it["type"])] = it
-                        cleaned.append({"name": nm, "items": list(dedup.values())})
+                        cleaned.append({
+                            "name": nm,
+                            "items": list(dedup.values()),
+                            "notifications_enabled": bool(w.get("notifications_enabled")),
+                        })
                     if cleaned:
                         # Migrate legacy "Default" display name; persist once if changed
                         used_lower = {w["name"].lower() for w in cleaned}
@@ -8731,7 +11693,11 @@ def _parse_watchlist_entries(raw_lists) -> list[dict]:
         dedup: dict[tuple[str, str], dict] = {}
         for it in normalized_items:
             dedup[(it["symbol"], it["type"])] = it
-        cleaned.append({"name": nm, "items": list(dedup.values())})
+        cleaned.append({
+            "name": nm,
+            "items": list(dedup.values()),
+            "notifications_enabled": bool(w.get("notifications_enabled")),
+        })
     return cleaned
 
 
@@ -8742,6 +11708,8 @@ def _merge_watchlists_on_import(existing: list[dict], imported: list[dict]) -> l
         if key in by_lower:
             by_lower[key]["name"] = imp["name"]
             by_lower[key]["items"] = imp["items"]
+            if "notifications_enabled" in imp:
+                by_lower[key]["notifications_enabled"] = bool(imp.get("notifications_enabled"))
         else:
             by_lower[key] = dict(imp)
     result: list[dict] = []
@@ -8835,7 +11803,7 @@ def create_watchlist(payload: dict):
         watchlists = _load_watchlists()
         if any(w["name"].lower() == name.lower() for w in watchlists):
             raise HTTPException(status_code=409, detail="Watchlist already exists")
-        watchlists.append({"name": name, "items": []})
+        watchlists.append({"name": name, "items": [], "notifications_enabled": False})
         _save_watchlists(watchlists)
     return {"status": "created", "name": name}
 
@@ -8927,6 +11895,20 @@ def delete_watchlist(name: str):
 def rename_watchlist(name: str, payload: dict):
     old_name = _normalize_watchlist_name(name)
     new_name = _normalize_watchlist_name(payload.get("new_name"))
+    # Settings-only update (notifications_enabled) without rename
+    if not new_name and "notifications_enabled" in (payload or {}):
+        with _user_prefs_lock():
+            watchlists = _load_watchlists()
+            found = False
+            for w in watchlists:
+                if w["name"].lower() == old_name.lower():
+                    w["notifications_enabled"] = bool(payload.get("notifications_enabled"))
+                    found = True
+                    break
+            if not found:
+                raise HTTPException(status_code=404, detail="Watchlist not found")
+            _save_watchlists(watchlists)
+        return {"status": "updated", "name": old_name, "notifications_enabled": bool(payload.get("notifications_enabled"))}
     if not new_name:
         raise HTTPException(status_code=400, detail="new_name is required")
     with _user_prefs_lock():
@@ -8937,6 +11919,8 @@ def rename_watchlist(name: str, payload: dict):
         for w in watchlists:
             if w["name"].lower() == old_name.lower():
                 w["name"] = new_name
+                if "notifications_enabled" in payload:
+                    w["notifications_enabled"] = bool(payload.get("notifications_enabled"))
                 found = True
                 break
         if not found:
@@ -9107,7 +12091,7 @@ def get_portfolio_stocks(
 
     rows_out = []
     active_filters = _parse_json_list_param(filters)
-    market_sectors = [str(x).strip() for x in _parse_json_list_param(marketSectors) if str(x).strip()]
+    selected_sectors = [str(x).strip() for x in _parse_json_list_param(marketSectors) if str(x).strip()]
 
     if stock_syms:
         try:
@@ -9171,10 +12155,14 @@ def get_portfolio_stocks(
     if pdf.empty:
         return {"total": 0, "page": page, "pageSize": pageSize, "pages": 1, "data": []}
 
-    if market_sectors and "Market Sector" in pdf.columns:
-        pdf = pdf[pdf["Market Sector"].isin(market_sectors)]
+    if selected_sectors and "Symbol" in pdf.columns:
+        allowed_sector_syms = market_sectors.symbol_set_for_market_sectors(
+            DATA_DIR, DB_PATH, selected_sectors,
+        )
+        if allowed_sector_syms is not None:
+            pdf = pdf[pdf["Symbol"].isin(allowed_sector_syms)]
 
-    filter_symbols = _combined_filter_symbols(active_filters, market_sectors)
+    filter_symbols = _combined_filter_symbols(active_filters, selected_sectors)
     if filter_symbols is not None and "Symbol" in pdf.columns:
         pdf = pdf[pdf["Symbol"].isin(filter_symbols)]
 
@@ -9258,10 +12246,12 @@ def get_pnl_open():
 
 @app.get("/api/pnl/closed")
 def get_pnl_closed():
-    from server.pnl_ledger import build_closed_rows
+    from server.pnl_ledger import build_closed_rows, repair_closed_qty_bought
 
     with _user_prefs_lock():
         ledger = _load_pnl_ledger()
+        if repair_closed_qty_bought(ledger):
+            _save_pnl_ledger(ledger)
     return build_closed_rows(ledger.get("closed_trades", []))
 
 
@@ -9325,6 +12315,7 @@ def post_pnl_position(payload: dict):
     entry_price = payload.get("entry_price")
     qty = payload.get("qty")
     entry_date = payload.get("entry_date")
+    broker = payload.get("broker")
     with _user_prefs_lock():
         portfolio = _load_portfolio()
         ledger = _load_pnl_ledger()
@@ -9336,6 +12327,7 @@ def post_pnl_position(payload: dict):
                 qty=qty,
                 portfolio_items=portfolio.get("items", []),
                 entry_date=entry_date,
+                broker=broker,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -9351,8 +12343,12 @@ def patch_pnl_position(position_id: str, payload: dict):
     entry_price = payload.get("entry_price") if "entry_price" in payload else None
     qty = payload.get("qty") if "qty" in payload else None
     entry_date = payload.get("entry_date") if "entry_date" in payload else None
-    if entry_price is None and qty is None and entry_date is None:
-        raise HTTPException(status_code=400, detail="entry_price, qty, and/or entry_date required")
+    broker = payload.get("broker") if "broker" in payload else None
+    if entry_price is None and qty is None and entry_date is None and broker is None:
+        raise HTTPException(
+            status_code=400,
+            detail="entry_price, qty, entry_date, and/or broker required",
+        )
     with _user_prefs_lock():
         portfolio = _load_portfolio()
         ledger = _load_pnl_ledger()
@@ -9372,6 +12368,10 @@ def patch_pnl_position(position_id: str, payload: dict):
                     portfolio_items=portfolio.get("items", []),
                     entry_date=entry_date,
                 )
+                if broker is not None:
+                    from server.pnl_ledger import set_record_broker
+
+                    set_record_broker(pos, broker)
             else:
                 pos = patch_position(
                     ledger,
@@ -9379,6 +12379,7 @@ def patch_pnl_position(position_id: str, payload: dict):
                     entry_price=entry_price,
                     qty=qty,
                     entry_date=entry_date,
+                    broker=broker,
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -9411,6 +12412,61 @@ def delete_pnl_position(position_id: str):
         _save_pnl_ledger(ledger)
         _save_portfolio(portfolio)
     return {"status": "ok"}
+
+
+@app.post("/api/pnl/broker/symbol")
+def post_pnl_symbol_broker(payload: dict):
+    """Bulk-tag open lots (and optionally closed trades) for one symbol."""
+    from server.pnl_ledger import set_symbol_broker
+
+    symbol = payload.get("symbol")
+    broker = payload.get("broker")
+    scope = payload.get("scope") or "open"
+    with _user_prefs_lock():
+        ledger = _load_pnl_ledger()
+        try:
+            result = set_symbol_broker(ledger, symbol, broker, scope=scope)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _save_pnl_ledger(ledger)
+    return {"status": "ok", **result}
+
+
+@app.post("/api/pnl/broker/position")
+def post_pnl_position_broker(payload: dict):
+    """Set broker on one open lot (POST — avoids PATCH/CORS issues on showcase)."""
+    from server.pnl_ledger import patch_position
+
+    position_id = payload.get("position_id") or payload.get("id")
+    broker = payload.get("broker")
+    if not position_id:
+        raise HTTPException(status_code=400, detail="position_id required")
+    if broker is None:
+        raise HTTPException(status_code=400, detail="broker required")
+    with _user_prefs_lock():
+        ledger = _load_pnl_ledger()
+        try:
+            pos = patch_position(ledger, str(position_id), broker=broker)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _save_pnl_ledger(ledger)
+    return {"status": "ok", "position": pos}
+
+
+@app.patch("/api/pnl/closed/{trade_id}")
+def patch_pnl_closed_trade(trade_id: str, payload: dict):
+    from server.pnl_ledger import set_closed_trade_broker
+
+    if "broker" not in payload:
+        raise HTTPException(status_code=400, detail="broker required")
+    with _user_prefs_lock():
+        ledger = _load_pnl_ledger()
+        try:
+            trade = set_closed_trade_broker(ledger, trade_id, payload.get("broker"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _save_pnl_ledger(ledger)
+    return {"status": "ok", "trade": trade}
 
 
 @app.post("/api/pnl/book")
@@ -9724,6 +12780,119 @@ def post_pnl_import_zerodha_holdings(payload: dict):
     return {"status": "ok", **summary}
 
 
+@app.post("/api/pnl/import/zerodha/tax-pnl/preview")
+def post_pnl_import_zerodha_tax_pnl_preview(payload: dict):
+    """Preview a full Zerodha broker replacement (no write)."""
+    from server.excel_table import resolve_tax_pnl_csv_from_payload
+    from server.zerodha_tax_pnl import preview_zerodha_tax_pnl
+
+    try:
+        csv_text = resolve_tax_pnl_csv_from_payload(payload or {})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    holdings_csv = payload.get("holdings_csv") or payload.get("holdings") or ""
+    reconcile_holdings = payload.get("reconcile_holdings", False)
+
+    def _as_bool(v, default=False):
+        if v is None:
+            return default
+        if isinstance(v, str):
+            return v.strip().lower() not in ("0", "false", "no")
+        return bool(v)
+
+    with _user_prefs_lock():
+        ledger = _load_pnl_ledger()
+        portfolio = _load_portfolio()
+        summary = preview_zerodha_tax_pnl(
+            ledger,
+            portfolio.get("items", []),
+            csv_text,
+            replace_zerodha_closed=True,
+            apply_open_from_file=True,
+            full_broker_replace=True,
+            holdings_csv=str(holdings_csv) if holdings_csv else None,
+            reconcile_holdings=_as_bool(reconcile_holdings, False),
+        )
+    if payload.get("_resolved_sheet"):
+        summary["excel_sheet"] = payload["_resolved_sheet"]
+    return summary
+
+
+@app.post("/api/pnl/import/zerodha/tax-pnl")
+def post_pnl_import_zerodha_tax_pnl(payload: dict):
+    """Atomically replace all Zerodha P&L from Tax/Console P&L CSV or Excel."""
+    from server.excel_table import resolve_tax_pnl_csv_from_payload
+    from server.pnl_ledger import consolidate_open_lots, reconcile_pnl_portfolio_sync
+    from server.zerodha_tax_pnl import run_zerodha_tax_pnl_import
+
+    try:
+        csv_text = resolve_tax_pnl_csv_from_payload(payload or {})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    holdings_csv = payload.get("holdings_csv") or payload.get("holdings") or ""
+    reconcile_holdings = payload.get("reconcile_holdings", False)
+    confirmation = str(payload.get("confirm_broker_replace") or "").strip().lower()
+    if confirmation != "zerodha":
+        raise HTTPException(
+            status_code=400,
+            detail="Confirm full Zerodha broker replacement before importing",
+        )
+
+    def _as_bool(v, default=False):
+        if v is None:
+            return default
+        if isinstance(v, str):
+            return v.strip().lower() not in ("0", "false", "no")
+        return bool(v)
+
+    with _user_prefs_lock():
+        portfolio = _load_portfolio()
+        ledger = _load_pnl_ledger()
+        items = portfolio.get("items", [])
+        summary = run_zerodha_tax_pnl_import(
+            ledger,
+            items,
+            csv_text,
+            replace_zerodha_closed=True,
+            apply_open_from_file=True,
+            full_broker_replace=True,
+            holdings_csv=str(holdings_csv) if holdings_csv else None,
+            reconcile_holdings=_as_bool(reconcile_holdings, False),
+        )
+        if not summary.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=summary.get("errors") or summary.get("parse_errors") or "Tax P&L import failed",
+            )
+        reconcile_pnl_portfolio_sync(items, ledger)
+        consolidated = consolidate_open_lots(ledger)
+        if consolidated:
+            summary["lots_consolidated"] = consolidated
+        _save_pnl_ledger(ledger)
+        _save_portfolio(portfolio)
+    if isinstance(payload, dict) and payload.get("_resolved_sheet"):
+        summary["excel_sheet"] = payload["_resolved_sheet"]
+    return {"status": "ok", **summary}
+
+
+@app.post("/api/pnl/repair/duplicate-closes")
+def post_pnl_repair_duplicate_closes(payload: dict | None = None):
+    """Remove double-booked closed trades (manual/positions + Zerodha re-import)."""
+    from server.pnl_repair_duplicates import repair_duplicate_closed_trades
+
+    dry_run = bool((payload or {}).get("dry_run"))
+    with _user_prefs_lock():
+        ledger = _load_pnl_ledger()
+        if dry_run:
+            import copy
+
+            summary = repair_duplicate_closed_trades(copy.deepcopy(ledger))
+            return {"status": "ok", "dry_run": True, **summary}
+        summary = repair_duplicate_closed_trades(ledger)
+        _save_pnl_ledger(ledger)
+    return {"status": "ok", "dry_run": False, **summary}
+
+
 @app.post("/api/pnl/repair/consolidate-lots")
 def post_pnl_repair_consolidate_lots(payload: dict | None = None):
     """Fold duplicate open lots (same symbol, entry date, entry price). Repairs post-import clutter."""
@@ -9771,12 +12940,23 @@ def get_sector_mapping():
     """Rules + symbol overrides + canonical list for UI editors."""
     market_sectors.ensure_default_mapping_file(DATA_DIR)
     data = market_sectors.load_mapping(DATA_DIR)
+    try:
+        try:
+            from server import index_industry_sectors as _iis
+        except ImportError:
+            import index_industry_sectors as _iis
+
+        cores_meta = _iis.index_cores_meta()
+    except Exception:
+        cores_meta = {}
     return {
         "canonical_sectors": data.get("canonical_sectors") or market_sectors.canonical_sectors_for_ui(),
         "sector_groups": market_sectors.sector_dropdown_groups_for_ui(),
         "rules":             data.get("rules") or [],
         "symbol_overrides":  data.get("symbol_overrides") or {},
         "use_exchange_labels": bool(data.get("use_exchange_labels", True)),
+        "macro_sector_schema_version": int(data.get("macro_sector_schema_version") or 0),
+        "index_cores_meta": cores_meta,
     }
 
 
@@ -9839,6 +13019,17 @@ def post_sector_mapping(payload: dict):
     market_sectors.save_mapping(DATA_DIR, current)
     invalidate_stock_df()
     return {"status": "saved"}
+
+
+@app.post("/api/sector-index-cores/refresh")
+def post_refresh_sector_index_cores():
+    """Fetch Nifty index constituents for hybrid Market Sector tags and cache them."""
+    try:
+        result = market_sectors.refresh_index_sector_cores(DATA_DIR, DB_PATH)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    invalidate_stock_df()
+    return result
 
 
 @app.post("/api/sync-exchange-classification")
@@ -10042,8 +13233,7 @@ def run_repair_ohlc_anomalies_job(
             conn.close()
         invalidate_chart_cache()
         invalidate_filter_cache()
-        global _stock_df
-        _stock_df = None
+        invalidate_stock_df()
         finish_job(
             f"OHLC repair complete: {result.get('repaired_count', 0)} symbol(s) refreshed; "
             f"{result.get('failed_count', 0)} failed.",
@@ -10085,20 +13275,22 @@ def admin_repair_ohlc_anomalies(
     symbols: str = Query(""),
 ):
     """Host-only: Yahoo-refresh symbols with chart OHLC scale cliffs."""
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
     sym_list = None
     raw = str(symbols or "").strip()
     if raw:
         sym_list = [s.strip().upper() for s in raw.split(",") if s.strip()]
-    t = threading.Thread(
-        target=run_repair_ohlc_anomalies_job,
-        kwargs={"symbols": sym_list, "lookback_days": int(lookback_days)},
-        daemon=True,
+    result = _start_or_queue_job(
+        "ohlc_repair",
+        lambda: threading.Thread(
+            target=run_repair_ohlc_anomalies_job,
+            kwargs={"symbols": sym_list, "lookback_days": int(lookback_days)},
+            daemon=True,
+        ).start(),
+        label="OHLC anomaly repair",
+        source="manual",
     )
-    t.start()
     return {
-        "status": "started",
+        **result,
         "job": "ohlc_repair",
         "lookback_days": lookback_days,
         "symbols": sym_list or [],
@@ -10185,20 +13377,22 @@ def admin_repair_bars_4h_anomalies(
     symbols: str = Query(""),
 ):
     """Host-only: rebuild 4H bars for symbols with scale cliffs or daily mismatch."""
-    if job_state["running"]:
-        raise HTTPException(status_code=409, detail="A job is already running.")
     sym_list = None
     raw = str(symbols or "").strip()
     if raw:
         sym_list = [s.strip().upper() for s in raw.split(",") if s.strip()]
-    t = threading.Thread(
-        target=run_repair_bars_4h_anomalies_job,
-        kwargs={"symbols": sym_list, "lookback_days": int(lookback_days)},
-        daemon=True,
+    result = _start_or_queue_job(
+        "bars_4h_repair",
+        lambda: threading.Thread(
+            target=run_repair_bars_4h_anomalies_job,
+            kwargs={"symbols": sym_list, "lookback_days": int(lookback_days)},
+            daemon=True,
+        ).start(),
+        label="4H anomaly repair",
+        source="manual",
     )
-    t.start()
     return {
-        "status": "started",
+        **result,
         "job": "bars_4h_repair",
         "lookback_days": lookback_days,
         "symbols": sym_list or [],
@@ -10206,7 +13400,7 @@ def admin_repair_bars_4h_anomalies(
 
 
 @app.get("/api/health")
-def health():
+async def health():
     return {
         "status":     "ok",
         "db":         str(DB_PATH),

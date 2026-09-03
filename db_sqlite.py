@@ -13,10 +13,13 @@ from pathlib import Path
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "nse_data.db"
 
+# Wait up to 60s for locks instead of failing the API as a false "TradingView" error.
+SQLITE_BUSY_TIMEOUT_MS = 60_000
+
 
 def configure_sqlite_connection(conn: sqlite3.Connection) -> None:
     # Set busy_timeout before any pragma that may need to wait on a lock.
-    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     try:
         mode = conn.execute("PRAGMA journal_mode").fetchone()
         if mode and str(mode[0]).lower() != "wal":
@@ -34,7 +37,7 @@ def connect_sqlite(
     db_path: str | Path | None = None,
     *,
     row_factory: bool = False,
-    timeout: float = 30.0,
+    timeout: float = 60.0,
 ) -> sqlite3.Connection:
     path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
     conn = sqlite3.connect(str(path), timeout=timeout, check_same_thread=False)
@@ -50,8 +53,8 @@ def ensure_wal_mode(db_path: str | Path | None = None, *, attempts: int = 5) -> 
     last_mode = "unknown"
     for i in range(attempts):
         try:
-            conn = sqlite3.connect(str(path), timeout=30.0)
-            conn.execute("PRAGMA busy_timeout=30000")
+            conn = sqlite3.connect(str(path), timeout=60.0)
+            conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
             row = conn.execute("PRAGMA journal_mode").fetchone()
             last_mode = str(row[0]) if row else "unknown"
             if last_mode.lower() != "wal":

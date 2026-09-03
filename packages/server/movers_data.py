@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import threading
+import time
 from datetime import date, datetime, time as dtime
 from pathlib import Path
 from typing import Any, Optional
@@ -29,6 +31,17 @@ SCREENER_EOD_STALE_REL_GAP = 0.08
 SCREENER_IMPLIED_CHG_TOLERANCE_PCT = 3.0
 _CALENDAR_PATH = get_data_dir() / "nse_calendar.json"
 _calendar_cache: Optional[dict[str, set[str]]] = None
+
+# Serialize EOD day-change builds; share result for a short TTL (live→EOD stampede).
+_eod_day_sem = threading.Semaphore(1)
+_eod_day_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_EOD_DAY_CACHE_TTL_SEC = 2.0
+
+# Full-history window SQL is ~17–26s; reuse the frame briefly across EOD/LIVE polls.
+_universe_load_lock = threading.Lock()
+_universe_load_cache: Optional[pd.DataFrame] = None
+_universe_load_ts: float = 0.0
+_UNIVERSE_LOAD_TTL_SEC = 45.0
 
 # Injected from server after import (avoids circular import).
 _MCAP_SQL = """
@@ -63,6 +76,8 @@ def _movers_mcap_expr() -> str:
 
 
 def _movers_base_sql() -> str:
+    # Restrict scan window — full-table ROW_NUMBER over multi-year history is too
+    # expensive. ~90 calendar days covers 20 sessions.
     return f"""
     WITH ranked AS (
         SELECT
@@ -72,6 +87,7 @@ def _movers_base_sql() -> str:
             Volume,
             ROW_NUMBER() OVER (PARTITION BY Symbol ORDER BY Date DESC) AS rn
         FROM historical_data
+        WHERE Date >= date('now', '-90 days')
     ),
     last_two AS (
         SELECT
@@ -129,10 +145,25 @@ def _movers_base_sql() -> str:
     """
 
 
+def invalidate_movers_universe_cache() -> None:
+    global _universe_load_cache, _universe_load_ts
+    with _universe_load_lock:
+        _universe_load_cache = None
+        _universe_load_ts = 0.0
+
+
 def load_movers_universe(conn, mcap_sql: str) -> pd.DataFrame:
-    global _MCAP_SQL
+    global _MCAP_SQL, _universe_load_cache, _universe_load_ts
     if mcap_sql:
         _MCAP_SQL = mcap_sql.strip()
+    now = time.time()
+    with _universe_load_lock:
+        if (
+            _universe_load_cache is not None
+            and (now - _universe_load_ts) < _UNIVERSE_LOAD_TTL_SEC
+        ):
+            return _universe_load_cache.copy()
+
     sql = _movers_base_sql()
     df = pd.read_sql_query(sql, conn)
     if df.empty:
@@ -155,7 +186,10 @@ def load_movers_universe(conn, mcap_sql: str) -> pd.DataFrame:
     ):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
+    with _universe_load_lock:
+        _universe_load_cache = df
+        _universe_load_ts = time.time()
+    return df.copy()
 
 
 def _finite_or_none(v: Any) -> Optional[float]:
@@ -274,6 +308,21 @@ def should_apply_live_day_change(
     if abs(lv) < 0.005 and abs(ex) > 0.05:
         return False
     return True
+
+
+def resolve_chart_day_change_pct(
+    day_raw: Optional[float],
+    live_day_chg: Optional[float],
+) -> Optional[float]:
+    """
+    Chart 1D % must match list / historical_data (day_raw).
+    Live quotes can be stale after EOD — never let them override a DB value.
+    """
+    if day_raw is not None and math.isfinite(float(day_raw)):
+        return round(float(day_raw), 2)
+    if live_day_chg is not None and math.isfinite(float(live_day_chg)):
+        return round(float(live_day_chg), 2)
+    return None
 
 
 def _apply_intraday_screener_row(
@@ -451,7 +500,8 @@ def _apply_mcap_filter(df: pd.DataFrame, min_mcap: Optional[float], max_mcap: Op
 
 
 def _apply_sector_filter(df: pd.DataFrame, allowed: Optional[set]) -> pd.DataFrame:
-    if not allowed:
+    # None = no allow-list filter. Empty set = intentionally no matches (e.g. earnings today).
+    if allowed is None:
         return df
     return df[df["symbol"].isin(allowed)]
 
@@ -488,36 +538,75 @@ def query_day_change(
     max_mcap: Optional[float],
     allowed_symbols: Optional[set],
 ) -> dict[str, Any]:
-    df = load_movers_universe(conn, mcap_sql)
-    df = apply_session_day_adjustment(df)
-    df = maybe_apply_live_cache_overlay(df)
-    if _session_day_intraday_active():
-        try:
-            import movers_live as ml
+    sect_key = ",".join(sorted(allowed_symbols)) if allowed_symbols else ""
+    cache_key = f"{side}|{limit}|{min_mcap}|{max_mcap}|{sect_key}"
+    now = time.time()
+    cached = _eod_day_cache.get(cache_key)
+    if cached and (now - cached[0]) < _EOD_DAY_CACHE_TTL_SEC:
+        return cached[1]
 
-            df, _ = ml.enrich_session_day_change(conn, mcap_sql, df, side, limit)
-        except Exception:
-            pass
-    df = _apply_mcap_filter(df, min_mcap, max_mcap)
-    df = _apply_sector_filter(df, allowed_symbols)
-    df = df[df["change_pct"].notna()]
-    df = filter_day_change_by_side(df, side)
-    ascending = side == "losers"
-    df = df.sort_values("change_pct", ascending=ascending, na_position="last")
-    top = df.head(limit)
-    as_of = None
-    if "as_of_date" in top.columns and top["as_of_date"].notna().any():
-        as_of = str(top["as_of_date"].dropna().iloc[0])
-    rows = [_row_to_dict(top.iloc[i], i + 1) for i in range(len(top))]
-    return {
-        "mode": "day_change",
-        "side": side,
-        "limit": limit,
-        "as_of_date": as_of,
-        "session_intraday": _session_day_intraday_active(),
-        "count": len(rows),
-        "data": rows,
-    }
+    acquired = _eod_day_sem.acquire(timeout=60)
+    if not acquired:
+        if cached:
+            return cached[1]
+        raise TimeoutError("movers day-change busy")
+    try:
+        now2 = time.time()
+        cached2 = _eod_day_cache.get(cache_key)
+        if cached2 and (now2 - cached2[0]) < _EOD_DAY_CACHE_TTL_SEC:
+            return cached2[1]
+
+        df = load_movers_universe(conn, mcap_sql)
+        df = apply_session_day_adjustment(df)
+        df = maybe_apply_live_cache_overlay(df)
+        # Session day: do not let yesterday EOD % dominate when live quotes exist
+        # (same rule as LIVE endpoint). Overlay already uses quote previous_close.
+        if _session_day_intraday_active():
+            try:
+                import movers_live as ml
+
+                live = ml.live_cache_snapshot()
+                if live:
+                    fresh = {
+                        str(k).upper()
+                        for k, v in live.items()
+                        if v
+                        and ml.cache_quote_fresh(v)
+                        and ml._finite_or_none(v.get("price")) is not None
+                        and ml._finite_or_none(v.get("previous_close")) is not None
+                    }
+                    if fresh:
+                        sym_u = df["symbol"].astype(str).str.strip().str.upper()
+                        df.loc[~sym_u.isin(fresh), "change_pct"] = float("nan")
+            except Exception:
+                pass
+        # Do NOT call enrich_session_day_change here — it fetches Yahoo/Upstox for tens of
+        # symbols and rebuilds the universe (measured 110–320s), which tripped the 120s
+        # client timeout when LIVE fell back to EOD. Live cache overlay is enough for list.
+        df = _apply_mcap_filter(df, min_mcap, max_mcap)
+        df = _apply_sector_filter(df, allowed_symbols)
+        df = df[df["change_pct"].notna()]
+        df = filter_day_change_by_side(df, side)
+        ascending = side == "losers"
+        df = df.sort_values("change_pct", ascending=ascending, na_position="last")
+        top = df.head(limit)
+        as_of = None
+        if "as_of_date" in top.columns and top["as_of_date"].notna().any():
+            as_of = str(top["as_of_date"].dropna().iloc[0])
+        rows = [_row_to_dict(top.iloc[i], i + 1) for i in range(len(top))]
+        result = {
+            "mode": "day_change",
+            "side": side,
+            "limit": limit,
+            "as_of_date": as_of,
+            "session_intraday": _session_day_intraday_active(),
+            "count": len(rows),
+            "data": rows,
+        }
+        _eod_day_cache[cache_key] = (time.time(), result)
+        return result
+    finally:
+        _eod_day_sem.release()
 
 
 def query_volume(

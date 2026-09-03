@@ -1,8 +1,13 @@
 """
-NSE Daily OHLCV Updater — uses yfinance
+NSE Daily OHLCV Updater — Upstox only (no Yahoo on Update path)
 Fetches missing candles since last date in historical_data and appends them.
-On an NSE session day, before 16:00 Asia/Kolkata, re-fetches today's bar (upsert) so
-post-close price changes are visible. After 16:00 IST, new appends only (no forced today refresh).
+On an NSE session day from 09:15–15:30 Asia/Kolkata, re-fetches today's bar (upsert) so
+intraday price changes are visible. Before cash open, target the prior session (today's bar
+cannot exist yet — a full-universe fetch would empty-fail). After 15:30 IST, new appends only
+(no forced today refresh) unless the prior successful run was still before close.
+Skip-if-current compares against the latest available NSE session date (not calendar today),
+so weekend/holiday/pre-open Updates do not re-fetch the full universe when the prior session
+bars are already present.
 See data/nse_calendar.json (Tier A: explicit holidays + weekend special sessions).
 """
 
@@ -15,6 +20,7 @@ import os
 import concurrent.futures
 from pathlib import Path
 from datetime import datetime, timedelta, date, time as dtime
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -55,16 +61,20 @@ def connect_db():
 
 NSE_CALENDAR_PATH = BASE_DIR / "data" / "nse_calendar.json"
 IST = ZoneInfo("Asia/Kolkata")
-SESSION_FINAL_IST = dtime(16, 0)  # after this time, do not force-refresh "today"
+SESSION_OPEN_IST = dtime(9, 15)  # cash open — today's forming bar only exists from here
+SESSION_FINAL_IST = dtime(15, 30)  # after this time, do not force-refresh "today"
 
 BATCH_SIZE          = 50    # yfinance handles bulk well
 RATE_DELAY_MIN      = 0.8
 RATE_DELAY_MAX      = 1.5
+# Faster pacing when a batch succeeded via Upstox only (stay under ~50/s with per-request throttle).
+RATE_DELAY_UPSTOX_MIN = 0.05
+RATE_DELAY_UPSTOX_MAX = 0.15
 MAX_CONSEC_FAILURES = 15
 PAUSE_ON_BLOCK      = 60
 MAX_FAILURE_RATE    = 0.30
-SNAPSHOT_TIMEFRAMES = ("4H", "1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W", "4W", "1M")
-SNAPSHOT_LIGHT_TIMEFRAMES = ("4H", "1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W")
+SNAPSHOT_TIMEFRAMES = ("30m", "4H", "1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W", "4W", "1M")
+SNAPSHOT_LIGHT_TIMEFRAMES = ("30m", "4H", "1D", "2D", "3D", "4D", "5D", "6D", "1W", "2W")
 SNAPSHOT_PARALLEL_MODE = str(os.getenv("FLOWX_SNAPSHOT_PARALLEL_MODE", "auto")).strip().lower()
 if SNAPSHOT_PARALLEL_MODE not in {"auto", "process", "thread"}:
     SNAPSHOT_PARALLEL_MODE = "auto"
@@ -81,11 +91,48 @@ def _normalize_snapshot_families(families) -> frozenset:
     out = {str(f).strip().lower() for f in families if str(f).strip()}
     out = {f for f in out if f in SNAPSHOT_INDICATOR_FAMILIES}
     return frozenset(out) if out else SNAPSHOT_ALL_FAMILIES
-# Incremental rebuild: last N daily bars per symbol (EMA200 + MACD chain + weekly rollups).
+# Incremental rebuild: trailing daily bars per symbol (EMA200 + MACD chain + weekly rollups).
+# 900 daily bars ≈ 191 weekly bars — not enough for EMA200 on 1W; see
+# _min_daily_bars_for_snapshot_timeframes() for per-run requirements.
 SNAPSHOT_INCREMENTAL_MAX_DAILY_BARS = max(
     260,
-    int(os.environ.get("NSE_PULSE_SNAPSHOT_INCREMENTAL_MAX_DAILY_BARS", "900")),
+    int(os.environ.get("NSE_PULSE_SNAPSHOT_INCREMENTAL_MAX_DAILY_BARS", "1100")),
 )
+
+# Longest EMA stored in indicator_snapshots (must stay in sync with build_snapshot_payload).
+SNAPSHOT_MAX_EMA_PERIOD = 200
+SNAPSHOT_EMA_BUFFER_DAYS = 60
+SNAPSHOT_TRADING_DAYS_PER_WEEK = 5
+
+
+def _min_daily_bars_for_snapshot_timeframes(
+    timeframes,
+    max_ema_period: int = SNAPSHOT_MAX_EMA_PERIOD,
+    buffer_days: int = SNAPSHOT_EMA_BUFFER_DAYS,
+) -> int:
+    """
+    Minimum trailing daily OHLC rows so every requested TF can compute ema{max_ema_period}.
+    Incremental rebuild must load at least this many bars or weekly EMA200 stays NULL.
+    """
+    need = max(max_ema_period + buffer_days, 260)
+    for tf in timeframes or ():
+        t = str(tf).strip()
+        if t in ("30m", "4H"):
+            continue
+        if t == "1M":
+            need = max(need, max_ema_period * 21 + buffer_days)
+        elif t.endswith("W"):
+            mult = int(t[:-1]) if t[:-1].isdigit() else 1
+            need = max(
+                need,
+                max_ema_period * mult * SNAPSHOT_TRADING_DAYS_PER_WEEK + buffer_days,
+            )
+        elif t.endswith("D") and t[:-1].isdigit():
+            mult = int(t[:-1])
+            need = max(need, max_ema_period * mult + buffer_days)
+        elif t == "1D":
+            need = max(need, max_ema_period + buffer_days)
+    return need
 
 _SNAPSHOT_FAMILY_FIELDS = {
     "ohlc": [
@@ -226,15 +273,71 @@ def now_ist() -> datetime:
     return datetime.now(IST)
 
 
+def _ist_wall_time(now: datetime) -> datetime:
+    if now.tzinfo is None:
+        return now.replace(tzinfo=IST)
+    return now.astimezone(IST)
+
+
+def after_nse_cash_open(now: datetime) -> bool:
+    """True from 09:15 IST onward (matches upstox_history / movers_live cash-open gate)."""
+    return _ist_wall_time(now).time() >= SESSION_OPEN_IST
+
+
 def session_refresh_enabled(session_day: bool, now: datetime) -> bool:
-    """True = before 16:00 IST on a session day: may upsert today's bar."""
+    """True = 09:15–15:30 IST on a session day: may upsert today's forming bar."""
     if not session_day:
         return False
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=IST)
-    else:
-        now = now.astimezone(IST)
-    return now.time() < SESSION_FINAL_IST
+    now = _ist_wall_time(now)
+    t = now.time()
+    return SESSION_OPEN_IST <= t < SESSION_FINAL_IST
+
+
+def latest_target_ohlcv_session_date(
+    now: datetime,
+    holidays: set,
+    special_sessions: set,
+) -> date:
+    """
+    Latest NSE session date whose daily bar is the skip-if-current target.
+
+    On a session day from cash open onward: that calendar date (mid-session refreshes
+    today's bar via refresh_today; post-close keeps today as the completed target).
+    Before 09:15 IST on a session day, and on weekends/holidays: walk back to the prior
+    session day so a complete prior-session DB is not treated as stale (Upstox has no
+    incomplete daily candle yet, and pre-open quotes must not stamp today).
+    """
+    now = _ist_wall_time(now)
+    d = now.date()
+    if is_nse_session_day(d, holidays, special_sessions) and after_nse_cash_open(now):
+        return d
+    d = d - timedelta(days=1)
+    for _ in range(400):
+        if is_nse_session_day(d, holidays, special_sessions):
+            return d
+        d -= timedelta(days=1)
+    return now.date()
+
+
+def symbol_needs_daily_ohlcv_update(
+    last_d: Optional[date],
+    *,
+    target_session: date,
+    today_ist: date,
+    session_day: bool,
+    refresh_today: bool,
+    force_post_close_refresh: bool = False,
+) -> bool:
+    """True if this symbol should be fetched on the current daily Update pass."""
+    if force_post_close_refresh:
+        return True
+    if last_d is None:
+        return True
+    if last_d < target_session:
+        return True
+    if refresh_today and session_day and last_d == today_ist:
+        return True
+    return False
 
 
 def get_today_ist() -> date:
@@ -390,9 +493,41 @@ def set_last_ohlcv_success_ist(conn, dt_obj: datetime):
 
 def fetch_batch(symbols, start_date, end_date):
     """
-    Fetch OHLCV for a batch of symbols using yfinance bulk download.
-    Returns dict of symbol -> list of (date, o, h, l, c, v)
+    Fetch OHLCV for a batch of symbols — Upstox only (no Yahoo on Update path).
+    Returns (dict of symbol -> list of (date, o, h, l, c, v), status_str).
     """
+    result = {}
+    stats = {"upstox": 0, "yahoo_fallback": 0, "failed": 0}
+
+    try:
+        from server import upstox_config, upstox_history
+
+        if not upstox_config.market_data_enabled():
+            stats["failed"] = len(symbols)
+            fetch_batch.last_stats = stats  # type: ignore[attr-defined]
+            return {}, "empty"
+        ux_map, _ux_stats = upstox_history.fetch_daily_batch(symbols, start_date, end_date)
+        for sym, rows in (ux_map or {}).items():
+            if rows:
+                result[sym] = rows
+                stats["upstox"] += 1
+    except Exception:
+        stats["failed"] = len(symbols)
+        fetch_batch.last_stats = stats  # type: ignore[attr-defined]
+        return {}, "empty"
+
+    for sym in symbols:
+        if sym not in result:
+            stats["failed"] += 1
+
+    fetch_batch.last_stats = stats  # type: ignore[attr-defined]
+    if not result:
+        return {}, "empty"
+    return result, "ok"
+
+
+def _fetch_batch_yfinance(symbols, start_date, end_date):
+    """Yahoo auto_adjust bulk download (fallback)."""
     import yfinance as yf
 
     # Convert NSE symbols to Yahoo format
@@ -413,20 +548,18 @@ def fetch_batch(symbols, start_date, end_date):
     except Exception as e:
         return {}, str(e)
 
-    if df.empty:
+    if df is None or getattr(df, "empty", True):
         return {}, "empty"
 
     result = {}
 
     for sym, yf_sym in zip(symbols, yf_symbols):
         try:
-            if len(symbols) == 1:
-                sym_df = df
-            else:
-                if yf_sym not in df.columns.get_level_values(0):
-                    continue
-                sym_df = df[yf_sym]
-
+            sym_df = _yfinance_symbol_frame(df, yf_sym, single=len(symbols) == 1)
+            if sym_df is None or sym_df.empty:
+                continue
+            if "Close" not in sym_df.columns:
+                continue
             sym_df = sym_df.dropna(subset=["Close"])
             if sym_df.empty:
                 continue
@@ -453,6 +586,53 @@ def fetch_batch(symbols, start_date, end_date):
             continue
 
     return result, "ok"
+
+
+def _yfinance_symbol_frame(df, yf_sym: str, *, single: bool):
+    """
+    Normalize yfinance output to a per-symbol OHLCV frame with flat columns.
+    group_by='ticker' yields MultiIndex columns even for a one-symbol download;
+    dropna(subset=['Close']) then KeyErrors and silently drops the symbol.
+    """
+    if df is None or getattr(df, "empty", True):
+        return None
+    cols = getattr(df, "columns", None)
+    if cols is None:
+        return None
+
+    # Flat columns already (Open/High/Low/Close/Volume)
+    try:
+        flat_names = set(str(c) for c in cols)
+    except Exception:
+        flat_names = set()
+    if "Close" in flat_names and not isinstance(cols, getattr(__import__("pandas"), "MultiIndex")):
+        return df
+
+    import pandas as pd
+
+    if isinstance(cols, pd.MultiIndex):
+        level0 = set(cols.get_level_values(0))
+        # (Ticker, Price) — preferred group_by=ticker shape
+        if yf_sym in level0:
+            return df[yf_sym]
+        # Single-ticker download sometimes nests as (Price, Ticker)
+        if "Close" in level0 and yf_sym in set(cols.get_level_values(1)):
+            out = df.xs(yf_sym, axis=1, level=1)
+            return out
+        if single and "Close" in level0 and len(level0) <= 6:
+            # Only one ticker present under Price-first MultiIndex
+            try:
+                return df.droplevel(1, axis=1)
+            except Exception:
+                pass
+        if single and len(level0) == 1:
+            only = next(iter(level0))
+            return df[only]
+        return None
+
+    if single:
+        return df
+    return None
 
 
 def ensure_indicator_snapshot_table(conn):
@@ -761,7 +941,9 @@ def build_snapshot_payload(symbol, timeframe, candles, families=None):
     return payload
 
 
-def _build_snapshot_rows_for_symbol(sym, candles, allowed_timeframes=None, bars_4h_series=None, families=None):
+def _build_snapshot_rows_for_symbol(
+    sym, candles, allowed_timeframes=None, bars_4h_series=None, bars_30m_series=None, families=None
+):
     rows = []
     allowed = set(allowed_timeframes) if allowed_timeframes else None
     sb = _load_snapshot_bars_module()
@@ -770,6 +952,8 @@ def _build_snapshot_rows_for_symbol(sym, candles, allowed_timeframes=None, bars_
             continue
         if timeframe == "4H":
             series = list(bars_4h_series or [])
+        elif timeframe == "30m":
+            series = list(bars_30m_series or [])
         else:
             series = sb.chart_candles_for_timeframe(candles, timeframe)
         if len(series) < 3:
@@ -780,9 +964,16 @@ def _build_snapshot_rows_for_symbol(sym, candles, allowed_timeframes=None, bars_
     return rows
 
 
-def _build_snapshot_rows_for_chunk(chunk_items, allowed_timeframes=None, bars_4h_by_symbol=None, families=None):
+def _build_snapshot_rows_for_chunk(
+    chunk_items,
+    allowed_timeframes=None,
+    bars_4h_by_symbol=None,
+    families=None,
+    bars_30m_by_symbol=None,
+):
     out = []
     bars_map = bars_4h_by_symbol or {}
+    bars_30m_map = bars_30m_by_symbol or {}
     for sym, candles in chunk_items:
         out.extend(
             _build_snapshot_rows_for_symbol(
@@ -790,6 +981,7 @@ def _build_snapshot_rows_for_chunk(chunk_items, allowed_timeframes=None, bars_4h
                 candles,
                 allowed_timeframes=allowed_timeframes,
                 bars_4h_series=bars_map.get(sym),
+                bars_30m_series=bars_30m_map.get(sym),
                 families=families,
             )
         )
@@ -842,7 +1034,9 @@ def _delete_snapshots_for_symbols(conn, symbols, timeframes):
     )
 
 
-def _compute_snapshot_rows_parallel(items, requested_timeframes, log, bars_4h_by_symbol=None, families=None):
+def _compute_snapshot_rows_parallel(
+    items, requested_timeframes, log, bars_4h_by_symbol=None, families=None, bars_30m_by_symbol=None
+):
     snapshot_rows = []
     if not items:
         return snapshot_rows
@@ -855,7 +1049,11 @@ def _compute_snapshot_rows_parallel(items, requested_timeframes, log, bars_4h_by
 
     def _consume_chunk(chunk):
         rows_chunk, _processed = _build_snapshot_rows_for_chunk(
-            chunk, requested_timeframes, bars_4h_by_symbol, families=families
+            chunk,
+            requested_timeframes,
+            bars_4h_by_symbol,
+            families=families,
+            bars_30m_by_symbol=bars_30m_by_symbol,
         )
         return rows_chunk
 
@@ -867,7 +1065,12 @@ def _compute_snapshot_rows_parallel(items, requested_timeframes, log, bars_4h_by
             with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
                 futures = [
                     pool.submit(
-                        _build_snapshot_rows_for_chunk, c, requested_timeframes, bars_4h_by_symbol, families
+                        _build_snapshot_rows_for_chunk,
+                        c,
+                        requested_timeframes,
+                        bars_4h_by_symbol,
+                        families,
+                        bars_30m_by_symbol,
                     )
                     for c in chunks
                 ]
@@ -878,7 +1081,12 @@ def _compute_snapshot_rows_parallel(items, requested_timeframes, log, bars_4h_by
             with concurrent.futures.ThreadPoolExecutor(max_workers=max(2, workers)) as pool:
                 futures = [
                     pool.submit(
-                        _build_snapshot_rows_for_chunk, c, requested_timeframes, bars_4h_by_symbol, families
+                        _build_snapshot_rows_for_chunk,
+                        c,
+                        requested_timeframes,
+                        bars_4h_by_symbol,
+                        families,
+                        bars_30m_by_symbol,
                     )
                     for c in chunks
                 ]
@@ -888,7 +1096,12 @@ def _compute_snapshot_rows_parallel(items, requested_timeframes, log, bars_4h_by
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(2, workers)) as pool:
             futures = [
                 pool.submit(
-                    _build_snapshot_rows_for_chunk, c, requested_timeframes, bars_4h_by_symbol, families
+                    _build_snapshot_rows_for_chunk,
+                    c,
+                    requested_timeframes,
+                    bars_4h_by_symbol,
+                    families,
+                    bars_30m_by_symbol,
                 )
                 for c in chunks
             ]
@@ -916,9 +1129,15 @@ def _rebuild_indicator_snapshots_incremental_safe(
     load_batch = max(1, min(load_batch, 200))
     symbol_batches = [symbols[i:i + load_batch] for i in range(0, len(symbols), load_batch)]
     n_sym_batches = len(symbol_batches)
+    effective_max_bars = max(
+        int(max_daily_bars),
+        _min_daily_bars_for_snapshot_timeframes(requested_timeframes),
+    )
     log(
         f"Incremental safe path: {n_sym_batches} batch(es) (~{load_batch} symbols), "
-        f"last {max_daily_bars} daily bars/symbol, delete-after-compute per batch."
+        f"last {effective_max_bars} daily bars/symbol "
+        f"(requested {max_daily_bars}, min for TFs {effective_max_bars}), "
+        f"delete-after-compute per batch."
     )
     if progress_callback:
         progress_callback(0, total_syms)
@@ -930,7 +1149,9 @@ def _rebuild_indicator_snapshots_incremental_safe(
 
     for bi, sym_batch in enumerate(symbol_batches):
         t_batch = time.perf_counter()
-        candles_by_symbol = _load_candles_batch(cursor, sym_batch, max_daily_bars=max_daily_bars)
+        candles_by_symbol = _load_candles_batch(
+            cursor, sym_batch, max_daily_bars=effective_max_bars
+        )
         items = list(candles_by_symbol.items())
         bars_4h_batch = {}
         if "4H" in requested_timeframes:
@@ -940,8 +1161,21 @@ def _rebuild_indicator_snapshots_incremental_safe(
                 bars_4h_batch = load_bars_4h_candles_batch(conn, sym_batch)
             except Exception:
                 bars_4h_batch = {}
+        bars_30m_batch = {}
+        if "30m" in requested_timeframes:
+            try:
+                from server.bars_30m import load_bars_30m_candles_batch
+
+                bars_30m_batch = load_bars_30m_candles_batch(conn, sym_batch)
+            except Exception:
+                bars_30m_batch = {}
         snapshot_rows = _compute_snapshot_rows_parallel(
-            items, requested_timeframes, log, bars_4h_by_symbol=bars_4h_batch, families=families
+            items,
+            requested_timeframes,
+            log,
+            bars_4h_by_symbol=bars_4h_batch,
+            families=families,
+            bars_30m_by_symbol=bars_30m_batch,
         )
         if snapshot_rows:
             if not _snapshot_merge_needed(families):
@@ -1109,6 +1343,16 @@ def rebuild_indicator_snapshots_universe(
             except Exception as e4:
                 log(f"[!] 4H snapshot load warning: {e4}")
 
+        bars_30m_by_symbol = {}
+        if "30m" in requested_timeframes:
+            try:
+                from server.bars_30m import load_bars_30m_candles_batch
+
+                bars_30m_by_symbol = load_bars_30m_candles_batch(conn, symbols)
+                log(f"Loaded 30m bars for snapshot rebuild ({len(bars_30m_by_symbol)} symbols).")
+            except Exception as e30:
+                log(f"[!] 30m snapshot load warning: {e30}")
+
         upsert_sql = _SNAPSHOT_UPSERT_SQL
 
         t_compute_start = time.perf_counter()
@@ -1127,7 +1371,11 @@ def rebuild_indicator_snapshots_universe(
         if workers <= 1 or len(chunks) <= 1:
             for chunk in chunks:
                 rows_chunk, processed = _build_snapshot_rows_for_chunk(
-                    chunk, requested_timeframes, bars_4h_by_symbol, families=families
+                    chunk,
+                    requested_timeframes,
+                    bars_4h_by_symbol,
+                    families=families,
+                    bars_30m_by_symbol=bars_30m_by_symbol,
                 )
                 snapshot_rows.extend(rows_chunk)
                 done += processed
@@ -1143,6 +1391,7 @@ def rebuild_indicator_snapshots_universe(
                             requested_timeframes,
                             bars_4h_by_symbol,
                             families,
+                            bars_30m_by_symbol,
                         )
                         for c in chunks
                     ]
@@ -1161,6 +1410,7 @@ def rebuild_indicator_snapshots_universe(
                             requested_timeframes,
                             bars_4h_by_symbol,
                             families,
+                            bars_30m_by_symbol,
                         )
                         for c in chunks
                     ]
@@ -1178,6 +1428,7 @@ def rebuild_indicator_snapshots_universe(
                         requested_timeframes,
                         bars_4h_by_symbol,
                         families,
+                        bars_30m_by_symbol,
                     )
                     for c in chunks
                 ]
@@ -1287,6 +1538,7 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False, 
 
     session_day = is_nse_session_day(today_ist, holidays, special)
     refresh_today = session_refresh_enabled(session_day, ist_clock)
+    target_session = latest_target_ohlcv_session_date(ist_clock, holidays, special)
     last_success_ist = get_last_ohlcv_success_ist(conn)
     force_post_close_refresh = (
         session_day
@@ -1298,37 +1550,49 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False, 
 
     log(
         f"IST now: {ist_clock.strftime('%Y-%m-%d %H:%M')} — "
-        f"session_day={session_day}, refresh_today_until_16_IST={refresh_today}, "
+        f"session_day={session_day}, target_session={target_session.isoformat()}, "
+        f"refresh_today_0915_1530_IST={refresh_today}, "
         f"force_post_close_refresh={force_post_close_refresh}"
     )
     if last_success_ist is not None:
         log(f"Last successful OHLCV run (IST): {last_success_ist.strftime('%Y-%m-%d %H:%M:%S')}")
 
+    universe_syms = get_all_screener_symbols(conn)
     to_update = {}
     if force_post_close_refresh:
         # If the prior run was before close, force-refresh today's bar for all symbols.
         anchor = datetime.combine(today_ist, datetime.min.time())
-        for sym in get_all_screener_symbols(conn):
+        for sym in universe_syms:
             to_update[sym] = anchor
     else:
         for sym, dt in last_dates.items():
             last_d = dt.date() if hasattr(dt, "date") else dt
-            if last_d < today_ist:
-                to_update[sym] = dt
-            elif refresh_today and session_day and last_d == today_ist:
+            if symbol_needs_daily_ohlcv_update(
+                last_d,
+                target_session=target_session,
+                today_ist=today_ist,
+                session_day=session_day,
+                refresh_today=refresh_today,
+            ):
                 to_update[sym] = dt
         # Screener symbols with no historical_data yet (never picked up by incremental-only loop)
         hist_syms = set(last_dates.keys())
-        for sym in get_all_screener_symbols(conn):
+        for sym in universe_syms:
             if sym not in hist_syms and sym not in to_update:
                 to_update[sym] = datetime(1989, 12, 31)
 
+    skipped_current = sum(1 for s in universe_syms if s not in to_update)
     if not to_update:
-        log("All symbols are up to date.")
+        log(f"All symbols are up to date (skipped_current={skipped_current}).")
         conn.close()
-        return {"updated": 0, "bhav_screener_written": 0}
+        return {
+            "updated": 0,
+            "bhav_screener_written": 0,
+            "skipped_current": skipped_current,
+            "fetch_stats": {"upstox": 0, "yahoo_fallback": 0, "nse": 0, "failed": 0},
+        }
 
-    log(f"Found {len(to_update)} symbols needing updates.")
+    log(f"Found {len(to_update)} symbols needing updates ({skipped_current} already current).")
 
     symbols  = list(to_update.keys())
     total    = len(symbols)
@@ -1341,19 +1605,28 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False, 
     for sym, last_dt in to_update.items():
         last_d = last_dt.date() if hasattr(last_dt, "date") else last_dt
         if force_post_close_refresh:
-            from_dt = datetime.combine(today_ist, datetime.min.time())
+            # Re-pull today's bar when current; otherwise backfill from day after last bar
+            # (EQ-only Upstox maps used to leave T2T/BE symbols months behind — today's-only
+            # fetch would permanently leave a hole between last_d and today).
+            if last_d < today_ist:
+                from_dt = datetime.combine(last_d + timedelta(days=1), datetime.min.time())
+            else:
+                from_dt = datetime.combine(today_ist, datetime.min.time())
         elif refresh_today and session_day and last_d == today_ist:
             from_dt = datetime.combine(today_ist, datetime.min.time())
         else:
             from_dt = last_dt + timedelta(days=1)
+            if hasattr(from_dt, "date") and getattr(from_dt, "tzinfo", None) is not None:
+                from_dt = datetime.combine(from_dt.date(), datetime.min.time())
         key = from_dt.strftime("%Y-%m-%d")
         date_groups.setdefault(key, []).append(sym)
 
     log(f"Date groups: {len(date_groups)} unique start dates")
-    log(f"Fetching new candles using yfinance...\n")
+    log(f"Fetching new candles (Upstox only)...\n")
 
     processed = 0
     today_iso = today_ist.strftime("%Y-%m-%d")
+    fetch_totals = {"upstox": 0, "yahoo_fallback": 0, "nse": 0, "failed": 0}
 
     for from_str, group_symbols in date_groups.items():
         from_dt = datetime.strptime(from_str, "%Y-%m-%d")
@@ -1368,9 +1641,30 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False, 
                 if fail_rate > MAX_FAILURE_RATE:
                     log(f"\n⚠ Failure rate {fail_rate:.0%} exceeds threshold. Stopping to protect connection.")
                     conn.close()
-                    return {"updated": updated, "bhav_screener_written": 0}
+                    return {
+                        "updated": updated,
+                        "bhav_screener_written": 0,
+                        "skipped_current": skipped_current,
+                        "fetch_stats": fetch_totals,
+                    }
 
             result, status = fetch_batch(batch, from_dt, today_end)
+            batch_stats = getattr(fetch_batch, "last_stats", None) or {}
+            for k in ("upstox", "yahoo_fallback", "failed"):
+                fetch_totals[k] = fetch_totals.get(k, 0) + int(batch_stats.get(k) or 0)
+            batch_upstox = int(batch_stats.get("upstox") or 0)
+            batch_yahoo = int(batch_stats.get("yahoo_fallback") or 0)
+            batch_failed = int(batch_stats.get("failed") or 0)
+            batch_today_q = int(batch_stats.get("today_quote") or 0)
+            if batch_today_q:
+                log(f"  Upstox session-day quotes filled {batch_today_q} symbol(s)")
+            if batch_failed:
+                log(f"  Upstox miss (no Yahoo): {batch_failed} symbol(s) in batch")
+            log(
+                f"Source: batch Upstox={batch_upstox} failed={batch_failed} | "
+                f"totals Upstox={fetch_totals.get('upstox', 0)} "
+                f"failed={fetch_totals.get('failed', 0)} | skipped_current={skipped_current}"
+            )
 
             if status not in ("ok", "empty"):
                 log(f"⚠ Batch error: {status}. Pausing...")
@@ -1378,6 +1672,7 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False, 
                 consec_failures += len(batch)
                 failed          += len(batch)
             else:
+                batch_successes = 0
                 for sym in batch:
                     if sym in result and result[sym]:
                         rows = result[sym]
@@ -1389,10 +1684,14 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False, 
                             overwrite=((refresh_today and session_day and touches_today) or (force_post_close_refresh and touches_today)),
                         )
                         updated         += 1
-                        consec_failures  = 0
+                        batch_successes += 1
                     else:
-                        skipped         += 1
-                        consec_failures += 1
+                        skipped += 1
+                if batch_successes > 0:
+                    consec_failures = 0
+                else:
+                    # One empty batch = one strike (not per-symbol) — tail delisteds shouldn't trigger 60s pause.
+                    consec_failures += 1
 
             if consec_failures >= MAX_CONSEC_FAILURES:
                 log(f"⚠ {MAX_CONSEC_FAILURES} consecutive failures. Pausing {PAUSE_ON_BLOCK}s...")
@@ -1412,7 +1711,13 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False, 
             if progress_callback:
                 progress_callback(processed, total)
 
-            sleep_interruptible(random.uniform(RATE_DELAY_MIN, RATE_DELAY_MAX), cancel_check=cancel_check)
+            # Short delay — Update path is Upstox-only.
+            upstox_only = batch_yahoo == 0 and status in ("ok", "empty")
+            if upstox_only:
+                delay = random.uniform(RATE_DELAY_UPSTOX_MIN, RATE_DELAY_UPSTOX_MAX)
+            else:
+                delay = random.uniform(RATE_DELAY_MIN, RATE_DELAY_MAX)
+            sleep_interruptible(delay, cancel_check=cancel_check)
 
     _check_cancel()
     log("\nReconciling screener price/1D% from NSE bhavcopy (charts unchanged)...")
@@ -1495,8 +1800,17 @@ def run(progress_callback=None, message_callback=None, refresh_snapshots=False, 
 
     set_last_ohlcv_success_ist(conn, now_ist())
     conn.close()
-    log(f"\n✓ Done. Updated: {updated} | Skipped: {skipped} | Failed: {failed}")
-    return {"updated": updated, "bhav_screener_written": int(bhav_written or 0)}
+    log(
+        f"\n✓ Done. Updated: {updated} | Skipped: {skipped} | Failed: {failed} | "
+        f"skipped_current={skipped_current} | "
+        f"Upstox: {fetch_totals.get('upstox', 0)} | failed: {fetch_totals.get('failed', 0)}"
+    )
+    return {
+        "updated": updated,
+        "bhav_screener_written": int(bhav_written or 0),
+        "skipped_current": skipped_current,
+        "fetch_stats": fetch_totals,
+    }
 
 
 if __name__ == "__main__":

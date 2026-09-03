@@ -30,6 +30,14 @@ class KnowledgeBaseTests(unittest.TestCase):
             self.assertEqual(loaded["title"], "Test Dashboard")
             self.assertEqual(loaded["sections"][0]["paragraphs"], ["First paragraph.", "Second paragraph."])
 
+    def test_funds_page_has_its_own_content(self):
+        self.assertIn("funds", kb.KB_PAGE_IDS)
+        page = kb.default_page("funds")
+        self.assertEqual(page["title"], "Funds")
+        text = " ".join(p for s in page["sections"] for p in s["paragraphs"])
+        self.assertIn("AMFI", text)
+        self.assertNotIn("NSE Dashboard is Charts In Motion's primary stock screener", text)
+
     def test_unknown_guide_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):

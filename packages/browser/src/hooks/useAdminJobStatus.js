@@ -70,12 +70,25 @@ export default function useAdminJobStatus({
     pendingStartRef.current = true;
     pendingStartUntilRef.current = Date.now() + 60000;
     setIsPendingStart(true);
-    await axios.post(`${API}${path}`, null, config);
+    const r = await axios.post(`${API}${path}`, null, config);
     startPolling();
+    return r?.data || null;
   }, [startPolling]);
 
   const startOhlcvUpdate = useCallback(async () => {
     await startAdminJob('/api/admin/fetch-ohlcv');
+  }, [startAdminJob]);
+
+  const startRepairIndexChartGaps = useCallback(async () => {
+    await startAdminJob('/api/admin/repair-index-chart-gaps');
+  }, [startAdminJob]);
+
+  const startBuildBars4h = useCallback(async () => {
+    await startAdminJob('/api/admin/build-bars-4h');
+  }, [startAdminJob]);
+
+  const startBuildBars30m = useCallback(async () => {
+    await startAdminJob('/api/admin/build-bars-30m');
   }, [startAdminJob]);
 
   const startIndicatorSnapshotsUpdate = useCallback(async (daysBack = 1, options = {}) => {
@@ -135,6 +148,16 @@ export default function useAdminJobStatus({
     }
   }, [isPendingStart, pollOnce, status?.running]);
 
+  const cancelQueuedJob = useCallback(async (id) => {
+    await axios.post(`${API}/api/admin/job-queue/cancel`, { id });
+    return pollOnce();
+  }, [pollOnce]);
+
+  const clearJobQueue = useCallback(async () => {
+    await axios.post(`${API}/api/admin/job-queue/cancel`, { clear: true });
+    return pollOnce();
+  }, [pollOnce]);
+
   useEffect(() => {
     if (autoStart) startPolling();
     return () => stopPolling();
@@ -146,11 +169,15 @@ export default function useAdminJobStatus({
     isPendingStart,
     isCancelling: isCancelling || !!status?.cancel_requested,
     percent: status?.percent || 0,
+    queued: Array.isArray(status?.queued) ? status.queued : [],
     startPolling,
     stopPolling,
     refreshStatus,
     startAdminJob,
     startOhlcvUpdate,
+    startRepairIndexChartGaps,
+    startBuildBars4h,
+    startBuildBars30m,
     startIndicatorSnapshotsUpdate,
     startSplitAdjustmentsApplyPending,
     startSplitAdjustmentsScanFirst,
@@ -158,5 +185,7 @@ export default function useAdminJobStatus({
     fetchSplitWatchStatus,
     startRefreshShareCounts,
     cancelAdminJob,
+    cancelQueuedJob,
+    clearJobQueue,
   };
 }

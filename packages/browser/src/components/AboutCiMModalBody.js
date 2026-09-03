@@ -59,10 +59,10 @@ export default function AboutCiMModalBody() {
         </p>
         <p style={{ ...paragraphStyle, marginBottom: 0 }}>
           Updates are not live by default. Quotes, OHLC, and most tables refresh when you run a
-          refresh or when background data jobs have been run on your machine. The only section with
-          optional live polling today is Market Movers (when Live refresh is enabled). Even then,
-          prices can be delayed, incomplete, or stale — especially outside market hours or after a
-          failed refresh.
+          refresh or when background data jobs have been run on your machine. Market Movers can
+          show tick-by-tick ranks when the floating LIVE control is on (full-universe Upstox feed).
+          Even then, prices can be delayed, incomplete, or stale — especially outside market hours
+          or after a failed connection.
         </p>
       </section>
 

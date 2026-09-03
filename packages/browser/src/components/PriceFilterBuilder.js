@@ -19,7 +19,7 @@ const TARGETS = [
 ];
 
 const TIMEFRAME_GROUPS = {
-  D: ['4H','1D','2D','3D','4D','5D','6D','7D'],
+  D: ['30m','4H','1D','2D','3D','4D','5D','6D','7D'],
   W: ['1W','2W','3W','4W'],
   M: ['1M','2M','3M','4M','5M','6M','7M','8M','9M','10M','11M','12M'],
 };
@@ -151,7 +151,7 @@ export default function PriceFilterBuilder({ onApply, onCancel, initialValues })
               ))}
             </div>
             <div style={{ fontSize:10, color:'var(--text-muted)', marginTop:6 }}>
-              Price source = last candle close · Open / High / Low = last candle of this timeframe
+              Price source = last close · 2D–6D Open/High/Low = last N sessions · 1W/1M = chart bar
             </div>
           </div>
 
